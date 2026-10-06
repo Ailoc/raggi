@@ -3,8 +3,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..sql import (chunk_defaults, escape_sql, fill_missing, now_iso,
-                   quote_in, scalar_rows, table_columns)
+from ..sql import (
+    chunk_defaults,
+    escape_sql,
+    fill_missing,
+    now_iso,
+    quote_in,
+    scalar_rows,
+    table_columns,
+)
 
 if TYPE_CHECKING:
     from ..tables import LanceStore

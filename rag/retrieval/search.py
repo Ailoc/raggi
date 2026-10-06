@@ -24,12 +24,11 @@ import time
 from lancedb.rerankers import RRFReranker
 
 from rag.core.config import RetrieveConfig
-from rag.retrieval.highlight import make_snippet
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment
+from rag.retrieval.highlight import make_snippet
+from rag.storage.repos import contexts_for, docs_query, escape_sql, fetch_rows
 from rag.storage.tables import LanceStore
-from rag.storage.repos import (contexts_for, docs_query, escape_sql,
-                               fetch_rows)
 
 logger = logging.getLogger("raggi.retrieve")
 

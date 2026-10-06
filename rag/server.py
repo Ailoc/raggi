@@ -175,8 +175,7 @@ def main() -> None:
         # 让运维能**先看一眼再切**：升级前跑一次 `rag migrate --check`，
         # 行数不一致就先去备份，而不是等启动日志里报错。
         from rag.storage.backend import build_backend
-        from rag.storage.meta import (import_from_lance, needs_import,
-                                      open_meta_store)
+        from rag.storage.meta import import_from_lance, needs_import, open_meta_store
         from rag.storage.tables import LanceStore
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)

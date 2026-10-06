@@ -211,7 +211,8 @@ def test_alias_requires_auth_when_enabled():
 
     from fastapi.testclient import TestClient as _TC
 
-    from rag.api import Ctx, create_app as _ca
+    from rag.api import Ctx
+    from rag.api import create_app as _ca
     from rag.core.config import Settings as _S
     from rag.models.registry import ModelRegistry as _MR
     from rag.storage.tables import LanceStore as _LS

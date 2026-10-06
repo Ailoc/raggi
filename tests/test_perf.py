@@ -9,9 +9,7 @@ import time
 from pathlib import Path
 
 from rag.chunk_edit import add_manual_chunk
-from rag.core.config import (EmbedConfig, LLMConfig, ParserConfig,
-                         RerankConfig, RetrieveConfig, Settings,
-                         SplitConfig)
+from rag.core.config import ParserConfig, RetrieveConfig, Settings, SplitConfig
 from rag.ingest import pipeline
 from rag.models.registry import ModelRegistry
 from rag.retrieval.search import search
@@ -100,7 +98,6 @@ def test_search_correctness_after_pandas_removal():
     """去 pandas 后检索结果字段完整且正确。"""
     with tempfile.TemporaryDirectory() as d:
         store = LanceStore.for_data_dir(Path(d), 4)
-        vec = [1.0, 0.0, 0.0, 0.0]
         for i in range(5):
             add_manual_chunk(store, _StubEmbedder(),
                              f"检索正确性测试块 {i}")
@@ -216,10 +213,15 @@ def test_split_config_applied():
         res = pipeline.ingest_text(
             store, reg, long_text, "切分测试",
             ParserConfig(), s)
+        # 入库本身也要断言：只验证 _build_chunk_rows 的话，pipeline 里
+        # 「用哪份 split 配置」这条路径其实没被覆盖（而这正是本条测试的名字）
+        assert res["status"] == "ready", res
+        assert res["chunk_count"] > 1, "200 句长文本按 64 尺寸应切成多块"
         # 覆盖 pipeline 内 split_cfg 默认：直接验证 _run 使用传入配置
+        from langchain_core.documents import Document
+
         from rag.ingest.pipeline import _build_chunk_rows
         from rag.parsing.normalize import normalize
-        from langchain_core.documents import Document
 
         parsed = normalize(
             [Document(page_content=long_text, metadata={})])

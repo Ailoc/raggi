@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -114,7 +113,6 @@ def test_every_backend_endpoint_is_documented(app_paths, doc_entries):
 
 def test_paths_are_normalized(doc_entries, app_paths):
     """文档与后端的路径写法应完全一致（参数名不同也算漂移）。"""
-    doc = {(m, p) for m, p in doc_entries}
     # FastAPI 会把 {kb_id} 保留原样，这里只比较格式差异的常见来源
     for m, p in doc_entries:
         assert p.startswith("/api/v1/"), f"{m} {p} 不在 /api/v1 前缀下"

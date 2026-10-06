@@ -6,13 +6,24 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from rag.api._common import get_ctx, scalar_dict
-from rag.api.responses import (ChunkBatchEditedOut, ChunkBatchEnabledOut,
-                               ChunkCreatedOut, ChunkEditedOut,
-                               ChunkEnabledOut, ChunkListOut, ChunkOut, OkOut,
-                               error_responses)
-from rag.api.schemas import (ChunkAddReq, ChunkBatchEditReq,
-                             ChunkBatchEnabledReq, ChunkEditReq,
-                             ChunkEnabledReq)
+from rag.api.responses import (
+    ChunkBatchEditedOut,
+    ChunkBatchEnabledOut,
+    ChunkCreatedOut,
+    ChunkEditedOut,
+    ChunkEnabledOut,
+    ChunkListOut,
+    ChunkOut,
+    OkOut,
+    error_responses,
+)
+from rag.api.schemas import (
+    ChunkAddReq,
+    ChunkBatchEditReq,
+    ChunkBatchEnabledReq,
+    ChunkEditReq,
+    ChunkEnabledReq,
+)
 from rag.chunk_edit import (
     add_manual_chunk,
     batch_edit_chunks,
@@ -23,8 +34,7 @@ from rag.chunk_edit import (
     set_chunks_enabled,
 )
 from rag.core.errors import EditConflict
-from rag.storage.repos import (count_rows, escape_like,
-                              escape_sql, scalar_rows)
+from rag.storage.repos import count_rows, escape_like, escape_sql, scalar_rows
 
 router = APIRouter(
     tags=["chunks"],

@@ -4,15 +4,14 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from rag.chunk_edit import (add_manual_chunk, set_chunk_enabled)
-from rag.core.config import ParserConfig, Settings, SplitConfig
+from rag.chunk_edit import add_manual_chunk, set_chunk_enabled
+from rag.core.config import ParserConfig, RetrieveConfig, Settings, SplitConfig
 from rag.ingest import pipeline
 from rag.models.registry import ModelRegistry
 from rag.retrieval.search import search
 from rag.storage import plan as chunking
 from rag.storage.repos import kbs
 from rag.storage.tables import LanceStore
-from rag.core.config import RetrieveConfig
 
 
 class _StubEmbedder:
@@ -119,7 +118,7 @@ def test_chunks_carry_kb_id():
 
 
 def test_standalone_chunk_has_empty_doc_id_and_kb_id():
-    store, s = _store(), _settings()
+    store = _store()
     kb = kbs.create_kb(store, "库")
     cid = add_manual_chunk(store, _StubEmbedder(), "独立分块内容", None,
                            kb["kb_id"])
@@ -133,7 +132,7 @@ def test_standalone_chunk_has_empty_doc_id_and_kb_id():
 
 
 def test_disabled_chunk_excluded_from_search():
-    store, s = _store(), _settings()
+    store = _store()
     cid = add_manual_chunk(store, _StubEmbedder(), "可被检索到的独特词元")
     res = search(store, _StubEmbedder(), None, "独特词元",
                  RetrieveConfig(mode="fts", top_k=5))

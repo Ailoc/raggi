@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---- 引擎选择（router.choose_engine）--------------------------------
 
 
@@ -64,7 +63,7 @@ def test_choose_engine_is_case_insensitive_on_ext():
 def test_allowed_engines_covers_every_fallback_target():
     """回退链里的每个引擎都必须在白名单内，否则请求级覆盖能选到
     一个回退链未定义的目标（route 里 _FALLBACK.get 返回 [] → 直接失败）。"""
-    from rag.parsing.router import ALLOWED_ENGINES, _FALLBACK
+    from rag.parsing.router import _FALLBACK, ALLOWED_ENGINES
 
     for head, chain in _FALLBACK.items():
         assert head in ALLOWED_ENGINES, f"{head} 不在白名单"
@@ -232,7 +231,7 @@ def test_split_preserves_all_content():
 
 def test_heading_path_is_nested_by_level():
     """标题路径应按层级嵌套，高级标题重置前缀。"""
-    from rag.ingest.splitter import heading_path_for, _headings
+    from rag.ingest.splitter import _headings, heading_path_for
 
     text = "# A\n\n内容\n\n## A1\n\n内容\n\n### A1a\n\n内容\n\n## A2\n\n内容"
     hs = _headings(text)
@@ -245,7 +244,7 @@ def test_heading_path_is_nested_by_level():
 
 def test_heading_path_uses_nearest_preceding_heading():
     """偏移落在标题行本身时，该标题就生效（offset > start 才 break）。"""
-    from rag.ingest.splitter import heading_path_for, _headings
+    from rag.ingest.splitter import _headings, heading_path_for
 
     hs = _headings("# A\n\n内容")
     assert heading_path_for(hs, 0) == "A"

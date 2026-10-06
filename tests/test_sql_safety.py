@@ -20,8 +20,13 @@ import pytest
 
 from rag.core.errors import Invalid
 from rag.storage.meta import DDL, MetaStore
-from rag.storage.repos import (docs_count, docs_query, get_documents,
-                               list_documents, upsert_documents)
+from rag.storage.repos import (
+    docs_count,
+    docs_query,
+    get_documents,
+    list_documents,
+    upsert_documents,
+)
 from rag.storage.sql import only_cols
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,7 +42,6 @@ def _store(tmp_path, *, with_meta: bool):
     刻意不经 API/入库：这里要测的是 SQL 文本层，用假 embedding 只会让
     失败原因变得难以归位。
     """
-    from rag.storage.backend import LocalBackend
     from rag.storage.tables import LanceStore
 
     store = LanceStore.for_data_dir(tmp_path, 4)
@@ -277,6 +281,39 @@ def test_sql_text_helpers_do_not_spread_outside_storage():
         f"新的模块开始自己拼 SQL 了：{sorted(found - allowed)}。"
         "正确做法是在 rag/storage/repos/ 里加一个意图型函数"
         "（参考 docs_query / kbs_query：传意图，不传 SQL 文本）")
+
+
+def test_engine_dispatch_has_exactly_one_implementation():
+    """「该读哪个引擎」这个问题的实现必须只有一处。
+
+    改造期间四个仓储模块各写了一份 `def _meta(store): return getattr(store,
+    "meta", None)`。形状一致，但没有强制 —— 任何一处写成 `store.meta` 直接
+    访问、或把属性名打错一个字母，都会**静默走回退路径**，
+    而「静默走回退」正是无鉴权事故与分裂读事故的共同根因
+    （见 docs/ARCH-AUDIT-2026-10-06.md §1.1）。
+
+    这条测试不防止「分派逻辑写错」，它防止的是**分派逻辑被复制**：
+    复制之后，改一处漏三处就只是时间问题。
+    """
+    repos = ROOT / "rag" / "storage" / "repos"
+    engine_src = (repos / "_engine.py").read_text(encoding="utf-8")
+    assert re.search(r"^def meta_of\(", engine_src, re.M), \
+        "_engine.py 里必须就是那个唯一的分派实现"
+
+    # 除 _engine.py 之外，任何仓储模块都不许自带一份分派
+    copies = sorted(p.name for p in repos.glob("*.py")
+                    if p.name != "_engine.py"
+                    and re.search(r"^(def _meta\(|\s*def meta_of\()",
+                                  p.read_text(encoding="utf-8"), re.M))
+    assert copies == [], (
+        f"又出现了本地的引擎分派副本：{copies}；请改成 "
+        "from ._engine import meta_of as _meta")
+
+    # 而且所有仓储模块都必须真的引用它（漏一个就等于那条路径没分派）
+    for name in ("documents.py", "jobs.py", "kbs.py", "keys.py"):
+        src = (repos / name).read_text(encoding="utf-8")
+        assert "meta_of as _meta" in src, f"{name} 没有走统一分派"
+        assert 'getattr(store, "meta"' not in src, f"{name} 绕过分派点自己取"
 
 
 def test_settings_fields_are_actually_read():

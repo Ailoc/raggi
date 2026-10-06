@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
 
-from rag.storage.tables import LanceStore
-from rag.storage.repos import upsert_chunks, upsert_documents
 from rag.retrieval.search import search
 from rag.storage.health import health
+from rag.storage.repos import upsert_chunks, upsert_documents
+from rag.storage.tables import LanceStore
 
 
 class _StubEmbedder:

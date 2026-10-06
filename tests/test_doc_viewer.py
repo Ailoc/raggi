@@ -25,8 +25,8 @@ SRC = WEB / "src"
 
 def test_legacy_meta_kb_id_migrates_to_column(tmp_path):
     """老数据把 kb_id 存在 meta JSON 里，迁移必须把它搬进真实列。"""
-    from rag.storage.tables import LanceStore
     from rag.storage.repos import fetch_rows, upsert_documents
+    from rag.storage.tables import LanceStore
 
     store = LanceStore.for_data_dir(tmp_path, 4)
     upsert_documents(store, [
@@ -49,8 +49,8 @@ def test_legacy_meta_kb_id_migrates_to_column(tmp_path):
 
 def test_migration_is_idempotent(tmp_path):
     """重复迁移不改变结果（服务每次启动都会调用）。"""
-    from rag.storage.tables import LanceStore
     from rag.storage.repos import fetch_rows, upsert_documents
+    from rag.storage.tables import LanceStore
 
     store = LanceStore.for_data_dir(tmp_path, 4)
     upsert_documents(store, [{
@@ -65,8 +65,8 @@ def test_migration_is_idempotent(tmp_path):
 
 def test_migration_does_not_overwrite_column(tmp_path):
     """列里已有值时以列为准，不被 meta 里的旧值覆盖。"""
-    from rag.storage.tables import LanceStore
     from rag.storage.repos import fetch_rows, upsert_documents
+    from rag.storage.tables import LanceStore
 
     store = LanceStore.for_data_dir(tmp_path, 4)
     upsert_documents(store, [{
@@ -83,8 +83,8 @@ def test_upsert_documents_fills_missing_columns(tmp_path):
     都会撞上 Arrow 的 partial-schema 报错。分块早就有这个兜底，
     文档表必须有同一套机制。
     """
-    from rag.storage.tables import LanceStore
     from rag.storage.repos import fetch_rows, upsert_documents
+    from rag.storage.tables import LanceStore
 
     store = LanceStore.for_data_dir(tmp_path, 4)
     # 故意不传 kb_id / stored_file / meta 等后来新增的列
@@ -305,12 +305,11 @@ def test_signed_url_rejects_expired(client):
 
 def test_signer_ttl_floor():
     """ttl 下限钳到 1 秒：避免签出「立即过期」的不可用链接。"""
+    import tempfile
     import time
+    from pathlib import Path
 
     from rag.core.signing import UrlSigner
-
-    import tempfile
-    from pathlib import Path
 
     s = UrlSigner(Path(tempfile.mkdtemp()))
     exp, _ = s.sign("d", ttl=-999)

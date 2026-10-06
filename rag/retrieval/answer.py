@@ -15,8 +15,8 @@ from typing import AsyncIterator
 from rag.core.config import RetrieveConfig
 from rag.models.embeddings import Embedder
 from rag.retrieval.search import search
-from rag.storage.tables import LanceStore
 from rag.storage.repos import escape_sql, fetch_rows
+from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.answer")
 

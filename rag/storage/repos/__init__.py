@@ -8,18 +8,51 @@
 """
 from __future__ import annotations
 
-from ..sql import (count_rows, escape_like, escape_sql, fetch_rows,
-                   now_iso, quote_in, scalar, scalar_row, scalar_rows)
-from .chunks import (contexts_for, delete_chunk, delete_kb_chunks,
-                     doc_chunk_index, get_chunk, texts_by_id,
-                     update_chunk_text, upsert_chunks)
-from .documents import (delete_document, delete_documents, docs_count,
-                        docs_query, find_by_hash, get_document,
-                        get_documents, list_documents, set_doc_fields,
-                        stored_file, update_metadata, upsert_documents)
+from ..sql import (
+    count_rows,
+    escape_like,
+    escape_sql,
+    fetch_rows,
+    now_iso,
+    quote_in,
+    scalar,
+    scalar_row,
+    scalar_rows,
+)
+from .chunks import (
+    contexts_for,
+    delete_chunk,
+    delete_kb_chunks,
+    doc_chunk_index,
+    get_chunk,
+    texts_by_id,
+    update_chunk_text,
+    upsert_chunks,
+)
+from .documents import (
+    delete_document,
+    delete_documents,
+    docs_count,
+    docs_query,
+    find_by_hash,
+    get_document,
+    get_documents,
+    list_documents,
+    set_doc_fields,
+    stored_file,
+    update_metadata,
+    upsert_documents,
+)
 from .jobs import add_job, get_job, is_terminal, list_jobs, prune_jobs, set_job
-from .kbs import (create_kb, delete_kb, doc_ids_in_kb, get_kb, kbs_query,
-                  list_kbs, set_kb_fields)
+from .kbs import (
+    create_kb,
+    delete_kb,
+    doc_ids_in_kb,
+    get_kb,
+    kbs_query,
+    list_kbs,
+    set_kb_fields,
+)
 
 # 兼容旧名：delete_doc 现在叫 delete_document（语义更明确）
 delete_doc = delete_document

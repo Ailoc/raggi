@@ -25,10 +25,9 @@ from __future__ import annotations
 import json
 import logging
 
-from .repos import (docs_query, get_document, kbs_query,
-                  set_doc_fields,
-                  set_kb_fields)
-from .sql import escape_sql, fetch_rows, scalar as _scalar
+from .repos import docs_query, get_document, kbs_query, set_doc_fields, set_kb_fields
+from .sql import escape_sql, fetch_rows
+from .sql import scalar as _scalar
 from .tables import LanceStore
 
 logger = logging.getLogger("raggi.plan")

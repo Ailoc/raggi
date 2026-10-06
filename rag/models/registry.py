@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rag.core.config import RerankConfig, Settings, LLMConfig, EmbedConfig
+from rag.core.config import EmbedConfig, LLMConfig, RerankConfig, Settings
 from rag.models.chat import build_chat
 from rag.models.embeddings import Embedder, build_embedder
 from rag.models.rerank import build_reranker

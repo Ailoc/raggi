@@ -19,12 +19,11 @@ import asyncio
 from fastapi import APIRouter, Request
 
 from rag.api._common import get_ctx
-from rag.api.responses import (HealthOut, OkOut, ReconcileOut, RollbackOut,
-                               StatsOut, VersionsOut)
+from rag.api.responses import HealthOut, OkOut, ReconcileOut, RollbackOut, StatsOut, VersionsOut
 from rag.api.schemas import RollbackReq
 from rag.core.cache import TTLCache
-from rag.storage.repos import kbs
 from rag.storage.health import health
+from rag.storage.repos import kbs
 
 router = APIRouter(tags=["system"])
 

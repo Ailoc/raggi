@@ -18,9 +18,19 @@ from typing import TYPE_CHECKING
 
 from rag.core.errors import Invalid
 
-from ..sql import (count_rows, doc_defaults, escape_like, escape_sql,
-                   fill_missing, now_iso, only_cols, scalar_row, scalar_rows,
-                   table_columns)
+from ..sql import (
+    count_rows,
+    doc_defaults,
+    escape_like,
+    escape_sql,
+    fill_missing,
+    now_iso,
+    only_cols,
+    scalar_row,
+    scalar_rows,
+    table_columns,
+)
+from ._engine import meta_of as _meta
 
 if TYPE_CHECKING:
     from ..tables import LanceStore
@@ -37,14 +47,8 @@ DETAIL_COLS = ["doc_id", "title", "source_uri", "mime", "parser_engine",
 # 入库去重只需要这几列就能判定命中了哪篇文档；**绝不含 text**（见 find_by_hash）
 DEDUP_COLS = ["doc_id", "title", "chunk_count", "status", "kb_id"]
 
-
 def _fill_doc_defaults(store: "LanceStore", rows: list[dict]) -> list[dict]:
     return fill_missing(rows, table_columns(store.documents), doc_defaults())
-
-
-def _meta(store: "LanceStore"):
-    return getattr(store, "meta", None)
-
 
 def _sql_where(**eq) -> tuple[str, tuple]:
     """等值条件拼成参数化 WHERE（None 的键跳过）。"""
@@ -54,7 +58,6 @@ def _sql_where(**eq) -> tuple[str, tuple]:
             parts.append(f"{k}=?")
             vals.append(v)
     return (" WHERE " + " AND ".join(parts) if parts else ""), tuple(vals)
-
 
 def upsert_documents(store: "LanceStore", rows: list[dict]) -> None:
     """按 doc_id 幂等写入/更新文档。"""
@@ -70,11 +73,9 @@ def upsert_documents(store: "LanceStore", rows: list[dict]) -> None:
      .when_not_matched_insert_all()
      .execute(_fill_doc_defaults(store, rows)))
 
-
 def get_document(store: "LanceStore", doc_id: str) -> dict | None:
     rows = docs_query(store, DETAIL_COLS, eq={"doc_id": doc_id}, limit=1)
     return scalar_row(rows[0]) if rows else None
-
 
 def get_documents(store: "LanceStore", doc_ids, cols=None) -> dict[str, dict]:
     """批量取多篇文档的指定列，返回 doc_id → row。
@@ -88,7 +89,6 @@ def get_documents(store: "LanceStore", doc_ids, cols=None) -> dict[str, dict]:
     rows = docs_query(store, cols or ["doc_id", "title"], ids=ids)
     return {str(r.get("doc_id")): scalar_row(r) for r in rows}
 
-
 def find_by_hash(store: "LanceStore", content_hash: str) -> list[dict]:
     """按内容哈希查重（content_hash 有标量索引）。
 
@@ -96,7 +96,6 @@ def find_by_hash(store: "LanceStore", content_hash: str) -> list[dict]:
     （上限 MAX_DOC_CHARS = 20MB）等于把锁的持有时间乘以文档大小。
     """
     return docs_query(store, DEDUP_COLS, eq={"content_hash": content_hash})
-
 
 def list_documents(
     store: "LanceStore",
@@ -136,7 +135,6 @@ def list_documents(
         out.append(item)
     return out, total
 
-
 def stored_file(store: "LanceStore", doc_id: str) -> str | None:
     """读 documents.stored_file（上传原文的归档名）。"""
 
@@ -148,7 +146,6 @@ def stored_file(store: "LanceStore", doc_id: str) -> str | None:
     except Exception as e:  # noqa: BLE001
         logger.debug("读取 stored_file 失败: %s", e)
     return None
-
 
 def delete_document(store: "LanceStore", doc_id: str, backend=None) -> None:
     """删除文档、其全部分块，以及归档原文。
@@ -169,7 +166,6 @@ def delete_document(store: "LanceStore", doc_id: str, backend=None) -> None:
     with store.write_lock():
         store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
         _delete_doc_rows(store, [doc_id])
-
 
 def delete_documents(store: "LanceStore", doc_ids: list[str],
                      backend=None) -> dict:
@@ -207,7 +203,6 @@ def delete_documents(store: "LanceStore", doc_ids: list[str],
         _delete_doc_rows(store, known)
     return {"deleted": len(known), "skipped": len(ids) - len(known)}
 
-
 def _delete_doc_rows(store: "LanceStore", doc_ids: list[str]) -> None:
     """删 documents 行（引擎分派）。"""
     ids = [str(d) for d in doc_ids if d]
@@ -221,7 +216,6 @@ def _delete_doc_rows(store: "LanceStore", doc_ids: list[str]) -> None:
         return
     for doc_id in ids:
         store.documents.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
-
 
 def _update_doc_row(store: "LanceStore", doc_id: str, values: dict) -> None:
     """更新 documents 一行的若干列（引擎分派）。
@@ -240,7 +234,6 @@ def _update_doc_row(store: "LanceStore", doc_id: str, values: dict) -> None:
     store.documents.update(where=f"doc_id = '{escape_sql(doc_id)}'",
                            values=values)
 
-
 def set_doc_fields(store: "LanceStore", doc_id: str, **values) -> None:
     """更新 documents 一行的若干字段（公开入口，供 plan / chunk_edit / pipeline 用）。
 
@@ -249,8 +242,6 @@ def set_doc_fields(store: "LanceStore", doc_id: str, **values) -> None:
     只需要对一个地方负责。
     """
     _update_doc_row(store, doc_id, values)
-
-
 
 # ---- 唯一的 documents 读入口 -------------------------------------------
 #
@@ -272,7 +263,6 @@ def _doc_allow(store: "LanceStore") -> set[str]:
     `store` 参数保留是为了调用点对齐，将来若要并入真实 schema 不用改签名。
     """
     return set(DETAIL_COLS) | set(LIST_COLS) | set(DEDUP_COLS)
-
 
 def docs_query(store: "LanceStore", cols: list[str], *,
                eq: dict | None = None, one_of: dict | None = None,
@@ -335,7 +325,6 @@ def docs_query(store: "LanceStore", cols: list[str], *,
     return scalar_rows(store.documents, cols=list(cols), where=where,
                        order_by=order_by, limit=limit, offset=offset)
 
-
 def docs_count(store: "LanceStore", *, eq: dict | None = None,
                one_of: dict | None = None,
                contains: tuple[str, str] | None = None) -> int:
@@ -364,7 +353,6 @@ def docs_count(store: "LanceStore", *, eq: dict | None = None,
                               tuple(params), 0) or 0)
     return count_rows(store.documents, _lance_eq(eq, one_of, contains, None))
 
-
 def _lance_eq(eq, one_of, contains, ids) -> str | None:
     """把同一份意图翻译成 LanceDB 的 where 字符串（只在这里拼 SQL）。"""
     conds: list[str] = []
@@ -383,7 +371,6 @@ def _lance_eq(eq, one_of, contains, ids) -> str | None:
     if ids:
         conds.append(f"doc_id IN ({', '.join(chr(39) + escape_sql(i) + chr(39) for i in ids)})")
     return " AND ".join(conds) if conds else None
-
 
 def update_metadata(store: "LanceStore", doc_id: str, *,
                     title: str | None = None,
@@ -437,5 +424,4 @@ def update_metadata(store: "LanceStore", doc_id: str, *,
 
     _update_doc_row(store, doc_id, values)
     return get_document(store, doc_id)
-
 

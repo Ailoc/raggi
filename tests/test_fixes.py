@@ -7,8 +7,8 @@ from pathlib import Path
 from rag.core.config import RetrieveConfig, Settings
 from rag.retrieval.search import search
 from rag.storage.health import health
-from rag.storage.tables import LanceStore
 from rag.storage.repos import upsert_chunks, upsert_documents
+from rag.storage.tables import LanceStore
 
 
 class _StubEmbedder:

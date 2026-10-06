@@ -12,7 +12,6 @@ import uuid
 from rag.core.errors import EditConflict
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment, segment_batch
-from rag.storage.tables import LanceStore
 from rag.storage.repos import (
     delete_chunk,
     escape_sql,
@@ -23,6 +22,7 @@ from rag.storage.repos import (
     upsert_chunks,
 )
 from rag.storage.sql import scalar
+from rag.storage.tables import LanceStore
 
 # 无 doc_id 的手动分块归入的虚拟"便签"文档（DESIGN §8.2）
 # 零引用：add_manual_chunk 现在用 doc_id="" 表示独立分块，不再塞进

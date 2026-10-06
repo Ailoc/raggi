@@ -9,15 +9,14 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from rag.api._common import (_bind, enqueue as _enqueue, get_ctx,
-                              raise_operation_error)
-from rag.api.responses import (DocPlanOut, DocPlansOut, IngestOut, KbPlanOut,
-                               error_responses)
+from rag.api._common import _bind, get_ctx, raise_operation_error
+from rag.api._common import enqueue as _enqueue
+from rag.api.responses import DocPlanOut, DocPlansOut, IngestOut, KbPlanOut, error_responses
 from rag.api.schemas import PlanUpdateReq
 from rag.ingest import pipeline
 from rag.storage import plan as chunking
-from rag.storage.repos import kbs as kbs_store
 from rag.storage.repos import get_document, list_documents
+from rag.storage.repos import kbs as kbs_store
 
 router = APIRouter(
     tags=["plans"],

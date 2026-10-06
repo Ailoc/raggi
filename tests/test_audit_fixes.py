@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -161,7 +160,6 @@ def test_delete_kb_cleans_both_doc_and_standalone(client):
 
 def test_remove_chunk_updates_doc_count(client):
     """A3：remove_chunk 曾不调 touch_doc_count，health 永久 degraded。"""
-    store = client.store
     doc_id = client.post("/api/documents/text", json={
         "text": "用于测试删除分块回写计数", "title": "t"}).json()["doc_id"]
     chunk_id = client.get(
@@ -269,7 +267,6 @@ def test_build_where_never_emits_empty_in_clause():
 
 def test_embedding_failure_is_503_with_model_hint(client):
     """embedding 服务不可用 → 503，且提示指向模型服务。"""
-    from rag.models.embeddings import EmbedUnavailable
 
     client.registry.bundle.embedder = _BoomEmbedder()
     # 让它抛 EmbedUnavailable 之外的异常，走通用 500 分支
@@ -396,9 +393,25 @@ def test_save_config_escapes_keys(tmp_path):
     s.data_dir = tmp_path
     s.parser.overrides = {".pdf": "docling", "weird key": "native"}
     path = cfg_mod.save_config(s)
-    s2 = cfg_mod.Settings(_env_file=None)
-    # 只断言文件里出现了合法的 inline table 语法
-    assert "overrides = {" in path.read_text()
+    # 断言的不是「文件里长得像 inline table」，而是**它真的是合法 TOML**：
+    # 含空格的键必须加引号，否则下次启动 Settings 校验直接失败 ——
+    # 配置页一次误操作就能让服务起不来，这正是本条测试要防的事。
+    # （真正的「存了能读回来」由上面 test_save_config_roundtrip 覆盖，
+    #   这里不再重复构造 Settings。）
+    #
+    # 3.10 没有 tomllib，而 pyproject 的 requires-python 是 >=3.10，
+    # tomli 正是为此列进依赖的（config.py 走 pydantic-settings 的 toml 源，
+    # 所以这里第一次显式读文件要自己兼容两个版本）。
+    try:
+        import tomllib
+    except ModuleNotFoundError:      # Python < 3.11
+        import tomli as tomllib
+    with path.open("rb") as fh:
+        parsed = tomllib.load(fh)
+    # overrides 属于 [parser] 段（save_config 按子模型分节写），
+    # 断言挂在 parser 下才与真实的文件结构一致
+    assert parsed["parser"]["overrides"] == {".pdf": "docling",
+                                             "weird key": "native"}
 
 
 def test_models_put_persists_by_default(client):

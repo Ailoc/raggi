@@ -29,12 +29,12 @@ from rag.api.models import router as models_router
 from rag.api.plan import router as plan_router
 from rag.api.search import router as search_router
 from rag.api.system import router as system_router
-from rag.core.config import Settings
 from rag.core import ratelimit, requestid
-from rag.core.ratelimit import RateLimiter
+from rag.core.config import Settings
 from rag.core.errors import RaggiError, short
-from rag.models.registry import ModelRegistry
+from rag.core.ratelimit import RateLimiter
 from rag.models.embeddings import EmbedUnavailable
+from rag.models.registry import ModelRegistry
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.api")
@@ -208,79 +208,8 @@ def create_app(ctx: Ctx) -> FastAPI:
     _check_web_build()
 
     @app.middleware("http")
-    async def auth_middleware(request, call_next):
-        # 请求 ID 贯穿全程：响应头、错误体、日志行都用同一个值，
-        # 排障时不必在日志里靠时间戳猜哪一行对应客户端那条报错。
-        rid = requestid.resolve(request)
-        request.state.request_id = rid
-        started = time.perf_counter()
-        # 鉴权：API 密钥（可吊销/过期/分作用域）优先，兼容旧版静态 token。
-        # 未配置 token 且无任何密钥时不拦截（单机自用零摩擦）。
-        # 静态前端与 CORS 预检放行。
-        key_row = None
-        try:
-            # 鉴权要查 LanceDB（has_keys/verify/touch），是同步 IO。
-            # 放事件循环里会阻塞整个服务：每请求一次 count_rows，
-            # 配了密钥后还额外一次写（touch）。必须挪到线程池。
-            key_row = await asyncio.to_thread(authenticate, ctx, request)
-        except AuthError as e:
-            # 必须在中间件里显式构造响应：此时 ExceptionMiddleware 尚未
-            # 生效，直接抛 HTTPException 会退化成裸 500，调用方看不出原因。
-            resp = e.to_response()
-            resp.headers[requestid.HEADER] = rid
-            resp.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
-            return resp
-
-        # 限流放在鉴权之后：未通过鉴权的请求不该消耗别人的配额，
-        # 也不该向调用方泄露「这个 key 还有多少额度」。
-        path = request.url.path
-        if (app.state.limiter.enabled
-                and ratelimit.is_limited_method(request)
-                and path.startswith("/api")
-                and not ratelimit.is_idempotent(path)):
-            ok, retry = app.state.limiter.allow(
-                ratelimit.caller_key(request, key_row))
-            if not ok:
-                resp = JSONResponse(
-                    {"detail": f"写入过于频繁，请 {retry} 秒后重试",
-                     "retry_after": retry, "request_id": rid},
-                    status_code=429,
-                    headers={requestid.HEADER: rid,
-                             "Retry-After": str(retry)})
-                return resp
-
-        response = await call_next(request)
-        # 快照类端点（/health、/stats）带 3s 缓存，如实告诉调用方
-        # 这份数据是多少毫秒前的——否则刚入库完刷新界面看到的是旧数，
-        # 而它读起来像实时状态。
-        age = getattr(request.state, "snapshot_age_ms", None)
-        if age is not None:
-            response.headers["X-Snapshot-Age-Ms"] = str(age)
-        # 写成功 → 作废健康/容量快照（见 api/system.invalidate_snapshots）。
-        # 放在中间件里而不是每个端点里：漏一个端点就会让用户看到过期账本，
-        # 而这种「改完了但界面还是旧的」正是最难自查的一类问题。
-        if (request.method in _WRITE_METHODS
-                and path.startswith("/api") and response.status_code < 300):
-            from rag.api.system import invalidate_snapshots
-
-            invalidate_snapshots()
-        if not request.url.path.startswith("/api"):
-            # Vite 的产物文件名自带内容哈希（assets/xxx-<hash>.js），
-            # 所以 /assets/ 下的资源可以永久强缓存：改了前端会生成新文件名，
-            # index.html 里的引用也随之变化 —— 不存在「改了但页面没变」。
-            #
-            # 改前对**所有**非 /api 路径一律 no-cache，于是 SPA 每次进入
-            # 都要重新验证整套 JS/CSS：在并发下这些请求和 API 抢同一批
-            # 线程池额度（StaticFiles 的读文件也走 to_thread）。
-            if request.url.path.startswith("/assets/"):
-                response.headers["Cache-Control"] = (
-                    "public, max-age=31536000, immutable")
-            else:
-                # index.html 与 favicon 等仍不缓存：它们是「指向哪份产物」的入口
-                response.headers["Cache-Control"] = "no-cache"
-        response.headers[requestid.HEADER] = rid
-        response.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
-        return response
+    async def http_guards(request, call_next):
+        return await _http_guards(app, ctx, request, call_next)
 
     # CORS：add_middleware 后加者在外层，故 CORSMiddleware 先于
     # auth 处理请求（preflight 无需认证即可应答）
@@ -292,6 +221,13 @@ def create_app(ctx: Ctx) -> FastAPI:
             allow_headers=["*"],
         )
 
+    _wire_routers(app)
+    _wire_exception_handlers(app)
+
+    return app
+
+
+def _wire_routers(app: FastAPI) -> None:
     # 注册顺序即匹配顺序：plan_router 含 /documents/plans 这类字面量路径，
     # 必须先于 documents_router 的 /documents/{doc_id}，否则会被后者
     # 当成 doc_id="plans" 而返回 404。
@@ -314,6 +250,10 @@ def create_app(ctx: Ctx) -> FastAPI:
         app.mount(
             "/", StaticFiles(directory=str(WEB_DIST_DIR), html=True),
             name="web")
+
+
+def _wire_exception_handlers(app: FastAPI) -> None:
+    """状态码的唯一映射点。新增领域异常时只该改这里，不该改端点。"""
 
     @app.exception_handler(EmbedUnavailable)
     async def embed_unavailable_handler(request, exc: EmbedUnavailable):
@@ -349,7 +289,87 @@ def create_app(ctx: Ctx) -> FastAPI:
             status_code=500,
             headers={requestid.HEADER: rid})
 
-    return app
+
+async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
+    """请求 ID + 鉴权 + 限流 + 响应头。拆出来说明它为什么值得单独一层：
+
+    这 70 行里同时管着**四件事**，而且每一件都是「漏了就静默出问题」的类型
+    （鉴权漏一次是越权、快照失效漏一个端点是界面显示旧账本、
+    请求 ID 漏在错误路径上就没法对日志）。放在 `create_app` 内部时，
+    装配函数长到 180 行，改任何一件都要先在噪声里定位。
+    """
+    # 请求 ID 贯穿全程：响应头、错误体、日志行都用同一个值，
+    # 排障时不必在日志里靠时间戳猜哪一行对应客户端那条报错。
+    rid = requestid.resolve(request)
+    request.state.request_id = rid
+    started = time.perf_counter()
+    # 鉴权：API 密钥（可吊销/过期/分作用域）优先，兼容旧版静态 token。
+    # 未配置 token 且无任何密钥时不拦截（单机自用零摩擦）。
+    # 静态前端与 CORS 预检放行。
+    key_row = None
+    try:
+        # 鉴权要查 LanceDB（has_keys/verify/touch），是同步 IO。
+        # 放事件循环里会阻塞整个服务：每请求一次 count_rows，
+        # 配了密钥后还额外一次写（touch）。必须挪到线程池。
+        key_row = await asyncio.to_thread(authenticate, ctx, request)
+    except AuthError as e:
+        # 必须在中间件里显式构造响应：此时 ExceptionMiddleware 尚未
+        # 生效，直接抛 HTTPException 会退化成裸 500，调用方看不出原因。
+        resp = e.to_response()
+        resp.headers[requestid.HEADER] = rid
+        resp.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
+        return resp
+
+    # 限流放在鉴权之后：未通过鉴权的请求不该消耗别人的配额，
+    # 也不该向调用方泄露「这个 key 还有多少额度」。
+    path = request.url.path
+    if (app.state.limiter.enabled
+            and ratelimit.is_limited_method(request)
+            and path.startswith("/api")
+            and not ratelimit.is_idempotent(path)):
+        ok, retry = app.state.limiter.allow(
+            ratelimit.caller_key(request, key_row))
+        if not ok:
+            resp = JSONResponse(
+                {"detail": f"写入过于频繁，请 {retry} 秒后重试",
+                 "retry_after": retry, "request_id": rid},
+                status_code=429,
+                headers={requestid.HEADER: rid,
+                         "Retry-After": str(retry)})
+            return resp
+
+    response = await call_next(request)
+    # 快照类端点（/health、/stats）带 3s 缓存，如实告诉调用方
+    # 这份数据是多少毫秒前的——否则刚入库完刷新界面看到的是旧数，
+    # 而它读起来像实时状态。
+    age = getattr(request.state, "snapshot_age_ms", None)
+    if age is not None:
+        response.headers["X-Snapshot-Age-Ms"] = str(age)
+    # 写成功 → 作废健康/容量快照（见 api/system.invalidate_snapshots）。
+    # 放在中间件里而不是每个端点里：漏一个端点就会让用户看到过期账本，
+    # 而这种「改完了但界面还是旧的」正是最难自查的一类问题。
+    if (request.method in _WRITE_METHODS
+            and path.startswith("/api") and response.status_code < 300):
+        from rag.api.system import invalidate_snapshots
+
+        invalidate_snapshots()
+    if not request.url.path.startswith("/api"):
+        # Vite 的产物文件名自带内容哈希（assets/xxx-<hash>.js），
+        # 所以 /assets/ 下的资源可以永久强缓存：改了前端会生成新文件名，
+        # index.html 里的引用也随之变化 —— 不存在「改了但页面没变」。
+        #
+        # 改前对**所有**非 /api 路径一律 no-cache，于是 SPA 每次进入
+        # 都要重新验证整套 JS/CSS：在并发下这些请求和 API 抢同一批
+        # 线程池额度（StaticFiles 的读文件也走 to_thread）。
+        if request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable")
+        else:
+            # index.html 与 favicon 等仍不缓存：它们是「指向哪份产物」的入口
+            response.headers["Cache-Control"] = "no-cache"
+    response.headers[requestid.HEADER] = rid
+    response.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
+    return response
 
 
 def _elapsed_ms(started: float) -> str:

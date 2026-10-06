@@ -27,8 +27,9 @@ import uuid
 
 from rag.core.cache import TTLCache
 
-from ..tables import LanceStore
 from ..sql import escape_sql, fetch_rows
+from ..tables import LanceStore
+from ._engine import meta_of as _meta
 
 logger = logging.getLogger("raggi.apikeys")
 
@@ -78,11 +79,6 @@ def _invalidate_read_cache() -> None:
     """任何改变 apikeys 表的操作都要调它，否则「吊销后仍能进」会持续一整个 TTL。"""
     _verify_cache.clear()
     _has_keys_cache.clear()
-
-
-def _meta(store: LanceStore):
-    """元数据引擎；None = 走 LanceDB 回退路径（storage.meta_engine=lancedb）。"""
-    return getattr(store, "meta", None)
 
 
 def _find_by_hash(store: LanceStore, key_hash: str) -> dict | None:

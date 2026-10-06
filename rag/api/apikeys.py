@@ -10,8 +10,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from rag.api._common import get_ctx
-from rag.api.responses import (ApiKeyCreatedOut, ApiKeyListOut, KeyRevokedOut,
-                               error_responses)
+from rag.api.responses import ApiKeyCreatedOut, ApiKeyListOut, KeyRevokedOut, error_responses
 from rag.api.schemas import ApiKeyCreateReq
 from rag.storage.repos import keys as apikeys
 

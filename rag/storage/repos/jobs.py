@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from ..meta import JOB_COLS
 from ..sql import escape_sql, only_cols, scalar_rows
+from ._engine import meta_of as _meta
 
 if TYPE_CHECKING:
     from ..tables import LanceStore
@@ -30,12 +31,6 @@ TERMINAL_STAGES = frozenset({"done", "failed", "cancelled"})
 # JOB_COLS 不在这里定义：它就是 `meta.DDL` 里 jobs 的列序，
 # 归 schema 层（`..meta`）持有，两处各写一份时靠人肉同步。
 
-
-def _meta(store: "LanceStore"):
-    """元数据引擎；None 表示走 LanceDB 回退路径。"""
-    return getattr(store, "meta", None)
-
-
 def add_job(store: "LanceStore", row: dict) -> None:
     """写入一条任务记录（入队时即写，前端拿到 job_id 就能查到状态）。"""
     meta = _meta(store)
@@ -43,7 +38,6 @@ def add_job(store: "LanceStore", row: dict) -> None:
         meta.upsert("jobs", [{k: row.get(k) for k in JOB_COLS}], "job_id")
         return
     store.jobs.add([{k: v for k, v in row.items() if k in JOB_COLS}])
-
 
 def set_job(store: "LanceStore", job_id: str, **values) -> bool:
     """更新任务的若干字段。
@@ -71,7 +65,6 @@ def set_job(store: "LanceStore", job_id: str, **values) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
-
 def get_job(store: "LanceStore", job_id: str,
             cols: list[str] | None = None) -> dict | None:
     # 投影过白名单：列名做不成 SQL 占位符，不拦就是注入通道。
@@ -84,7 +77,6 @@ def get_job(store: "LanceStore", job_id: str,
     rows = scalar_rows(store.jobs, cols=want,
                        where=f"job_id = '{escape_sql(job_id)}'", limit=1)
     return rows[0] if rows else None
-
 
 def list_jobs(store: "LanceStore", limit: int = 50,
               kb_id: str = "") -> tuple[list[dict], int]:
@@ -114,10 +106,8 @@ def list_jobs(store: "LanceStore", limit: int = 50,
         total = len(rows)
     return rows, int(total)
 
-
 def is_terminal(row: dict | None) -> bool:
     return bool(row) and str(row.get("stage")) in TERMINAL_STAGES
-
 
 def prune_jobs(store: "LanceStore", cutoff_iso: str) -> int:
     """删除 started_at 早于 cutoff **且已终结**的任务记录，返回删除条数。

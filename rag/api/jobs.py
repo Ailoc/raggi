@@ -14,8 +14,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from rag.api._common import get_ctx
-from rag.api.responses import (JobCancelOut, JobListOut, JobOut,
-                               error_responses)
+from rag.api.responses import JobCancelOut, JobListOut, JobOut, error_responses
 from rag.ingest.queue import TERMINAL_STAGES, get_job, list_jobs
 
 router = APIRouter(

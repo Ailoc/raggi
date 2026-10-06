@@ -18,7 +18,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ---- 通用 ---------------------------------------------------------------
 
 class ErrorOut(BaseModel):

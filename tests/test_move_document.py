@@ -9,8 +9,6 @@
 """
 from __future__ import annotations
 
-import pytest
-
 
 class _StubEmbedder:
     dim = 4
@@ -205,7 +203,10 @@ def test_omitting_kb_id_leaves_it_unchanged(tmp_path):
     doc_id = _mk_doc(c, a)
 
     c.put(f"/api/documents/{doc_id}", json={"title": "改个名"})
-    assert c.get(f"/api/documents/{doc_id}").json()["kb_id"] == a
+    got = c.get(f"/api/documents/{doc_id}").json()
+    assert got["kb_id"] == a, "只改标题却把归属也动了"
+    assert got["kb_id"] != b, "归属被挪去了另一个库"
+    assert got["title"] == "改个名", "改名字段没生效"
 
 
 def test_move_to_same_kb_is_idempotent(tmp_path):

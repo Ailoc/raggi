@@ -5,12 +5,15 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from rag.api._common import (get_ctx, mask, merge_sub, raise_operation_error,
-                             safe)
-from rag.api.responses import (EmbedVectorsOut, ModelsOut, ModelsTestOut,
-                               ModelsUpdateOut, error_responses)
-from rag.api.schemas import (EmbedReq, ModelsTestReq,
-                             ModelsUpdateReq)
+from rag.api._common import get_ctx, mask, merge_sub, raise_operation_error, safe
+from rag.api.responses import (
+    EmbedVectorsOut,
+    ModelsOut,
+    ModelsTestOut,
+    ModelsUpdateOut,
+    error_responses,
+)
+from rag.api.schemas import EmbedReq, ModelsTestReq, ModelsUpdateReq
 from rag.core.config import save_config
 from rag.models.testkit import test_embedding, test_llm, test_rerank
 

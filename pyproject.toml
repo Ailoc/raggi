@@ -28,7 +28,7 @@ dependencies = [
 docling = ["langchain-docling>=0.2", "docling>=2.0"]
 unstructured = ["langchain-unstructured>=0.1", "unstructured>=0.14"]
 local-models = ["langchain-huggingface>=0.1", "sentence-transformers>=3.0"]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 # perf 标记默认不跑：这些门槛在 4 核 + 桌面常驻的开发机上抖动很大，
@@ -36,6 +36,36 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 markers = [
     "perf: 延迟/吞吐门槛（需要 rag-bench 的服务与合成数据集，手动跑）",
 ]
+
+# 静态检查的起步规则集，按「每条都要能兑现」的原则选：
+# - E9  语法错误与未定义名，这些是**真会炸**的；
+# - F   pyflakes：未使用/未导入即使用、f-string 缺占位符、重复定义；
+# - I   isort：导入分组与次序。
+#
+# **开 I 之前实测过它的风险**：本仓有 4 对真循环依赖
+# （docs/ARCH-AUDIT-2026-10-06.md §1.3），靠函数内 import 维持，
+# 而导入**次序**在这类模块里不是纯风格问题 —— 排一次就可能换一个模块先初始化。
+# 验证方式：`pkgutil.walk_packages` 把 rag.* 全量导入一遍（正序与逆序各一次，
+# 循环导入往往只在特定次序下暴露）⇒ 0 失败；再跑全量套件 ⇒ 544 passed。
+# 今后若动到 storage 的导入，重跑那个双向导入探针即可。
+#
+# **刻意没有开** `RUF*`/`SIM`/`ANN`/`B`/`E501`：第一次跑就红 200 条的规则集
+# 只会被长期 `--ignore`，等于没有；E501 另有一层原因 ——现存 39 行超 80，
+# 设成 80 会得到一次「全文件重排」的假改动提交，那正是审查最想避免的噪声。
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# web/ 是 Svelte/TS，data/ 是运行时数据，都不该进 Python 检查范围
+extend-exclude = ["web", "data", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里「只导入不使用」有真实用途的两种：注册型副作用导入、
+# 以及只为拿到异常类。按文件放开比全局关 F401 好，
+# 因为生产代码里的 F401 基本都是忘删的残留。
+"tests/conftest.py" = ["F401"]
 
 [project.scripts]
 rag = "rag.server:main"

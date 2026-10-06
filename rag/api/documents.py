@@ -8,24 +8,35 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import (APIRouter, File, Form, HTTPException, Request,
-                     Response, UploadFile)
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from rag.api._common import (_bind, enqueue as _enqueue, get_ctx,
-                              raise_operation_error, scalar_dict)
-from rag.api.responses import (BatchIngestOut, DocDeleteBatchOut,
-                               DocumentListOut, DocumentOut,
-                               DocumentUpdateOut, ErrorOut, IngestOut, OkOut,
-                               error_responses)
-from rag.api.schemas import (BatchIngestReq, DocDeleteBatchReq, DocUpdateReq,
-                             ReparseReq, TextIngestReq, UrlIngestReq)
+from rag.api._common import _bind, get_ctx, raise_operation_error, scalar_dict
+from rag.api._common import enqueue as _enqueue
+from rag.api.responses import (
+    BatchIngestOut,
+    DocDeleteBatchOut,
+    DocumentListOut,
+    DocumentOut,
+    DocumentUpdateOut,
+    ErrorOut,
+    IngestOut,
+    OkOut,
+    error_responses,
+)
+from rag.api.schemas import (
+    BatchIngestReq,
+    DocDeleteBatchReq,
+    DocUpdateReq,
+    ReparseReq,
+    TextIngestReq,
+    UrlIngestReq,
+)
 from rag.core.errors import Invalid
 from rag.core.idempotency import IdempotencyStore, normalize_key
 from rag.ingest import pipeline
 from rag.ingest.queue import JobCancelled
 from rag.parsing.router import ALLOWED_ENGINES
-from rag.storage.repos import keys as apikeys
 from rag.storage.repos import (
     delete_document,
     delete_documents,
@@ -34,6 +45,7 @@ from rag.storage.repos import (
     list_documents,
     update_metadata,
 )
+from rag.storage.repos import keys as apikeys
 
 logger = logging.getLogger("raggi.api.documents")
 

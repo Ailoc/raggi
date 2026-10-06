@@ -7,17 +7,14 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from fastapi.testclient import TestClient
 
 from rag.api import Ctx, create_app
-from rag.core.config import (EmbedConfig, LLMConfig, ParserConfig,
-                         RerankConfig, Settings, SplitConfig)
-from rag.ingest import pipeline
+from rag.core.config import EmbedConfig, LLMConfig, RerankConfig, Settings
 from rag.models.registry import ModelRegistry
 from rag.storage.health import health
-from rag.storage.tables import LanceStore
 from rag.storage.repos import upsert_chunks, upsert_documents
+from rag.storage.tables import LanceStore
 
 
 class _StubEmbedder:
@@ -362,10 +359,14 @@ def test_chunk_ordinal_no_collision_after_delete(tmp_path):
         new_id = add_manual_chunk(store, _StubEmbedder(), "新增块",
                                   doc_id="d1")
         rows = store.chunks.search().where(
-            "doc_id = 'd1'").select(["ordinal"]).to_list()
+            "doc_id = 'd1'").select(["ordinal", "chunk_id"]).to_list()
         ordinals = sorted(int(r["ordinal"]) for r in rows)
         assert ordinals == [0, 2, 3], f"ordinal 冲突: {ordinals}"
         assert len(set(ordinals)) == len(ordinals), "ordinal 不应重复"
+        # 新块自己必须落在 max(ordinal)+1 = 3，而不是 count_rows 算出来的 2
+        mine = [r for r in rows if r.get("chunk_id") == new_id]
+        assert mine and int(mine[0]["ordinal"]) == 3, \
+            f"新块 ordinal 不是 max+1：{mine}"
         # 新块可检索
         from rag.core.config import RetrieveConfig
         from rag.retrieval.search import search

@@ -362,14 +362,14 @@ def test_document_rename_endpoint(client_factory=None):
     回归防护：此前标题完全不可改——粘贴文本的标题取首行前 60 字，
     写错就永久错了。
     """
+    import tempfile
+
     from fastapi.testclient import TestClient
 
     from rag.api import Ctx, create_app
     from rag.core.config import Settings
     from rag.models.registry import ModelRegistry
     from rag.storage.tables import LanceStore
-
-    import tempfile
 
     with tempfile.TemporaryDirectory() as d:
         s = Settings()

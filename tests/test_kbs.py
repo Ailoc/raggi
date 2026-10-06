@@ -9,8 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from rag.api import Ctx, create_app
-from rag.core.config import ParserConfig, Settings
-from rag.ingest import pipeline
+from rag.core.config import Settings
 from rag.models.registry import ModelRegistry
 from rag.storage.repos import kbs
 from rag.storage.tables import LanceStore

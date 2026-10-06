@@ -314,7 +314,7 @@ def test_param_controls_exist(pid):
     后端支持、界面没有，等于功能不存在。
     """
     src = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
-    assert f'id={{p.id}}' in src or f'id="{pid}"' in src, "控件由规格表渲染"
+    assert 'id={p.id}' in src or f'id="{pid}"' in src, "控件由规格表渲染"
     spec = (SRC / "lib/searchparams.ts").read_text(encoding="utf-8")
     assert f'id: "{pid}"' in spec, f"参数规格表缺少 {pid}"
 

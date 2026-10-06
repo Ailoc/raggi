@@ -179,21 +179,44 @@ def test_lifespan_shutdown_survives_missing_queue(tmp_path):
 # ---- 鉴权不再阻塞事件循环（C1）--------------------------------------
 
 
-def test_auth_is_threaded_off_event_loop(tmp_path):
+def test_auth_is_threaded_off_event_loop(tmp_path, monkeypatch):
     """authenticate 必须走 to_thread，否则每请求一次同步 LanceDB IO。
 
     回归背景：中间件里 `authenticate(ctx, request)` 是裸同步调用，
     内部含 count_rows/verify/touch，配了密钥后还每次写一次 apikeys。
+    在事件循环里跑同步 IO 会把**整个服务**串行化（每请求 ~7ms 的存储
+    往返直接成为吞吐上限），而表现只是「慢」，不会报错。
+
+    为什么改成行为断言：这一条原来是 `inspect.getsource(create_app)`
+    里找字符串 `"await asyncio.to_thread(authenticate, ctx, request)"`。
+    那种守卫有两个致命问题：① 装配代码搬个位置就红（本轮把中间件体
+    拆成 `_http_guards` 时它就红了，而行为一点没变）；② 反过来它也会
+    假绿 —— 只要那行字符串还在，哪怕外面被 `# type: ignore` 包成同步调用
+    它也照过。**字符串不是行为**。
+    现在用「在工作线程里 `asyncio.get_running_loop()` 必然抛 RuntimeError」
+    这个事实来判定 authenticate 到底跑在哪个线程上：确定性、无计时、
+    且无论中间件体叫什么名字、放在哪个函数里都成立。
     """
-    import inspect
+    import asyncio
 
-    from rag.api import create_app
+    import rag.api as api_mod
 
-    src = inspect.getsource(create_app)
-    assert "await asyncio.to_thread(authenticate, ctx, request)" in src, \
-        "鉴权未移出事件循环"
-    assert "\n            key_row = authenticate(ctx, request)" not in src, \
-        "仍存在同步直调鉴权"
+    ran_on_loop: list[bool] = []
+
+    def fake_authenticate(ctx, request):
+        try:
+            asyncio.get_running_loop()
+            ran_on_loop.append(True)      # 拿到了循环 ⇒ 还在事件循环线程上
+        except RuntimeError:
+            ran_on_loop.append(False)     # 没有循环 ⇒ 已经在线程池里
+        return None
+
+    monkeypatch.setattr(api_mod, "authenticate", fake_authenticate)
+    c = _app(tmp_path)
+    assert c.get("/api/documents").status_code == 200
+    assert ran_on_loop, "authenticate 根本没被调用，这条守卫成了空断言"
+    assert not any(ran_on_loop), \
+        f"鉴权仍跑在事件循环上（{sum(ran_on_loop)}/{len(ran_on_loop)} 次）"
 
 
 def test_touch_is_throttled(tmp_path):
@@ -417,9 +440,9 @@ def test_attr_filter_failure_yields_no_match_not_everything(tmp_path):
 
 def test_batch_edit_force_default_applies():
     """批量级 force 必须真的生效（早前形参形同虚设 → 解析块必 403）。"""
-    from rag.chunk_edit import batch_edit_chunks
-
     import inspect
+
+    from rag.chunk_edit import batch_edit_chunks
     sig = inspect.signature(batch_edit_chunks)
     assert sig.parameters["force"].default is None, \
         "force 默认应是 None（三态），否则单项缺失时回落不到批量级默认值"

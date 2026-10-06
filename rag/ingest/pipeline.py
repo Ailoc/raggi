@@ -22,23 +22,23 @@ from rag.ingest.queue import JobCancelled
 from rag.ingest.splitter import split_text
 from rag.models.http import ScaledSemaphore
 from rag.models.registry import ModelRegistry
+from rag.parsing.loaders import load_text, load_url
 from rag.parsing.normalize import normalize
 from rag.parsing.router import ALLOWED_ENGINES, route
 from rag.parsing.segment import segment_batch
-from rag.parsing.loaders import load_text, load_url
 from rag.storage.plan import resolve_plan, stamp_snapshot
-from rag.storage.tables import LanceStore
 from rag.storage.repos import (
     escape_sql,
-    set_doc_fields,
     fetch_rows,
     find_by_hash,
     get_document,
     jobs,
     scalar_row,
+    set_doc_fields,
     upsert_chunks,
     upsert_documents,
 )
+from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.ingest")
 

@@ -15,8 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from pydantic_settings import (BaseSettings, SettingsConfigDict,
-                               TomlConfigSettingsSource)
+from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
 # 环境变量名（--data 在 Settings 构造前写入它，config.toml 位置据此解析）
 DATA_DIR_ENV = "RAG_DATA_DIR"

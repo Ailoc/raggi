@@ -12,10 +12,10 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from rag.retrieval.answer import answer, answer_stream
 from rag.api._common import cfg_with_overrides, get_ctx, raise_operation_error
 from rag.api.responses import AnswerOut, error_responses
 from rag.api.schemas import AnswerReq
+from rag.retrieval.answer import answer, answer_stream
 
 router = APIRouter(
     tags=["answer"],

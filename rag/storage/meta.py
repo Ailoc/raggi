@@ -387,13 +387,54 @@ def needs_import(meta: MetaStore) -> bool:
     return total == 0
 
 
+def sqlite_holds_data(settings) -> bool:
+    """`data/raggi.db` 里是否已经有 OLTP 数据（只做只读探测）。
+
+    这是「能不能安全退回 LanceDB」的判定依据。回退本身是合法特性
+    （`meta_engine=lancedb`），但**只有 SQLite 是空的**时才安全：
+    SQLite 里已经有数据还退回旧路径，就等于两份真源并存 ——
+    用户此后看到的、改的都是旧的那份，新的那份静静躺在 raggi.db 里，
+    下次再启用 SQLite 时被当成「已有数据」跳过导入，直接对不上账。
+    这正是本仓两次严重事故（无鉴权、分裂读）的形状。
+    """
+    path = Path(settings.data_dir) / "raggi.db"
+    if not path.exists():
+        return False
+    try:
+        # 只读打开：探测时绝不能创建或改动文件（WAL 模式会留下 -wal/-shm）
+        uri = f"file:{path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        try:
+            for t in ("documents", "jobs", "kbs", "apikeys"):
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (t,)).fetchone()
+                if not exists:
+                    continue
+                if conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]:
+                    return True
+            return False
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # 探测失败按「有数据」处理：宁可拒绝启动并要求人工确认，
+        # 也不要带着两份真源跑起来
+        return True
+
+
 def prepare_meta_store(settings, lance_store, *, log=logger):
     """启动期装配元数据引擎，返回 `MetaStore | None`。
 
-    返回 None 的两种情况都必须是**安全**的：
+    返回 None 只在两种情况下发生，且都必须**确实安全**：
     - `meta_engine=lancedb`：用户显式回退，走改造前的读写路径；
-    - 导入失败：宁可退回旧路径也不带着「一半在 SQLite、一半在 LanceDB」
-      的分裂状态启动 —— 那种状态比拒绝启动更难查，而且它会静默改坏数据。
+    - 初始化/导入失败，**且 SQLite 里一行数据都没有**：此时两份存储
+      不可能对不上账，退回旧路径等价于「这次升级还没开始」。
+
+    过去这里对失败一律 `return None`（「宁可退回旧路径也不带分裂状态启动」），
+    但那个理由是自相矛盾的：**退回旧路径本身就是分裂状态** —— SQLite 里
+    已有的数据不会被同步回 Lance，而此后所有读写都在 Lance 上。
+    所以现在改成：SQLite 已有数据 ⇒ 抛 `Invalid` 拒绝启动，把问题摆在启动日志
+    第一行，而不是让用户对着一个「能跑但账本不对」的服务猜。
 
     auto 模式下如果 SQLite 侧是空的，就从 LanceDB 旧表一次性导入。
     这条静默导入是刻意选的：单机工具的升级路径必须是
@@ -411,9 +452,19 @@ def prepare_meta_store(settings, lance_store, *, log=logger):
             log.info("元数据已从 LanceDB 导入 SQLite：%s", report)
         return meta
     except Exception as e:  # noqa: BLE001
-        log.error("元数据引擎初始化失败，退回 LanceDB 读写路径（功能不受影响，"
-                  "但 jobs/apikeys 的写放大仍在）：%s", e)
-        return None
+        if not sqlite_holds_data(settings):
+            log.error("元数据引擎初始化失败，SQLite 里还没有数据 ⇒ 安全退回 "
+                      "LanceDB 读写路径（jobs/apikeys 的写放大仍在）：%s", e)
+            return None
+        raise Invalid(
+            f"元数据引擎初始化失败，而 {Path(settings.data_dir) / 'raggi.db'} "
+            f"里已经有数据：不能退回 LanceDB 读写路径，否则 SQLite 与 "
+            f"LanceDB 会同时各自持有一份真源（原话：{e}）。\n"
+            "可选处置：① 修掉上面的错误后重启（推荐，数据仍以 SQLite 为准）；"
+            "② 确认要用改造前的存储形态，先在 storage.meta_engine 写 lancedb "
+            "并**先把 data/raggi.db 备份走**；③ 从备份恢复 data/。"
+            "拒绝启动是刻意的：这类问题一旦发生，症状是「界面数字对不上」"
+            "而不是报错，排查成本远高于一次启动失败。") from e
 
 
 def _digest(rows: list[dict], cols: list[str]) -> str:

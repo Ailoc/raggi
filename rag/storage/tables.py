@@ -14,10 +14,9 @@ from pathlib import Path
 
 import lancedb
 import pyarrow as pa
-from lancedb.index import BTree, FTS, HnswFlat, IvfHnswSq, IvfPq
+from lancedb.index import FTS, BTree, HnswFlat, IvfHnswSq, IvfPq
 
-from .schema import (ApiKey, Document, Job, KnowledgeBase,
-                     chunk_schema)
+from .schema import ApiKey, Document, Job, KnowledgeBase, chunk_schema
 
 logger = logging.getLogger("raggi.store")
 

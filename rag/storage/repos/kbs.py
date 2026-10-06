@@ -8,12 +8,11 @@ from __future__ import annotations
 import logging
 import uuid
 
-from .documents import docs_query
-from ..sql import (escape_sql, fetch_rows, now_iso, only_cols, scalar,
-                   scalar_rows)
+from ..sql import escape_sql, fetch_rows, now_iso, only_cols, scalar, scalar_rows
 from ..tables import LanceStore
+from ._engine import meta_of as _meta
 from .chunks import delete_kb_chunks
-from .documents import delete_document
+from .documents import delete_document, docs_query
 
 logger = logging.getLogger("raggi.repos.kbs")
 
@@ -22,17 +21,10 @@ logger = logging.getLogger("raggi.repos.kbs")
 KB_COLS = ["kb_id", "name", "description", "chunk_size", "overlap_ratio",
            "created_at", "updated_at"]
 
-
-def _meta(store: LanceStore):
-    """元数据引擎；None = LanceDB 回退路径。"""
-    return getattr(store, "meta", None)
-
-
 def _kb_allow(store: LanceStore) -> set[str]:
     """kbs 的合法投影列。用代码声明的列清单，而不是实时探测 schema：
     表结构在升级过程中可能落后于代码，拿 schema 当白名单会把正常读打挂。"""
     return set(KB_COLS)
-
 
 def _row(kb: dict, doc_count: int = 0,
          chunk_count: int = 0) -> dict:
@@ -50,7 +42,6 @@ def _row(kb: dict, doc_count: int = 0,
         "updated_at": kb.get("updated_at", ""),
     }
 
-
 def _kb_counts(store: LanceStore) -> dict[str, list[int]]:
     """kb_id → [文档数, 分块数]。
 
@@ -65,7 +56,6 @@ def _kb_counts(store: LanceStore) -> dict[str, list[int]]:
         slot[0] += 1
         slot[1] += int(d.get("chunk_count") or 0)
     return per
-
 
 def list_kbs(store: LanceStore) -> list[dict]:
     """知识库列表（带文档数 / 分块数，按更新时间倒序）。
@@ -85,7 +75,6 @@ def list_kbs(store: LanceStore) -> list[dict]:
                       order_by=[("updated_at", False), ("kb_id", True)])
     per_doc = _kb_counts(store)
     return [_row(kb, *per_doc.get(str(kb["kb_id"]), [0, 0])) for kb in kbs]
-
 
 def get_kb(store: LanceStore, kb_id: str) -> dict | None:
     mdb = _meta(store)
@@ -107,7 +96,6 @@ def get_kb(store: LanceStore, kb_id: str) -> dict | None:
     docs = docs_query(store, ["chunk_count"], eq={"kb_id": kb_id})
     return _row(kb, len(docs),
                 sum(int(d.get("chunk_count") or 0) for d in docs))
-
 
 def create_kb(store: LanceStore, name: str,
               description: str = "",
@@ -140,7 +128,6 @@ def create_kb(store: LanceStore, name: str,
                  "chunk_size": size, "overlap_ratio": ratio,
                  "created_at": now, "updated_at": now})
 
-
 def update_kb(store: LanceStore, kb_id: str, *,
               name: str | None = None,
               description: str | None = None,
@@ -170,7 +157,6 @@ def update_kb(store: LanceStore, kb_id: str, *,
                          values=values)
     updated = get_kb(store, kb_id)
     return updated
-
 
 def kbs_query(store: LanceStore, cols: list[str], *,
               eq: dict | None = None,
@@ -202,7 +188,6 @@ def kbs_query(store: LanceStore, cols: list[str], *,
     return scalar_rows(store.kbs, cols=list(cols), where=where,
                        order_by=order_by, limit=limit)
 
-
 def set_kb_fields(store: LanceStore, kb_id: str, **values) -> None:
     """更新 kbs 一行的若干字段（引擎分派）。"""
     if not values:
@@ -214,7 +199,6 @@ def set_kb_fields(store: LanceStore, kb_id: str, **values) -> None:
                     (*values.values(), kb_id))
         return
     store.kbs.update(where=f"kb_id = '{escape_sql(kb_id)}'", values=values)
-
 
 def delete_kb(store: LanceStore, kb_id: str, backend=None) -> bool:
     """删除知识库并级联删除其文档、分块与留档原文。"""
@@ -237,12 +221,10 @@ def delete_kb(store: LanceStore, kb_id: str, backend=None) -> bool:
         store.kbs.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
     return True
 
-
 def doc_ids_in_kb(store: LanceStore, kb_id: str) -> list[str]:
     """该知识库下的文档 id 列表（删除知识库时级联清理用）。"""
     rows = docs_query(store, ["doc_id"], eq={"kb_id": kb_id})
     return [str(r.get("doc_id")) for r in rows]
-
 
 def reconcile_doc_counts(store: LanceStore) -> int:
     """按实际分块数回写全部 documents.chunk_count，返回修复条数。
@@ -262,5 +244,4 @@ def reconcile_doc_counts(store: LanceStore) -> int:
                 values={"chunk_count": want, "updated_at": now_iso()})
             fixed += 1
     return fixed
-
 

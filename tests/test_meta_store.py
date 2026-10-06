@@ -14,6 +14,8 @@ LanceDB 回退分支。默认路径没人跑，等于把最容易被改坏的那
 from __future__ import annotations
 
 import json
+import sqlite3
+from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -272,9 +274,12 @@ def test_search_titles_and_filters_follow_the_source(tmp_path):
     doc = client.post("/api/documents/text", json={
         "text": "检索标题验证 关键词 唯一标记 kv1", "title": "带标题的文档",
         "kb_id": kb["kb_id"]}).json()
+    assert doc["status"] == "ready", f"种子文档没入库成功：{doc}"
     res = client.post("/api/search", json={"q": "kv1", "mode": "vector",
                                           "kb_id": kb["kb_id"]}).json()
     assert res["results"], "刚入库的内容按 kb 检索不到"
+    assert res["results"][0]["doc_id"] == doc["doc_id"], (
+        "命中的不是那篇种子文档，测试前提已经不成立")
     assert res["results"][0]["title"] == "带标题的文档", (
         "标题为空说明检索层还在读旧引擎的 documents")
     by_mime = client.post("/api/search", json={
@@ -352,3 +357,88 @@ def test_fallback_engine_flag_is_honoured(tmp_path):
     settings.storage.meta_engine = "lancedb"
     store = LanceStore(LocalBackend(tmp_path), 4)
     assert prepare_meta_store(settings, store) is None
+
+
+def test_no_silent_fallback_when_sqlite_already_has_data(tmp_path):
+    """SQLite 里已有数据时初始化失败 ⇒ **拒绝启动**，不许退回旧路径。
+
+    改前这里一律 `log.error` + `return None`，注释写的理由是
+    「不带分裂状态启动」—— 但**退回旧路径本身就是分裂状态**：
+    SQLite 里已有的数据不会同步回 Lance，此后所有读写都在 Lance 上，
+    两份真源各说各话。它的症状是「界面数字对不上」而不是报错，
+    正是本仓两次严重事故（无鉴权、8 篇说 7 篇）的形状。
+    """
+    from rag.core.errors import Invalid
+    from rag.storage.meta import prepare_meta_store, sqlite_holds_data
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    store = LanceStore(LocalBackend(tmp_path), 4)
+    meta = prepare_meta_store(settings, store)
+    assert meta is not None
+    meta.upsert("kbs", [{"kb_id": "kb-1", "name": "已有数据"}], "kb_id")
+    meta._conn().close()
+    assert sqlite_holds_data(settings) is True
+
+    # 让它坏掉：把 schema_version 写成比代码支持的更高（典型的降级场景）
+    conn = sqlite3.connect(tmp_path / "raggi.db")
+    conn.execute(
+        "INSERT OR REPLACE INTO meta_state(key,value) "
+        "VALUES('schema_version','99')")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(Invalid) as e:
+        prepare_meta_store(settings, store)
+    msg = str(e.value)
+    assert "不能退回" in msg and "raggi.db" in msg, msg
+    # 给出的处置必须是可行动的，而不是只说「失败了」
+    assert "meta_engine" in msg and "备份" in msg
+
+
+def test_empty_sqlite_may_fall_back(tmp_path):
+    """SQLite 一行数据都没有时，退回旧路径确实安全（等价于「还没开始升级」）。"""
+    from rag.storage.meta import prepare_meta_store
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    with mock.patch("rag.storage.meta.open_meta_store",
+                    side_effect=RuntimeError("磁盘只读")):
+        assert prepare_meta_store(
+            settings, LanceStore(LocalBackend(tmp_path), 4)) is None
+
+
+def test_sqlite_holds_data_probe_is_read_only(tmp_path):
+    """探测不许把「还没有库」变成「凭空建出一个库」。
+
+    这条值得测是因为失败方式很隐蔽：`sqlite3.connect(path)` 对不存在的
+    路径**会直接创建文件**。如果 `sqlite_holds_data` 忘了 `mode=ro`，
+    那么「因为初始化失败而拒绝启动」这条错误处理路径自己就会在 data/ 里
+    落下一个空库；下一次启动便把它当成「已有数据」，走上完全不同的分支 ——
+    一个用来防止分裂的守卫反而制造了分裂。
+
+    断言刻意只盯「主数据库文件有没有被凭空创建 / 有没有被改动」，
+    不比较整个目录清单：WAL 格式在**任何**一次打开（包括只读）时都可能
+    创建 `raggi.db-wal` / `-shm`，那是存储格式的属性，不是这个探测的副作用；
+    而它们在 checkpoint 时会自行消失，拿目录做严格相等会假红。
+    """
+    from rag.storage.meta import MetaStore, sqlite_holds_data
+
+    # 情形一：库存在但为空 ⇒ False，且不改动它
+    settings = Settings()
+    settings.data_dir = tmp_path
+    MetaStore(tmp_path / "raggi.db")          # 建库，但一行数据都没有
+    size_before = (tmp_path / "raggi.db").stat().st_size
+    assert sqlite_holds_data(settings) is False
+    assert sqlite_holds_data(settings) is False, "重复探测应当幂等"
+    assert (tmp_path / "raggi.db").stat().st_size == size_before, \
+        "只读探测改动了数据库"
+
+    # 情形二：根本没有库 ⇒ False，并且不许把它创建出来
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    other = Settings()
+    other.data_dir = empty
+    assert sqlite_holds_data(other) is False
+    assert not (empty / "raggi.db").exists(), \
+        "探测在缺失的路径上创建了数据库"
