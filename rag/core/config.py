@@ -110,10 +110,25 @@ class LLMConfig(BaseModel):
 
 class RetrieveConfig(BaseModel):
     mode: Literal["hybrid", "vector", "fts"] = "hybrid"
-    candidate_k: int = 50
+    # 2026-10-06 用真实 embedding（BAAI/bge-m3）+ numpy 穷举精确 kNN 当 ground truth
+    # 实测出来的默认值，不是猜的（数据与命令见 docs/ARCH-AUDIT-2026-10-06.md §4.7）：
+    #   单主题查询（真实流量的主体）在 50×10 与 100×10 上 recall@10 都已经是 1.0；
+    #   跨主题聚合查询上 50×10 只有 0.91–0.96（每 10 条正确结果默默少 1 条），
+    #   100×10 = 1.0，代价是引擎 p50 从 ~23ms 到 ~35ms。
+    # 一次检索的真实成本大头在 query embed（实测单条 86–155ms，缓存命中后 32ms），
+    # 所以这 +12ms 换的是「召回不再靠运气」。要退回旧行为：candidate_k = 50。
+    candidate_k: int = 100
     top_k: int = 8
     k_rrf: int = 60
+    # **nprobes 在本仓当前形态下是无效配置**：lancedb 0.39 + IvfHnswFlat 索引上，
+    # nprobes=20 与 nprobes=999 的 recall@10 与 p50 逐项完全相同（四类查询各测一遍）。
+    # 值确实被写进了查询构造器（`_minimum_nprobes/_maximum_nprobes`），但没进入扫描计划。
+    # 保留字段与传参是为了升级后自动生效，但**不要拿它当调召回的旋钮** ——
+    # 真正决定召回的是 `candidate_k × refine_factor`（见下）。
     nprobes: int = 20
+    # refine_factor 是那个真正有效的质量旋钮：把它降到 1–2 时，跨主题查询的
+    # recall@10 从 0.91–0.96 **塌到 0.61–0.79**，而只省下 ~5–9ms。
+    # 想省引擎时间请优先考虑 top_k / 缓存，不要动这里。
     refine_factor: int = 10
     window: int = 1
     use_jieba: bool = True

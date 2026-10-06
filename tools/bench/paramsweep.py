@@ -2,9 +2,15 @@
 
 为什么需要这个工具
 ------------------
-`retrieve.refine_factor=10` × `candidate_k=50` 意味着对 500 条候选做精确重排。
+`retrieve.refine_factor` × `retrieve.candidate_k` 决定「对多少条候选做精确重排」。
 审计时量到这一段约占 `/api/search` p50 的 80%，而 `refine_factor=1` 时同样
 查询几乎减半——**但那是召回质量的旋钮，不能由性能单方面调**。
+（真实 embedding 下的召回数据证实了这句：见 `docs/ARCH-AUDIT-2026-10-06.md` §4.7
+ —— `refine_factor` 降到 1–2 时，跨主题查询的 recall@10 从 0.91–0.96
+ 塌到 0.61–0.79，而只省下 5–9ms。）
+
+基准组取的是**代码里的当前默认值**（`RetrieveConfig()`），不是抄下来的一份数字 ——
+抄的那份在默认值改动后会变成假话，而报表看起来完全正常。
 
 所以「要不要调默认值」需要两个数，缺一不可：
 1. 成本：这组参数的 p50 / p95 延迟；
@@ -109,8 +115,15 @@ def run(data_dir: Path, *, dim: int = DIM_DEFAULT, queries: int = 12,
     report: dict = {"dim": dim, "queries": queries, "top_k": top_k,
                     "rows": store.chunks.count_rows(), "modes": {}}
 
-    # 基准 = 现在的默认值（candidate_k=50 / nprobes=20 / refine_factor=10）
-    base = dict(candidate_k=50, nprobes=20, refine_factor=10)
+    # 基准 = **代码里的真实默认值**，不是抄一份数字。
+    # 原先这里硬写 `candidate_k=50` 并注释「现在的默认值」——默认值一改，
+    # 这句话就变成假话，而报表看起来完全正常（§2.5 的注释漂移在工具里的版本）。
+    from rag.core.config import RetrieveConfig
+
+    dflt = RetrieveConfig()
+    base = dict(candidate_k=dflt.candidate_k, nprobes=dflt.nprobes,
+                refine_factor=dflt.refine_factor)
+    report["baseline_default"] = base
     grids = {
         # 只动 refine_factor：它直接乘进「精确重排多少条」
         "refine_factor": [1, 2, 5, 10, 20],

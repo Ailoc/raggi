@@ -191,12 +191,14 @@ max_tokens  = 1024
 [retrieve]                     # 检索默认值；前端把它显示成 placeholder，
   mode = "hybrid"              # 让「留空 = 用多少」变成可见的具体数字
   top_k = 8
-  candidate_k = 50
+  candidate_k = 100              # 2026-10-06 真实召回实测：50 时跨主题查询
+                                 # recall@10 只有 0.91–0.96，100 = 1.0
   window = 1
   snippet_chars = 0
-  nprobes = 20
+  nprobes = 20                   # **注意：当前 lancedb 0.39 + IvfHnswFlat 下无效**
+                                 # （20 与 999 的 recall@10 逐项相同），别拿它调召回
   k_rrf = 60
-  refine_factor = 0
+  refine_factor = 10             # 降到 1–2 会让 recall@10 从 0.91–0.96 塌到 0.61–0.79
 
 [storage]                      # local（默认）或 S3 兼容（RustFS / MinIO / AWS）
 backend  = "local"
