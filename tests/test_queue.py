@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -160,23 +162,62 @@ def test_duplicate_ingest_records_hit_doc_id(client):
     assert second["doc_id"] == first["doc_id"], "重复入库未指向既有文档"
 
 
-def test_stage_progress_observed(client):
-    """阶段要可观测——前端靠它显示「解析中 / 向量化」而不是干等。"""
-    job_id = client.post(
+# ---- 阶段可观测（不赌时序的版本）---------------------------------------
+# 这里原来是一条 `test_stage_progress_observed`：靠「桩睡 0.12s vs 每 20ms 轮询」
+# 制造观测窗口。它在全量套件里红过一次（`seen == ['done']`）而单跑 5/5 绿 ——
+# 负载相关的偶发红。同一个断言改成下面这条事件闸门版本，语义没削弱，
+# 只是不再依赖谁先跑完。
+
+
+class _GatedEmbedder:
+    """provider 调用卡在一个事件上，直到测试确认「已经看到了中间阶段」。"""
+    dim = 4
+    model = "stub"
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def _gate(self):
+        self.entered.set()
+        # 测试必须放行，否则这条 job 永不终态 —— 用超时而不是无限等
+        if not self.release.wait(timeout=20.0):
+            raise RuntimeError("测试未放行 embedding 闸门")
+        return [1.0, 0.0, 0.0, 0.0]
+
+    def embed_one(self, text):  # noqa: ARG002
+        return self._gate()
+
+    def embed(self, texts):
+        vec = self._gate()
+        return [vec for _ in texts]
+
+
+def test_stage_is_observable_without_racing_the_clock(tmp_path):
+    """阶段可观测，且**不依赖**「谁先跑完」：把 provider 卡住再轮询。"""
+    gated = _GatedEmbedder()
+    c = _client_with(gated, tmp_path)
+    job_id = c.post(
         "/api/documents/text",
-        json={"text": "阶段观测 " * 30, "title": "t"},
+        json={"text": "确定性阶段 " * 30, "title": "t"},
         params={"wait": "false"}).json()["job_id"]
-    seen = []
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        st = client.get(f"/api/jobs/{job_id}").json()
-        if st["stage"] not in seen:
-            seen.append(st["stage"])
-        if st.get("terminal"):
-            break
-        time.sleep(0.02)
-    assert "done" in seen
-    assert len(seen) >= 2, f"阶段过于笼统，无法显示进度: {seen}"
+    seen: list[str] = []
+    try:
+        assert gated.entered.wait(timeout=20.0), "job 没走到 embedding"
+        # 此刻 provider 被卡住 ⇒ 任务必然还停在向量化那一步，与机器快慢无关。
+        # 断言具体阶段名而不是「非终态就行」：后者在「整条流水线只在结束时写一次
+        # 任务行」的回归下仍然绿（它会看到创建时的 queued），那就等于没测进度。
+        st = c.get(f"/api/jobs/{job_id}").json()
+        seen.append(st["stage"])
+        assert st["stage"] == "embed", (
+            f"provider 还卡着，阶段却不是 embed：{st}（前端进度条会停在错误处）")
+        assert not st.get("terminal"), f"provider 还卡着就已经终态：{st}"
+    finally:
+        gated.release.set()
+    final = _drain(c, job_id)
+    seen.append(final["stage"])
+    assert final["stage"] == "done"
+    assert len(set(seen)) >= 2, f"阶段过于笼统，无法显示进度: {seen}"
 
 
 def test_failed_job_reports_error(client, tmp_path):
@@ -293,3 +334,127 @@ def test_direct_pipeline_call_still_works(tmp_path):
     # 自行建了任务行并走到终态
     jobs = store.jobs.search().select(["stage"]).to_list()
     assert any(j["stage"] == "done" for j in jobs)
+
+# ---- embedding 并发闸 ---------------------------------------------------
+# 闸门存在的理由（pipeline.py 上方注释原话）：外层任务数 × 内层分片数会
+# 相乘，把远端 embedding 打到限流，然后每个分片各自退避重试 3 次 ——
+# 级联重试风暴。这个乘积只有在闸门是**进程级**时才会被封顶。
+
+
+class _CountingEmbedder:
+    """记录同时在途的请求数峰值与每次条数；每个请求睡 50ms 以保证重叠。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self.peak = 0
+        self.calls = 0
+        self.sizes: list[int] = []
+
+    def embed(self, texts):
+        with self._lock:
+            self._inflight += 1
+            self.calls += 1
+            self.sizes.append(len(texts))
+            self.peak = max(self.peak, self._inflight)
+        time.sleep(0.05)
+        with self._lock:
+            self._inflight -= 1
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+
+@pytest.fixture
+def fresh_gates():
+    """进程级单例必须能被隔离，否则一条测试的闸会漏进下一条。"""
+    from rag.ingest import pipeline
+
+    pipeline._GATES.clear()
+    yield pipeline._GATES
+    pipeline._GATES.clear()
+
+
+def test_embed_gate_is_reused_within_the_process(fresh_gates):
+    from rag.core.config import EmbedConfig
+    from rag.ingest import pipeline
+
+    cfg = EmbedConfig(concurrency=3)
+    g1 = pipeline._embed_gate(cfg)
+    g2 = pipeline._embed_gate(cfg)
+    assert g1 is g2, "每次新建一把 = 每个文档各一张独立门票，乘积没被封顶"
+    assert g1.permits == 6
+    # 不同尺寸各算各的闸（配置在测试里会变，不该互相踩）
+    assert pipeline._embed_gate(EmbedConfig(concurrency=3)) is g1
+    assert pipeline._embed_gate(EmbedConfig(concurrency=5)).permits == 10
+    assert len(fresh_gates) == 2
+
+
+def test_concurrent_ingests_share_one_gate(fresh_gates):
+    """4 个文档 × 每个 4 分片：峰值在途必须 <= permits，而不是 16。"""
+    from rag.core.config import EmbedConfig
+    from rag.ingest import pipeline
+
+    cfg = EmbedConfig(concurrency=2, batch=8)   # permits = 4
+    emb = _CountingEmbedder()
+
+    def one(i):
+        return pipeline._embed_concurrently(
+            emb, [f"t{i}-{j}" for j in range(32)], cfg)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        outs = list(ex.map(one, range(4)))
+    assert all(len(o) == 32 for o in outs), "分片结果必须按原顺序拼回"
+    assert emb.calls == 16
+    # 闸真的在放行并发（否则 peak==1，这条测试就退化成「串行也算过」）
+    assert emb.peak > 1, "峰值 1 说明根本没并发，测不到闸门"
+    assert emb.peak <= min(cfg.concurrency * 2, 64), (
+        f"峰值在途 {emb.peak} > 闸门 {cfg.concurrency * 2}："
+        "每个文档各自建闸，「任务数 × 分片数」没有被封顶")
+
+
+def test_embed_batches_by_configured_size(fresh_gates):
+    """`embed.batch` 只有一个读取点，所以它必须有直接断言。
+
+    B6 的前提（「并发入库时每个分片各打一条 HTTP」）就是被这条事实否掉的：
+    200 chunks / batch=64 → 4 次请求 [64,64,64,8]，不是 200 次。
+    哪天合批被改坏（退化成 per-chunk），没有任何测试会红 —— 不可接受。
+    """
+    from rag.core.config import EmbedConfig
+    from rag.ingest import pipeline
+
+    cfg = EmbedConfig(batch=64, concurrency=4)
+    emb = _CountingEmbedder()
+    out = pipeline._embed_concurrently(emb, [f"t{i}" for i in range(200)], cfg)
+    assert len(out) == 200
+    # 分片是并发发出的，到达顺序不确定 —— 比形状，不比顺序
+    # （返回值的顺序由 `ex.map` 保证，上面 `len(out)` 那条只验证没丢）
+    assert sorted(emb.sizes, reverse=True) == [64, 64, 64, 8], \
+        f"合批形状变了：{emb.sizes}"
+    # 短文档必须一次打完（合批的收益就在这里，别退回逐条）
+    emb2 = _CountingEmbedder()
+    pipeline._embed_concurrently(emb2, [f"t{i}" for i in range(15)], cfg)
+    assert emb2.sizes == [15]
+
+
+def test_gate_actually_throttles_when_shared(fresh_gates, monkeypatch):
+    """变异检查：把闸门退回「每次新建」，上面的封顶断言必须失效。
+
+    这条不是冗余——它证明前一条测试测的是闸门本身，而不是恰好线程数少。
+    """
+    from rag.core.config import EmbedConfig
+    from rag.ingest import pipeline
+    from rag.models.http import ScaledSemaphore
+
+    monkeypatch.setattr(pipeline, "_embed_gate",
+                        lambda cfg: ScaledSemaphore(4))
+    emb = _CountingEmbedder()
+    cfg = EmbedConfig(concurrency=2, batch=8)
+
+    def one(i):
+        return pipeline._embed_concurrently(
+            emb, [f"t{i}-{j}" for j in range(32)], cfg)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(one, range(4)))
+    # 每文档一把闸 → 4 文档 × 2 worker = 8 在途，远超 permits=4
+    assert emb.peak > min(cfg.concurrency * 2, 64), (
+        "退回 per-call 建闸后峰值仍被封顶，说明并发度不够，前一条测试是假的")

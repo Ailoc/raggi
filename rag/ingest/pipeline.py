@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -129,18 +130,41 @@ def _mark_doc_failed(store: LanceStore, doc_id: str, error: str) -> None:
 # 信号量让总量封顶，重试也挤在同一闸内，不会放大。
 _EMBED_SEMAPHORE_DEFAULT = 8
 
+# 闸门实例必须**真的**活在进程级：在 _embed_concurrently 里每次新建一把，
+# 等于每个文档各有一张独立门票，「任务数 × 分片数」这个乘积一点没被封顶
+# （实测 4 个文档 × 4 分片峰值在途 = 16，8 分片 = 32）。上面那段
+# 关于级联重试风暴的说明正是它本该防的事。
+# 键是 permits：并发数不变时同一个实例复用；配置换了则各算各的闸。
+_GATES: dict[int, "ScaledSemaphore"] = {}
+_GATES_LOCK = threading.Lock()
+
 
 def _embed_gate(cfg) -> "ScaledSemaphore":
     """进程级 embedding 并发闸（按配置定尺寸）。
 
     闸门大小必须是**可配**的：它要匹配远端 provider 的配额，
     而硬编码 8 在换 provider / 换部署形态时就成了一个猜出来的数。
-    诚实说明边界：这是**每进程**一把闸；多进程 API/worker 形态下
-    总并发 = 进程数 × embed.concurrency，配置请按单进程理解。
+
+    诚实说明边界：
+    - **每进程**一把闸；多进程 API/worker 形态下总并发 = 进程数 ×
+      embed.concurrency，配置请按单进程理解。
+    - 只覆盖入库路径（`_embed_concurrently`）。`api/models.py` 的连通性
+      探针直接调 `embedder.embed`，不排队。
     """
     n = int(getattr(cfg, "concurrency", _EMBED_SEMAPHORE_DEFAULT)
             or _EMBED_SEMAPHORE_DEFAULT)
-    return ScaledSemaphore(max(1, min(n * 2, 64)))
+    permits = max(1, min(n * 2, 64))
+    gate = _GATES.get(permits)
+    if gate is not None:
+        return gate
+    with _GATES_LOCK:
+        # 双检：两个文档同时起步时，只有一个实例能进字典，
+        # 否则又回到「各拿一把闸」。
+        gate = _GATES.get(permits)
+        if gate is None:
+            gate = ScaledSemaphore(permits)
+            _GATES[permits] = gate
+        return gate
 
 
 def _embed_concurrently(embedder, texts: list[str], cfg) -> list[list[float]]:
