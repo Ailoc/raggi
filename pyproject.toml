@@ -80,10 +80,17 @@ select = ["E9", "F", "I"]
 rag = "rag.server:main"
 rag-bench = "tools.bench.__main__:main"
 
-# flat-layout 下显式声明包范围，避免 web/ data/ 被误当作待安装顶层包。
+# flat-layout 下显式声明包范围，避免 web/ data/ 被误当作顶层包。
 # 前端 web/ 不进 Python 包：仅由 FastAPI 的 StaticFiles 托管。
+#
+# `tools*` 必须在里面：`rag-bench` 是声明过的控制台脚本
+# （`rag-bench = "tools.bench.__main__:main"`），而只装 rag* 的 wheel 里
+# 根本没有 tools/ —— 实测装出来的 `rag-bench` 直接
+# `ModuleNotFoundError: No module named 'tools'`。
+# `pip install -e .` 恰好能跑（源码目录本身在 sys.path 上），
+# 所以这个缺陷只有真装一次才看得见 —— 与 §2.4 的 `.gitignore` 是同一课。
 [tool.setuptools.packages.find]
-include = ["rag*"]
+include = ["rag*", "tools*"]
 
 [build-system]
 requires = ["setuptools>=68"]
