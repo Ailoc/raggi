@@ -445,7 +445,8 @@ python3 -m pytest -q                                    # 548 passed
 python3 -m pytest -q tests/test_sql_safety.py \
                    tests/test_cache.py \
                    tests/test_meta_store.py \
-                   tests/test_perf_gates.py             # 51 条守卫，10s
+                   tests/test_perf_gates.py             # 55 条守卫，11s
+python3 -m ruff check rag tools tests                     # 门禁（E9/F/I），当前全绿
 python3 -m pyflakes rag tools                            # 只剩 1 条有意的 noqa 探测
 ```
 

@@ -888,7 +888,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **544 个测试通过**。
+当前 **548 个测试通过**。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
@@ -911,7 +911,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
   > （`test_sql_safety.py`）。另外加了一条**棘轮**：目前仍有 3 个模块在 storage 之外自己拼 SQL 文本
   > （`api/chunks.py`、`retrieval/answer.py`、`retrieval/search.py`，chunks 表还没有意图型读接口），
   > 测试不假装债已还清，而是禁止它长大——新增一个文件就红一次。
-- **SQL 文本层**（`test_sql_safety.py`，17 项）：含 `'` 的**合法**值必须照样查得回来（转义做过头会让
+- **SQL 文本层**（`test_sql_safety.py`，18 项）：含 `'` 的**合法**值必须照样查得回来（转义做过头会让
   用户看到「文档存在但搜不到」且全程无报错）；`' OR 1=1--` 匹配不到任何行；LIKE/ILIKE 里的
   `%` `_` 必须保持字面量；**投影过白名单**（列名无法做成占位符，`SELECT {', '.join(cols)}` 是唯一
   能改写查询本体的位置，且要在引擎分派**之前**收窄——只收一条路径等于没收）；
@@ -919,11 +919,30 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
   表形状在三处声明（LanceModel / SQLite DDL / 迁移用的列清单），**两条边逐条比对**——
   丢 `text` 那次迁移事故就是「列清单落后于真实形状」，而迁移恰恰按列清单取投影；
   以及 `Settings` 的每个顶层字段都要在业务代码里有读取点（写进 config.toml 却没人读的配置是在骗用户）。
+- **引擎分派的单一实现点**（`test_sql_safety.py::test_engine_dispatch_has_exactly_one_implementation`）：
+  「这次读 SQLite 还是 LanceDB」只允许有 `repos/_engine.py:meta_of()` 一处实现，四个仓储模块一律
+  `from ._engine import meta_of as _meta`。这条守的是**复制**而不是正确性：四个模块曾各写一份
+  `getattr(store, "meta", None)`，形状一致但没有强制，任何一处漏了分派就静默走回退路径——
+  无鉴权事故与「列表 8 篇 / 健康说 7 篇」事故都是这个形状。
+- **启动期的回退规则**（`test_meta_store.py`，3 项）：元数据引擎初始化失败时，
+  **只有** SQLite 里一行数据都没有才允许退回 LanceDB；已有数据则抛 `Invalid` 拒绝启动。
+  改前一律 `log.error + return None`，注释理由是「不带分裂状态启动」——但**退回旧路径本身就是
+  分裂状态**（SQLite 里已有的数据不会同步回 Lance，此后读写全在旧引擎上）。
+  三项分别覆盖：已有数据必须拒启 / 空库可以安全回退 / 探测必须真是只读
+  （`sqlite_holds_data` 若忘写 `mode=ro`，会在这条错误路径上凭空建出一个空库，
+  下次启动就被当成「已有数据」——**防分裂的守卫自己制造分裂**，这是新测试抓出来的第一个 bug）。
 - **手写并发件**（`test_cache.py`，10 项）：`TTLCache` 站在鉴权与观测两条关键路径上，
   改造前直接测试为 0。逐条钉住它注释里声称的承诺：按项 TTL、并发写下上界不被突破、LRU 次序、
   `invalidate` 立即可见、键作用域（跨数据目录串键就是越权）、`None` 也是有效值、
   以及 **`loader` 在锁外执行**——这条是它存在的性能理由，用一个线程在 loader 里等事件、
   另一个线程必须仍能读写来验证。
+- **守卫自身的守卫**：`test_audit_regressions.py::test_auth_is_threaded_off_event_loop`
+  原来是 `inspect.getsource(create_app)` 里找一行字串。把中间件体拆出去之后它变红，
+  而**行为一点没变**——这恰好证明它是假绿的一种：字串还在就算过，行为怎么坏它都照过。
+  已改成行为断言：利用「工作线程里 `asyncio.get_running_loop()` 必然抛 RuntimeError」
+  判定 `authenticate` 到底跑在哪个线程上（确定性、无计时、与函数叫什么/放在哪里无关）。
+  > 同一文件里还剩 5 处 `inspect.getsource` 型守卫（`:264/:397/:407/:426/:460`），
+  > 本轮没有一并重写，已记进审计报告的 C 档第 11 项。前端那侧的同类教训见上一条静态守卫。
 - **集成**：同一 PDF 用不同引擎入库均可检索；编辑 `manual` 分块后新词可检索且 `fts_stale=0`；删除文档无孤儿 chunk；`/api/models/test` 三类模型均返回 ok（断网时明确失败而非 500）。
 - **前端控件一致性**：解析 HTML 得到真实控件类型，与 `PARAMS` 表交叉校验。
   > 曾发现 `group_by_doc` 声明为 `bool` 但实际是 `<select>`，导致该参数永远提交 `false`。
