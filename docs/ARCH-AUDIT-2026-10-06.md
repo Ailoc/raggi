@@ -17,36 +17,47 @@
 入库从「越并发越慢」（2.81 docs/s @c=32）变成单调上升（60.5 docs/s）。
 
 **真正的问题集中在一个模式上：隐式协议。**
-「双引擎分派」「跨进程写锁」「手写缓存」「配置读取」「并发闸门」这几件事都靠
+「双引擎分派」「跨进程写锁」「手写缓存」「配置读取」「并发闸门」「修复路径」这几件事都靠
 *约定*而不是*类型或构造*来保证——属性恰好被挂上、调用方记得传对参数、
-配置项恰好有人在读、闸门恰好是单例。这类东西出错时不会报错，只会**结果悄悄不对**。
-本轮在这一个模式上抓出并修掉了 5 个严重缺陷（§5.1 与 §2.4）+ 1 个中等（§5.7a 的假闸门），
-其中两个直接导致数据丢失与鉴权失效，一个由 **CI** 首先发现。
-B 档执行轮又添了一条同类证据：**闸门在默认配置下的错误数值正好等于期望数值**
-（2 workers × 4 shards = 8 = 名义上限），所以它从来没人看得见。
+配置项恰好有人在读、闸门恰好是单例、修复写的恰好是真源那个引擎。
+这类东西出错时不会报错，只会**结果悄悄不对**。
+四轮下来在这一个模式上抓出并修掉了 **8 个严重缺陷**
+（§5.1 的 4 个 + §2.4 的 `.gitignore` + §5.8 的 3 个：修复计数是空操作、
+`has_keys()` 读失败即无鉴权 10 秒、`health()` 把检查失败报成正常），
+外加 2 个中等（§5.7a 假闸门、§5.8d `rag-bench` 装不出来），
+以及两个「**一句自我声明背后根本没有对应机制**」：
+pyproject 声称跑过的双向导入探针从来不存在（§1.3），
+`[project.scripts]` 声明的 `rag-bench` 在 wheel 里无处落地（§5.8d）。
+
+B 档与 C 档执行轮各添了一条同类证据，值得单独记住：
+- **闸门在默认配置下算出的错数正好等于期望数**（2 workers × 4 shards = 8 = 名义上限），
+  所以它永远看不见（§5.7a）；
+- **「修复成功」的返回值与「修复生效」是两件事**：`fixed: 1` 写进了
+  一个已经不再被读取的引擎，界面数字一动不动（§5.8a）。
 
 **工程实践的缺口比代码问题更该先补，而且已经补上了**：
 本仓原先没有 git、没有 lint、没有 CI，也没有类型检查；
-A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已在本轮完成。
+A 档四项与 mypy 均已落地，且**每一条门禁都有本地等价物**
+（`tests/test_lint_gate.py` 跑 CI 那两条命令原样）。
 补上的第二天就见了效——第一次真实 CI 运行就抓出 `.gitignore` 写错导致
 **推上去的仓库从干净检出构建不起来**（§2.4），而这个问题在本地永远不可见。
 然后 CI 自己也**被本审计的作者弄红过一次**：B5 提交带着两条 ruff 违规上了 main，
 本地 551 条测试全绿（pytest 里没人跑 lint）。已补 `tests/test_lint_gate.py`（§5.7b）。
 
-| 维度 | 结论 | 本轮已修 | 仍开放 |
+| 维度 | 结论 | 已修 / 已定案 | 仍开放 |
 |---|---|---|---|
-| 架构专业性 | 骨架正确，分派机制是隐式的 | 1 | 4（A1–A4） |
-| 可维护性 | 工具链从无到有；注释仍在漂移 | 4（git / ruff+CI / create_app / `.gitignore`） | 2（M3 其余 11 个长函数、M5 文档漂移；mypy 归 M2） |
-| 代码规范性 | 一致性高于一般个人项目 | 4 | 3（C1–C3） |
-| 性能 | 上一轮的收益是真实的；B 档两项已**测完定案** | 2 定案（P1 不做、P2 不改默认值）+ 1 修（P3 进程内那半）+ 1 记录（P6） | P3 跨进程那半、P4 段错误、P5 未测清单 |
+| 架构专业性 | 骨架正确；四对循环依赖已解，分派已收口 | A1 ✅ A2 ✅ A3 ✅（A4 前提被证伪，顺出 §5.8a） | M3 的长函数、以及「拿不到 meta 时默认静默回退」这条仍待显式化 |
+| 可维护性 | 工具链从无到有：git / ruff / CI / **mypy** / 双向导入探针 | 5 项 + 注释漂移新增 4 条已修 | M3 其余 11 个长函数、M5 注释漂移（结构性，无机械手段） |
+| 代码规范性 | 一致性高于一般个人项目 | C1 决定不做（有理由）、C2 **原判断不成立**、C3 已按新判据处理 | 无 |
+| 性能 | 上一轮收益是真实的；B 档两项**测完定案** | P1 不做、P2 不改默认值、P3 进程内那半已修、P6 已记录并确认有守卫 | P3 跨进程那半、P4 段错误未定位、P5 未测清单 |
 
 测试（下面一律按**收集到的条数**计，避免「passed 数」被 `perf` 标记的移出/移入扰动）：
 491（改造前）→ 517（并发改造）→ 544（审计轮 +27）→ 548（A 档执行轮 +4）
-→ **555**（B 档执行轮 **+7**：闸门 3、合批形状 1、`embed_one` 缓存承诺 2、
-本地 lint 门槛 1，再把一条会随机红的阶段测试换成事件闸门版本 —— 净 +7 是
-「新增 8 条、删掉 1 条」，见 §5.7d）。
-默认套件 **554 passed / 1 deselected**（`addopts = ["-m", "not perf"]` 把延迟门槛
-移出默认套件，手动 `pytest -m perf` 补最后一条）。
+→ 555（B 档执行轮 +7）→ **562**（C 档执行轮 +7：行为守卫改写 4 条原地替换不计数、
+双向导入探针 1、入口可安装性 1、health 诚实性 2（含 1 条反向对照）、
+fail-open 鉴权 2、reconcile 走对引擎 1，减去删掉的文本守卫 1，加 mypy 门槛 1）。
+默认套件 **561 passed / 1 deselected**，`ruff check rag tools tests` 与
+`python -m mypy` 均全绿（两条都同时挂在 CI 与 pytest 上）。
 **但「本机全绿」在 §2.4b 之后被证明不够**：同一份代码在干净环境下是
 545 passed / 2 skipped / 1 deselected，而那 2 个 skip 之前是以 404 的形式失败的。
 
@@ -106,32 +117,43 @@ A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已�
 （每请求查询次数、`builder == 0`、`rows <= limit`、分页不重不漏）全过，
 这比在 3GB 机器上采一次噪声很大的延迟样本更能说明「没有回归」；
 真正的吞吐对比留到 B6（embed 合批）一次做掉，那时本来就要建数据集。
-全量套件本轮结束时 **554 passed / 1 deselected**（见 §0 的计数链）。
+全量套件本轮结束时 **561 passed / 1 deselected**（见 §0 的计数链）。
 > 这里原来写的是「547 passed，ruff 全绿」——**那句 ruff 全绿对本节所属的那个提交
 > （`f751957`）是不成立的**：干净检出上 `ruff check rag tools tests` 返回 2 条 `I001`。
 > 一句话的自评必须能被重跑，否则它就会变成第二条 §2.5 的注释漂移；
 > 现在这句话由 `tests/test_lint_gate.py` 代劳（§5.7b）。
 
-### 1.3 A2 · 四对真循环依赖，靠函数内 import 掩盖（中等，开放）
+### 1.3 A2 · 四对真循环依赖（中等，**已解** —— 2026-10-06 C 档执行轮）
 
-**现象**：全仓 25 处函数内 `import rag.*`，其中这些是真环：
-**证据**：
-- `rag/api/__init__.py:360`（`_startup_maintenance` → `rag.server`）
-  ↔ `rag/server.py:34`（`build_app` → `rag.api`）；
-- `rag/storage/plan.py:28`（模块级 → `.repos`）
-  ↔ `rag/storage/repos/kbs.py:118,149`（函数级 → `..plan`）；
-- `rag/storage/repos/documents.py:418`（函数级 → `.kbs`）
-  ↔ `rag/storage/repos/kbs.py:11`（模块级 → `.documents`）；
-- `rag/storage/tables.py:195`（函数级 → `.repos`）
-  ↔ `rag/storage/repos/kbs.py:13`（模块级 → `..tables`）。
-**影响**：今天能跑，代价是**「谁依赖谁」不可读**。搬文件、改名、拆模块时
-会撞 ImportError 才发现方向反了；而 `documents.py:418` 那条注释写的是
-「kbs.py 依赖本模块」—— 说明作者当时知道，只是把环留在了原地。
-**建议**：先解最干净的第一条：`should_run_startup_maintenance` /
-`mark_maintenance_done` 是**启动策略**而不是进程装配，把它们从 `server.py`
-移到 `rag/core/`，`api/__init__.py` 就不需要回头 import server。
-后三条涉及「重切分归谁」「schema 归谁」「列清单归谁」的边界判断，
-属于 §6 的 C 档，动之前要先定职责。
+**现象（审计当时的记录）**：全仓约 25 处函数内 `import rag.*`，掩盖着四对真环。
+当时写的行号已经漂了，下面是复核后的位置与每对的**方向判断**——
+「把 import 换个位置」不算解开，得先说谁该依赖谁。
+
+| 环 | 审计当时写的证据 | 复核结论 | 解法 |
+|---|---|---|---|
+| A `api ↔ server` | `api/__init__.py:360` ↔ `server.py:34` | 两条边都是**运行时调用**，不是类型依赖 ⇒ 谁在上没有答案 | 把共用的「启动期维护标记」这一小约定（`should_run_startup_maintenance` / `mark_maintenance_done`）移到 `rag/core/maintenance.py`；两条延迟导入都回到模块级 |
+| B `plan ↔ repos/kbs` | `plan.py:28` ↔ `kbs.py:118,149` | `clamp_size`/`clamp_ratio`/`overlap_chars` 是**零依赖的纯数值限幅** —— 它没资格决定依赖方向 | 下沉成叶子 `rag/storage/chunk_limits.py`；`plan` **不再二次导出**（两个导入路径就是本仓在防的那种状态） |
+| C `repos/documents ↔ repos/kbs` | `documents.py:418` ↔ `kbs.py:11` | 方向只能是 kbs→documents（documents 是更低的仓储） | `update_metadata` 的「目标知识库必须存在」校验改为**调用方注入 `kb_exists`**，不传就抛 `Invalid` —— 忘了传必须当场炸，而不是静默允许悬空 kb_id |
+| D `tables ↔ repos/kbs` | `tables.py:195` ↔ `kbs.py:13` | `kbs`/`keys`/`plan` 三处的 `from ..tables import LanceStore` 其实**只出现在注解里**（都有 `from __future__ import annotations`）⇒ 运行时这条边根本不存在 | 归进 `if TYPE_CHECKING`；并验证性地把 `tables.stats()` 里两条 repos 导入提到模块级，双向探针仍全绿 ⇒ 它本来也不是环 |
+
+**顺带抓到两处注释漂移（§2.5 的第 21、22 条）**：
+
+- `tables.py` 那句「局部导入：`writer` 反向依赖本模块，模块级导入会成环」——
+  **`writer` 这个模块从来没有存在过**；而 `escape_sql`/`fetch_rows` 的家在 `sql.py`，
+  `repos` 只是再导出它们。绕道再导出，才凭空造出那条并不存在的「环」。
+- `pyproject.toml` 声称「用 `pkgutil.walk_packages` 正序+逆序各导一遍 ⇒ 0 失败」，
+  但**这个探针从来没进过测试套件**（全仓 grep 不到 `walk_packages`）。
+  补成 `tests/test_import_order.py` 之后，它自己立刻报出第二个问题：
+  `walk_packages` 只返回 40 个模块而磁盘上是 53 个 —— `rag/ingest`、`rag/models`、
+  `rag.parsing` 都没有 `__init__.py`（隐式命名空间包），检查器看不见它们，
+  于是那句「0 失败」从来没导入过 `pipeline` / `queue` / `splitter`。
+  现在按文件系统枚举并断言数量，「枚举本身失效」会红而不是静默变绿。
+  **这条改造过程中的每次导入变动都由这个探针双向验证过**（共 4 轮）。
+
+**遗留**：函数内 import 仍有约 60 处，但性质已经查清并分类完毕 ——
+第三方可选依赖的懒加载（langchain / pymupdf / docling / lancedb / pandas）、
+以及纯粹多余的十几处。**剩下的不是环，也就不再是结构性问题**；
+把它们一律提到模块级只会增加一次全仓改动的噪声，没有对应收益（刻意没做）。
 
 ### 1.4 A3 · 引擎分派机制本身是隐式的（严重根因，部分已修）
 
@@ -152,12 +174,28 @@ A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已�
 **建议**：把这一行收到一处；并在默认配置（`auto`）下取不到 meta 就启动失败，
 只有显式写了 `meta_engine=lancedb` 才允许回退。
 
-### 1.5 A4 · 重扫描型对账仍在请求路径上（轻微，已知余量）
+### 1.5 A4 · 「重扫描型对账仍在请求路径上」——**前提核对后是错的**（改写；真缺陷另有其一）
 
-`/health`、`/stats` 已快照化（实测 p50 40.7→2.9ms、28.7→546 rps @c=32，
-`/api/stats` @c=32 从 5053ms 到 29.8ms），但 `reconcile` 仍是同步全量比对。
-DESIGN §16 与 `PERF-IMPLEMENTATION` §3 都如实声明了这条，
-原计划的 SSE / 后台周期任务没做。**不算缺陷，是已声明的余量。**
+审计当时写：`/health`、`/stats` 已快照化，但 `reconcile` 仍是同步全量比对，
+属于「已声明的余量」。**C 档执行轮去动它之前先核对了调用点，结论是这句不成立**：
+
+| 谁 | 在哪 | 频率 |
+|---|---|---|
+| `reconcile_doc_counts`（**写**型全量比对） | 只有 `api/system.py` 的 `POST /api/reconcile` —— 设置页那个「修复计数」按钮 | 用户点一次跑一次 |
+| `health()` 里的计数比对（**只读**） | `GET /api/health` | 请求路径上，但早已进 3 秒快照 + 任何成功写作废快照 |
+
+所以「把对账移出请求路径」这件事**没有对象可移**：写型对账本来就不在请求路径上，
+只读那半本来就已经在快照后面。建议的第 10 项因此作废 —— 记下来是为了避免
+下一轮又照着这条去「优化」一个不存在的热点。
+
+但顺着这条线索去读 `reconcile_doc_counts`，读出一个**真缺陷**，
+而且形状比原条目严重得多（本轮第 7 个严重问题，见 §5.8a）：它把修复结果
+写进了 Lance 旧副本，而 documents 的真源在 S3 之后是 SQLite。
+**用户点「修复」，接口回报 `fixed: 1`，真源一个字没改，`/api/health` 依旧 degraded，
+全程没有任何异常。**再点一次，又成功一次。
+
+一个「优化建议」被证伪、却顺出它掩盖的功能缺陷 —— 这条是本报告里
+「先核对前提再动手」最划算的一次。
 
 ## 2. 可维护性
 
@@ -167,15 +205,37 @@ DESIGN §16 与 `PERF-IMPLEMENTATION` §3 都如实声明了这条，
 在一个以「多引擎分派 + 手写并发件 + 跨进程锁」为特征的代码库里，
 这是最需要安全网的地方。成本 5 分钟。我没有擅自 `git init`（需要授权）。
 
-### 2.2 M2 · 没有 lint / 类型检查 / CI（中等，**ruff 与 CI 已完成，mypy 仍开放**）
+### 2.2 M2 · 没有 lint / 类型检查 / CI（中等，**三项全部完成**）
 
-`pyproject.toml` 只有 `[tool.pytest.ini_options]` 与打包配置；无 ruff、无 mypy、
-无 `.github/workflows`。今天唯一的自动化安全网是 `pytest`。
+审计当时：`pyproject.toml` 只有 `[tool.pytest.ini_options]` 与打包配置；
+无 ruff、无 mypy、无 `.github/workflows`。今天三项都在，且都有本地等价物。
 
-**为什么类型检查在这里特别值钱**：双引擎分派的签名全是
-`MetaStore | None`，而 §1.4 那三起事故全都是「None 走到了不该走的分支」。
-`mypy --strict` 对 `rag/storage/` 跑起来，能在写的时候就把
-「这个 store 到底有没有 meta」变成显式问题。
+**类型检查为什么在这里值钱，被实测证实了**：原猜测是
+「双引擎分派的签名全是 `MetaStore | None`，三起事故全都是 None 走错分支」。
+把 mypy 圈到 `rag/storage/` 跑第一轮，出 11 条，**没有一条是纯噪音**：
+
+- 3 条是 `dict[str, int]` 被第一次赋值钉死后，赋 str 全红 ——
+  这类推断会把**真的**赋错类型掩盖掉（`meta.stats` / `kbs.update_kb` / `plan.set_kb_plan`）；
+- 2 条是 `list_jobs` 里同一个名字 `where` 在两个引擎间含义不同
+  （SQLite 的 `WHERE …` 片段 vs Lance 的完整 filter 表达式）⇒ 拆成
+  `sql_where` / `lance_where`，方向性错误从此在代码里看得见；
+- 1 条 `bool(row) and row.get(...)` 根本无法把 `dict | None` 收窄 ——
+  这正是「None 走到不该走的分支」那一类，只是这次被静态抓住了；
+- 1 条是 lancedb `Vector(dim)` 的运行时参数化注解，静态检查器判非法，
+  改写会破坏建表 ⇒ 全仓唯一一个 `type: ignore`，并写明原因。
+
+**两个刻意不做的事**：不开 `--strict`（第一次就红 200 条的检查器只会被长期
+`--ignore`，等于没有 —— 与 ruff 只选 E9/F/I 是同一个决定）；
+不假装全仓已覆盖（`files` 就只有 `rag/storage`，其余目录要一个一个搬）。
+
+**接成门禁而不是跑过一次**：CI 里 `python -m mypy`，范围只写在
+`[tool.mypy] files` **一处**（命令行再写一遍就会出现「CI 查的目录」与
+「本地查的目录」不一致，而那没人看得出来）；本地由
+`tests/test_lint_gate.py::test_mypy_gate_matches_ci` 覆盖，并且断言
+**被检查的文件数 ≥ 15** —— 否则 `files` 指错目录时 mypy 会输出
+`no issues found in 0 source files` 然后绿灯，那是最漂亮的一种假绿。
+实测把范围缩到单个文件时输出确实是 `1 source file`，这条断言是有效的。
+
 
 **建议顺序**：① ruff（lint + import 排序，零行为改动，顺手治 §4 的 C1/C2）；
 ② 一条跑 `pytest -q` 的 CI；③ mypy 只对 `rag/storage/` 起步。
@@ -303,28 +363,64 @@ tests/test_e2e_flow.py::test_frontend_assets_served       assert 404 == 200
 一处（`escape_sql` / `escape_like` / `quote_in` / `only_cols` / `scalar_rows` /
 `count_rows` / `fill_missing` / `table_columns`）；`__all__` 与真实调用点对齐；
 无 `TODO/FIXME/XXX` 残留（grep 为空）；文档字符串一律中文且解释「为什么」；
-`pyflakes rag tools` 现在只剩 1 条报告，而且是有意标了 `noqa: F401` 的
-uvloop 可用性探测。
+`pyflakes rag tools tests` 只剩 2 条报告，且都是有意标了 `noqa: F401` 的
+可用性/可导入探测（uvloop、router 模块）——见 §3.3，那里也顺手纠正了
+本报告原先写的「只剩 1 条」和「tests/ 有 27 条」这两个没重跑过的数字。
 
-### 3.2 C1 · 80 列违规 39 行，分布在 22 个文件（轻微，开放）
+### 3.2 C1 · 80 列违规 39 行，分布在 22 个文件（轻微，**刻意不做**）
 
-没有 formatter 强制执行，所以会持续增长。M2 的 ruff 顺手能治。
-不建议手工重排（改动面大且无收益）。
+没有 formatter 强制执行，所以会持续增长。**决定不动**，理由与当初
+把 `line-length` 设成 100 而不是 80 是同一条：现存 39 行超 80、只有 7 行超 100，
+按 80 重排会得到一次「全文件挪动」的假改动提交，
+那正是 code review 最想避免的噪声，而这批行没有一条影响正确性。
+ruff 的 `E9` 只抓语法与未定义名，`E501` 刻意没开 —— 这也是一个**有记录的决定**，
+不是漏配。
 
-### 3.3 C2 · `tests/` 有 27 条 pyflakes 报告（轻微，开放）
+### 3.3 C2 · 「`tests/` 有 27 条 pyflakes 报告」——**已核，这条不成立**（作废）
 
-16 条未使用 import、10 条赋值后未使用的局部变量。
-不影响正确性，但会让人怀疑「这个 import 是不是本来该有用到，是漏了断言？」
-—— 那是噪声。也交给 ruff。
+C 档执行轮重跑 `python3 -m pyflakes rag tools tests`，实际只有 **2 条**，
+且都是**有意**的 `# noqa: F401` 可用性/可导入探测
+（`rag/server.py` 的 uvloop、`tests/test_architecture.py` 的 router 可导入）。
+`per-file-ignores` 里只有 `tests/conftest.py`，所以不是被配置遮住的。
 
-### 3.4 C3 · 23 处 `except Exception` 紧跟 `logger.debug`（中等，开放）
+pyflakes 与 ruff 的差异也只是「pyflakes 不认 `# noqa`，ruff 认」——
+即这两条不是漏网的，是**已声明的例外**。审计里那个 27 无从复现，
+推测是把 `noqa` 抑制之前的某个状态抄了下来。
+**结论：这条不是待办，删掉它；顺带把 §3.1 里「只剩 1 条」改成「2 条」**
+（那句同样是抄来的数字，没有重跑过）。
 
-全仓 92 处 `except Exception  # noqa: BLE001`。多数是**刻意的**，
-而且理由写在旁边（观测数据不该拖垮主流程：任务状态写失败不抛、
-`last_used_at` 更新失败只记日志），这个取舍是对的。
-但有 23 处降到 `logger.debug`，默认日志级别下**线上完全看不见**。
-建议区分两类：「不影响正确性」留 debug；「影响结果但可对用户降级」
-一律 `logger.warning` —— 后者静默的含义是用户看到的数据少了却毫无痕迹。
+这一条是本报告自己的一次 §2.5 注释漂移：**报告也会漂移**，
+所以每条都标了「怎么重跑」（§7）。
+
+### 3.4 C3 · 「23 处 `except Exception` 紧跟 `logger.debug`」（**已处理，并发现了比它更糟的两处**）
+
+全仓实测 95 处宽异常处理器（`logger.debug` 23 / **完全无日志 36** /
+`warning` 15 / `error` 2 / 重抛 18）。多数是刻意的且理由写在旁边，
+这个取舍是对的。审计当时的建议是「按影响分两级」——执行时把判据收紧成一句：
+
+> **这次失败会不会留下一个持续错误的状态，而用户和排障的人都没有第二个地方能看出来。**
+
+按这句，两处比「debug 看不见」严重得多的问题被翻了出来，都在 §5.8：
+`health()` 把「检查没跑成」写成「一切正常」（而且参与 `status` 判定）、
+`has_keys()` 把「读不出有没有密钥」写成「没有密钥」⇒ **整个 API 无鉴权 10 秒**。
+两者都不是「日志级别选错」，是**默认值选错了方向**。
+
+剩下 6 处按新判据升到 `warning`（标量索引没建成 = 全表扫描、`fts_stale`
+清不掉 = 健康检查永远显示待重建、`chunk_count` 回写失败 = 块数永远虚高、
+`stored_file` 读失败 = 报「没有留档」而对象还在、任务阶段写失败 = 进度永远卡住、
+取消状态读失败 = 用户的取消被丢弃）。
+
+**明确留在 debug 的三类**，理由写进代码而不是留给下一个人重新怀疑：
+失败信息已经进了 API 返回值的（`compact_*`）；探测型读取、取不到只影响显示的
+（`vector_dim` / `list_indices` / 版本刷新 / 后端容量）；以及底层函数自己
+已经 warning 过、再打一条就是重复噪声的（`queue._fail/_cancel/_mark_cancelling`
+—— `jobs.set_job` 现在自己带 job_id 与 stage 报警）。
+
+**一个副作用值得记下**：升日志级别时暴露出 `jobs` / `chunk_edit` / `sql`
+三个模块**根本没有 logger**。也就是说这些错误路径一旦真走到，
+报的不是那条 warning 而是 `NameError` —— 而错误路径平时没有测试覆盖，
+所以这个坑可以无限期潜伏。补上日志器之后，这类笔误由 `ruff` 的 F821
+（未定义名）代劳，而 F821 已经进了 CI 与本地门槛两条链路。
 
 ## 4. 性能
 
@@ -496,7 +592,11 @@ Rust Deprecation 警告：「目前会自动补，将来不补了，请调
 - `s3` 后端只以 mock 单测验证，没对真实 RustFS/MinIO 跑过；
 - 多机部署不在范围内（`filelock` 边界 1 写了这条）。
 
-## 5. 本轮已修（4 个严重 + 一批中轻，全部有对应测试）
+## 5. 已修（四轮累计：**8 个严重** + 3 个中等 + 一批中轻，全部有对应测试）
+
+> 中等三处 = §5.7a 假闸门、§5.8d 声明的入口装不出来、§5.8e 声明的探针不存在。
+> 后两条同属一类：**配置/文档里声明了某个机制，而这个机制从来没有实现过**——
+> 它们不像功能缺陷那样会被用户碰到，但它们让「已经验证过」这句话变成假的。
 
 ### 5.1 四个严重问题（都在生产默认路径上）
 
@@ -681,6 +781,69 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
 这条测试是同一个坑的第二份证据。
 
 
+### 5.8 C 档执行轮：三个新的严重缺陷，都藏在「被审计说错的那条」旁边（2026-10-06）
+
+**(a) `POST /api/reconcile` 在默认配置下是个会回报成功的空操作（严重）**
+
+§1.5 那条「对账还在请求路径上」被核对为**不成立**之后，顺着调用点读进函数本体，
+读出了这个：它写 `store.documents.update(...)` —— **Lance 旧副本**，
+而 documents 的真源在 S3 之后是 SQLite，读又一律走引擎分派的 `docs_query`。
+
+```
+用户点「修复计数」 → 接口返回 fixed: 1
+                 → 真源里的 999 一个字没改
+                 → /api/health 的 count_mismatch 一条没少
+                 → 再点一次，又成功一次
+```
+
+没有任何异常。这是本仓第 **7** 个「隐式协议」事故，也是第一个发生在
+**用户主动点击的修复动作**上的 —— 修复路径自己不可信，比功能坏更难发现。
+测试 `test_reconcile_fixes_the_engine_that_holds_the_truth` 先失败（`assert 999 != 999`）
+后通过，证明它抓的是这个。改法是回到既有的两条纪律：写走 `set_doc_fields`
+（它的存在理由就是「只有一个地方知道两个方言怎么写」，这处是唯一点绕行者），
+实际计数与 health 共用 `chunk_counts_by_doc`（顺带 23.2ms → 10.7ms，20000 分块实测）。
+
+**(b) `has_keys()` 读失败时返回 False ⇒ 整个 API 无鉴权 10 秒（严重）**
+
+`auth.py` 有两处把 `has_keys() == False` 当**放行**条件（无凭据直通、
+零密钥时对 ADMIN_PREFIXES 开放），而这个值会被 `TTLCache` 缓存 10 秒。
+所以一次瞬时读失败的后果不是「某次请求慢」，而是 **10 秒的全体放行**。
+它自己上方的注释就写着「数错了不是性能问题而是**安全**问题」，
+错误分支却写着放行值。现在：失败抛 `ApiKeysUnavailable` → `authenticate` 映射 503，
+异常不进缓存（测过第二次仍然真去查）。非放行用途的 `_file_url`
+按「已启用鉴权」签名 —— 那个方向的误判不会造成死链。
+
+**(c) `health()` 把「检查没跑成」报成「一切正常」（严重）**
+
+`except Exception: fts_stale = 0` 与 `except Exception: embed_model_mismatch = False`，
+后者还直接参与 `status` 计算。检查失败被翻译成两个肯定回答 + 一行 debug 日志。
+现在未知进 `checks_failed`、计数用 -1 而不是 0（0 会被界面渲染成绿色徽章）、
+**跑不成就不许说 ok**；前端与 apidoc 同步区分「查出问题」和「无法确认」。
+
+**(d) `rag-bench` 从来装不出来（中等）**
+
+`[project.scripts]` 声明了 `rag-bench = "tools.bench.__main__:main"`，
+而 `packages.find` 只收 `rag*` ⇒ wheel 里没有 `tools/`。
+实测干净 venv 装 wheel 后 `ModuleNotFoundError: No module named 'tools'`。
+`pip install -e .` 恰好能跑（源码目录本身在 sys.path 上），所以这条**只在真装一次时现形**
+—— 与 §2.4 的 `.gitignore` 是同一课，也是 §7 里那条「本机全绿 ≠ 装得起来」的第三次验证。
+
+**(e) 那条「双向导入探针」从来没存在过（中等）**
+
+见 §1.3。`pkgutil.walk_packages` 看不见三个命名空间包，
+意味着 pyproject 里那句「0 失败」从来没检查过 `pipeline`/`queue`/`splitter`。
+
+**(f) 四对循环依赖已解、mypy 已进门禁、文本型守卫已清零** —— 细节在 §1.3 / §2.2 / §5.7，
+这轮另加一条方法论：`inspect.getsource` 型守卫的**危害被本轮做成了可重跑的证据**
+（把 `score_kind` 退回取首行，旧守卫不红、新断言红），而不只是一句劝告。
+
+**(g) 自伤记录两条**（写在这里是因为它们都是「新写的测试第一次跑就抓到」的变体）：
+一条测试里写了 `finally: del auth_mod.apikeys.has_keys` —— `del` 没有「恢复原值」语义，
+把函数从模块里删掉，一次带走 16 条测试；另一条是 health 的两条测试夹具不自洽
+（`stated != actual`），于是 `degraded` 是从 `count_mismatch` 来的，
+证明不了它声称要证明的那条路径 —— 断言当时是绿的，但**测的是别的东西**。
+
+
 ## 6. 推进顺序与当前状态
 
 **A 档（1 天内，低风险）—— 四项已全部完成（2026-10-06）**
@@ -735,12 +898,19 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
    vector 模式下 `refine_factor=1` 只有 27.5% 的 top-10 与基准相同。
    数据、四条结论与那条「单位坑」见 §4.3。
 
-**C 档（先定职责再动）—— 未开始**
-8. 解掉四对循环：`api ↔ server`、`plan ↔ repos`、
-   `repos/documents ↔ repos/kbs`、`tables ↔ repos`（A2）；
-9. mypy 从 `rag/storage/` 起步（M2 ③）；
-10. `reconcile` 移出请求路径（A4）；
-11. 把那 5 处文本型守卫改成行为断言（第 3 项暴露出来的同一类问题）。
+**C 档（先定职责再动）—— 四项全部完成（2026-10-06 C 档执行轮）**
+
+| # | 项目 | 状态 | 落点 / 结论 |
+|---|---|---|---|
+| 8 | 解掉四对循环依赖（A2） | ✅ | 每对都先定方向再动：标记函数下沉 `core/maintenance.py`、限幅下沉 `storage/chunk_limits.py`、kb 存在性校验改调用方注入、三处注解级 `LanceStore` 归 `TYPE_CHECKING`。由新建的双向导入探针在两种次序下逐一验过 |
+| 9 | mypy 从 `rag/storage/` 起步（M2 ③） | ✅ | 首轮 11 条无一纯噪音；CI + 本地门槛各一份，并断言「被检查文件数 ≥ 15」防 `files` 指错目录那种假绿。**不开 strict** |
+| 10 | `reconcile` 移出请求路径（A4） | ⚠️ **前提被证伪** | 它本来就只在手工端点上；顺线读函数却读出 §5.8a 那个「修复计数是空操作」的严重缺陷。条目作废，缺陷已修 |
+| 11 | 5 处 `inspect.getsource` 守卫改行为断言 | ✅ | 全仓 tests/ 里已无活动 `inspect` 断言（只剩注释里的历史说明）。并第一次把「文本守卫是假绿工厂」做成可重跑证据：把 `score_kind` 退回取首行，**旧守卫不红、新断言红** |
+
+**这一轮另外补上的（不在原清单里，是顺着 C 档挖出来的）**：
+§5.8b `has_keys()` 的 fail-open 鉴权窗口、§5.8c `health()` 把检查失败报成正常、
+§5.8d `rag-bench` 从来装不出来、§5.8e 「双向导入探针」这句话背后从来没有探针、
+§3.4 六处「吞掉且无痕」升 `warning` 并暴露三个模块根本没有 logger。
 
 **卡在「没有真实数据」上的一档（本机做不了，别在假数据上继续）**
 12. `nprobes` 到底能不能换召回：需要真实 embedding + 一个哪怕 30 条的标注召回集。
@@ -759,7 +929,7 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
 
 ```bash
 cd /home/admin/Raggi
-python3 -m pytest -q                                    # 554 passed, 1 deselected
+python3 -m pytest -q                                    # 561 passed, 1 deselected
 python3 -m pytest -q -m perf                             # 那条延迟门槛，手动跑
 # 干净环境复现（等价于 CI；本机全绿不代表这里全绿，见 §2.4b）：
 #   python3 -m venv /tmp/civenv && git archive HEAD | tar -x -C /tmp/ci_clean
@@ -770,7 +940,8 @@ python3 -m pytest -q tests/test_sql_safety.py \
                    tests/test_meta_store.py \
                    tests/test_perf_gates.py             # 55 条守卫，11s
 python3 -m ruff check rag tools tests                     # 门禁（E9/F/I），当前全绿
-python3 -m pyflakes rag tools                            # 只剩 1 条有意的 noqa 探测
+python3 -m pyflakes rag tools tests                      # 只剩 2 条有意的 noqa 探测（见 §3.3）
+python3 -m mypy                                        # 类型门禁，范围由 pyproject 决定
 ```
 
 B 档两项的复现（都不碰 `data/`，都不打真实模型）：
@@ -791,8 +962,25 @@ python3 -m pytest -q tests/test_queue.py -k gate -v
 # §4.2 的合批形状与「不合并 in-flight」两条现状也固化成了测试：
 python3 -m pytest -q tests/test_queue.py::test_embed_batches_by_configured_size \
                    tests/test_cache.py::test_embed_one_does_not_merge_inflight_identical_queries
+
+# ===== C 档执行轮 =====
+python3 -m mypy                                    # 范围写在 [tool.mypy] files，别在命令行重复
+python3 -m pytest -q tests/test_import_order.py -v # 双向导入探针 + 入口可安装性
+# 三条新严重缺陷各自的复现（都是「先看它红，再看它绿」）：
+python3 -m pytest -q \
+  tests/test_meta_store.py::test_reconcile_fixes_the_engine_that_holds_the_truth \
+  "tests/test_audit_regressions.py::test_unreadable_auth_config_is_503_not_anonymous_pass_through" \
+  "tests/test_audit_regressions.py::test_failed_health_checks_are_reported_as_unknown_not_ok"
+
+# §5.8d「声明的入口装不出来」这类问题只有真装一次才看得见。三步，全在 /tmp：
+python3 -m pip wheel . --no-deps --no-build-isolation -w /tmp/wh
+python3 -m venv --system-site-packages /tmp/instvenv
+/tmp/instvenv/bin/python -m pip install --no-deps /tmp/wh/raggi-*.whl \
+  && /tmp/instvenv/bin/rag-bench --help
+#   修之前这一步直接 ModuleNotFoundError: No module named 'tools'。
+#   同一条思路也适用于 §2.4 的 .gitignore 与 §2.4b 的未跟踪产物。
 ```
 
-本轮全部实验在 `/tmp/raggi_*`、`/tmp/dbg_*` 与 `/tmp/ps` 的副本上进行，
-`data/` 未被任何写操作触碰；模型调用全部走假 embedding（进程内计数或 `tools/bench`），
-未产生真实额度消费。
+本轮全部实验在 `/tmp/raggi_*`、`/tmp/dbg_*`、`/tmp/ps`、`/tmp/wh`、`/tmp/instvenv*`
+的副本或临时目录上进行，`data/` 未被任何写操作触碰；
+模型调用全部走假 embedding（进程内计数或 `tools/bench`），未产生真实额度消费。

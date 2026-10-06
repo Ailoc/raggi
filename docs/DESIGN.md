@@ -401,7 +401,17 @@ class ApiKey(LanceModel):
 
 - **两阶段写入**：① `chunks.add(batch)` → ② `documents.merge_insert` 更新 `chunk_count/status`。失败则在 `jobs` 记录 stage，documents 保持 `failed`，由对账发现。
 - **对账（`GET /api/health` / `POST /api/reconcile`）**：`COUNT(chunks WHERE doc_id=d) == documents.chunk_count`；孤儿 chunk；跨表 `embed_model` 一致性；`fts_stale_count`；向量索引覆盖状态；磁盘占用；版本数。
+  > **检查跑不成不等于检查通过**（2026-10-06 修）：原先 `except Exception: fts_stale = 0`
+  > 与 `except Exception: embed_model_mismatch = False` 会把「没查成」翻译成
+  > 「一切正常」，而后者还直接参与 `status`。现在失败的检查名进 `checks_failed`，
+  > 未知值用 -1 而不是 0，且**跑不成就不报 ok**。
+  > 实际计数与对账共用 `repos/chunks.chunk_counts_by_doc` 一份口径
+  > （原先两处各写一份，既可能算出不同结果，又一处会把全部分块行 materialize 进内存）。
 - **修复**：`POST /api/reindex`（按 `documents` 重放，保留 `doc_id`/`chunk_id`，重建 FTS 与向量索引）；误操作用 `restore(version)` 回滚。
+  > `POST /api/reconcile` 的写**必须走 `set_doc_fields`**（引擎分派）。
+  > 它原先直接 `store.documents.update(...)` 写 Lance 旧副本，而 documents 的真源
+  > 是 SQLite ⇒ 接口回报 `fixed: 1` 而 `/api/health` 的 `count_mismatch` 一条没少，
+  > 全程无异常。由 `tests/test_meta_store.py::test_reconcile_fixes_the_engine_that_holds_the_truth` 钉住。
 - **写入串行化**：写入路径由 `storage/filelock.py` 的**两层锁**保护 ——
   `threading.RLock`（线程互斥、可重入）+ `fcntl.flock(data/lance-write.lock)`
   （进程互斥）。只换 flock 会丢线程互斥（flock 的互斥单位是 fd，同进程多线程
@@ -647,7 +657,7 @@ PATCH /api/chunks/{id}  { text, reembed=true, force=false }
 | GET | `/api/v1/jobs` | 任务列表 |
 | GET | `/api/v1/jobs/{job_id}` | 任务进度（stage / progress / error / `terminal`） |
 | DELETE | `/api/v1/jobs/{job_id}` | 取消入库任务（排队中真取消；运行中协作式，在阶段边界退出） |
-| GET | `/api/v1/health` | 健全性：计数对账、孤儿、`fts_stale_count`、维度一致性、版本数、磁盘 |
+| GET | `/api/v1/health` | 健全性：计数对账、孤儿、`fts_stale_count`、维度一致性、版本数、磁盘；`checks_failed` 列出**根本没跑成的检查**（-1 = 未知，不是 0） |
 | GET | `/api/v1/stats` | 容量统计：行数 / 索引状态 / 版本数 / 磁盘占用 |
 | POST | `/api/v1/reconcile` | 执行对账并修复发现的不一致 |
 | POST | `/api/v1/reindex` | 重建索引（可选 `engine` 重解析） |
@@ -888,7 +898,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **554 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 555 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
+当前 **561 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 562 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
@@ -950,10 +960,27 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
   这个配置全仓只有一个读取点，改坏了不会有任何测试红。
   背景见审计 §5.7a：闸门原本每次调用新建一把，**「任务数 × 分片数」这个乘积从未被封顶**，
   而默认配置下 2×4 恰好等于名义上限 8，所以看不出来。
-- **CI 门槛的本地副本**（`test_lint_gate.py`，1 项）：把 CI 那条
-  `ruff check rag tools tests` 原样跑一遍。理由很硬：B5 提交带着两条 ruff 违规上了 main，
-  CI 当场红，而本地 551 条测试全绿——因为 pytest 里没有一条跑过 lint。
-  门槛 0.09s，漏一次的代价是一次红色的 main。
+- **CI 门槛的本地副本**（`test_lint_gate.py`，2 项）：把 CI 那两条命令
+  （`ruff check rag tools tests`、`python -m mypy`）原样在本地跑一遍。理由很硬：B5 提交
+  带着两条 ruff 违规上了 main，CI 红而本地 551 条测试全绿——pytest 里没人跑 lint。
+  mypy 那条**额外断言被检查的文件数 ≥ 15**：`[tool.mypy] files` 指错目录时
+  mypy 会输出 `no issues found in 0 source files` 然后绿灯，那是最漂亮的一种假绿。
+- **双向导入探针**（`test_import_order.py`，2 项）：按**文件系统**枚举模块
+  （不是 `pkgutil.walk_packages` —— 它看不见 `rag/ingest`、`rag/models`、`rag/parsing`
+  这三个没有 `__init__.py` 的命名空间包，合计 13 个模块），在子进程里正序与逆序各导一遍。
+  必须用子进程：清 `sys.modules` 会让后续测试拿到第二份 `RaggiError` 类对象，
+  `pytest.raises` 的身份判断随之失效。同一文件还检查
+  **`[project.scripts]` 声明的入口能不能装出来** —— `rag-bench` 曾经不能。
+- **鉴权配置的默认值方向**（`test_audit_regressions.py` 2 项）：`has_keys()` 读不出来时
+  必须抛（→ 503），**不许回答「没有密钥」**——两处调用点都把 False 当放行条件，
+  而结果会被缓存 10 秒，于是「一次瞬时读失败」= 「10 秒的无鉴权 API」。
+  另一项断言异常不会被缓存成某个假设值。
+- **健康检查不许把失败翻译成正常**（同上文件 2 项，含一条**反向对照**）：
+  检查跑不成 ⇒ 进 `checks_failed`、计数用 -1 而不是 0、`status` 不许是 ok；
+  反向对照断言「全部查成时 `checks_failed` 是空列表」，否则前一条靠永远填上就能过。
+- **对账写对引擎**（`test_meta_store.py` 1 项）：`POST /api/reconcile` 必须改正
+  **真源所在引擎**里的值，并且 `/api/health` 要跟着变好。
+  只断言接口返回的 `fixed: 1` 是抓不到这个 bug 的 —— 它当时就在回报 1。
 - **守卫自身的守卫**：`test_audit_regressions.py::test_auth_is_threaded_off_event_loop`
   原来是 `inspect.getsource(create_app)` 里找一行字串。把中间件体拆出去之后它变红，
   而**行为一点没变**——这恰好证明它是假绿的一种：字串还在就算过，行为怎么坏它都照过。
