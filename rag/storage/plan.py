@@ -24,43 +24,20 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING
 
+from .chunk_limits import clamp_ratio, clamp_size, overlap_chars
 from .repos import docs_query, get_document, kbs_query, set_doc_fields, set_kb_fields
 from .sql import escape_sql, fetch_rows
 from .sql import scalar as _scalar
-from .tables import LanceStore
+
+if TYPE_CHECKING:
+    # 只在注解里出现（文件顶部有 `from __future__ import annotations`）。
+    # 留着模块级导入本身不算错，但它让「storage 里谁依赖谁」这张图
+    # 多一条看不见的边 —— 同仓的 kbs/keys 都按注解处理，这里保持一致。
+    from .tables import LanceStore
 
 logger = logging.getLogger("raggi.plan")
-
-MAX_OVERLAP_RATIO = 50.0
-MIN_CHUNK_SIZE = 64
-MAX_CHUNK_SIZE = 8192
-
-
-def clamp_size(value) -> int:
-    """分块大小限幅（0 = 继承）。"""
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return 0
-    if n <= 0:
-        return 0
-    return max(MIN_CHUNK_SIZE, min(MAX_CHUNK_SIZE, n))
-
-
-def clamp_ratio(value) -> float:
-    """重叠比例限幅 0-50%（超过 50% 收益递减且块数翻倍）。"""
-    try:
-        r = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return max(0.0, min(MAX_OVERLAP_RATIO, r))
-
-
-def overlap_chars(chunk_size: int, ratio: float) -> int:
-    """百分比 → 实际重叠字符数，且恒小于 chunk_size（RCT 要求）。"""
-    size = max(1, int(chunk_size))
-    return max(0, min(size // 2, round(size * clamp_ratio(ratio) / 100.0)))
 
 
 def _meta(meta) -> dict:

@@ -16,6 +16,8 @@ import lancedb
 import pyarrow as pa
 from lancedb.index import FTS, BTree, HnswFlat, IvfHnswSq, IvfPq
 
+from .repos.documents import docs_count
+from .repos.jobs import list_jobs as _list_jobs
 from .schema import ApiKey, Document, Job, KnowledgeBase, chunk_schema
 
 logger = logging.getLogger("raggi.store")
@@ -208,8 +210,11 @@ class LanceStore:
         """
         import json as _json
 
-        # 局部导入：writer 反向依赖本模块，模块级导入会成环
-        from .repos import escape_sql, fetch_rows
+        from .sql import escape_sql, fetch_rows
+        # ↑ 原来是 `from .repos import …`，注释写的是「writer 反向依赖本模块，
+        # 模块级导入会成环」。两处都是过期的：`writer` 这个模块从来没有存在过，
+        # 而 escape_sql/fetch_rows 的家在 `sql.py`，repos 只是再导出它们 ——
+        # 绕道再导出才制造了那条本不存在的「环」。
 
         try:
             rows = fetch_rows(self.documents.search().select(
@@ -577,9 +582,9 @@ class LanceStore:
         """
         # 与 /api/health 同一个读入口：否则两个端点会给出两个不同的文档数
         # （元数据真源在 SQLite 时，直接数 Lance 旧表会少数）。
-        from .repos.documents import docs_count
-        from .repos.jobs import list_jobs as _list_jobs
-
+        # docs_count / list_jobs 已提到模块级导入 —— 这条边不是环：
+        # repos 各模块只在注解里用 LanceStore（都在 `if TYPE_CHECKING` 下），
+        # 由 tests/test_import_order.py 的双向探针盯着这一点。
         out = {
             "doc_count": docs_count(self),
             "chunk_count": self.chunks.count_rows(),

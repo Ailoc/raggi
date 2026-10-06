@@ -18,21 +18,20 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import time
-from pathlib import Path
 
-# 启动期维护的「最近做过」标记：多进程下每个 worker 都会跑一次
-# 建索引/FTS 重建，那是同一份活干 N 遍（还互相抢写锁）。用标记文件把
-# 它收敛成「每台机器每 MAINTAIN_MARKER_TTL 秒最多一次」。
-MAINTAIN_MARKER = ".last_index_maintenance"
-MAINTAIN_MARKER_TTL_SECONDS = 300.0
+from rag.api import Ctx, create_app
+from rag.core.maintenance import mark_maintenance_done
 
 log = logging.getLogger("raggi")
 
 
 def build_app():
-    """装配并返回 ASGI 应用。uvicorn 以 factory 形式在每个 worker 进程里调它。"""
-    from rag.api import Ctx, create_app
+    """装配并返回 ASGI 应用。uvicorn 以 factory 形式在每个 worker 进程里调它。
+
+    `from rag.api import …` 现在在模块顶部：api 与 server 之间**不再有环**
+    （它们共用的小约定搬到了 `rag/core/maintenance.py`），
+    所以这条边没有理由继续藏在函数体里 —— 藏在里面只会让依赖图少一条边。
+    """
     from rag.core.config import settings
     from rag.models.registry import ModelRegistry
     from rag.storage.backend import build_backend
@@ -56,32 +55,6 @@ def build_app():
     registry = ModelRegistry(settings)
     app = create_app(Ctx(settings, store, registry, meta=meta))
     return app
-
-
-def should_run_startup_maintenance(data_dir: Path,
-                                   now: float | None = None) -> bool:
-    """这台机器最近做过启动期索引维护吗。
-
-    多进程形态下每个 worker 都会跑一遍建索引 / FTS 重建，那是同一份活干
-    N 遍——而且它们会排队抢同一把跨进程写锁，把冷启动时间乘以进程数。
-    这里用数据目录里的一个标记文件把它收敛掉。
-
-    标记只在「维护成功启动」时写入；崩溃的进程留下过期标记的代价是
-    下一次启动多做一遍，而不是少做——这个方向是安全的。
-    """
-    marker = data_dir / MAINTAIN_MARKER
-    try:
-        mtime = marker.stat().st_mtime
-    except OSError:
-        return True
-    return (now or time.time()) - mtime > MAINTAIN_MARKER_TTL_SECONDS
-
-
-def mark_maintenance_done(data_dir: Path) -> None:
-    try:
-        (data_dir / MAINTAIN_MARKER).touch()
-    except OSError as e:  # pragma: no cover
-        log.debug("写维护标记失败（不影响功能）: %s", e)
 
 
 def _resolve_processes(raw: str | None) -> int:

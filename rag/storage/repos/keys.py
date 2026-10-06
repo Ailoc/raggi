@@ -24,12 +24,17 @@ import logging
 import secrets
 import threading
 import uuid
+from typing import TYPE_CHECKING
 
 from rag.core.cache import TTLCache
 
 from ..sql import escape_sql, fetch_rows
-from ..tables import LanceStore
 from ._engine import meta_of as _meta
+
+if TYPE_CHECKING:
+    # 只在注解里出现 ⇒ 运行时不需要，去掉它就断掉 tables↔repos 这条边
+    # （详见 kbs.py 里同一段的说明）。
+    from ..tables import LanceStore
 
 logger = logging.getLogger("raggi.apikeys")
 

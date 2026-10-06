@@ -9,6 +9,7 @@ from rag.core.config import ParserConfig, RetrieveConfig, Settings, SplitConfig
 from rag.ingest import pipeline
 from rag.models.registry import ModelRegistry
 from rag.retrieval.search import search
+from rag.storage import chunk_limits as limits
 from rag.storage import plan as chunking
 from rag.storage.repos import kbs
 from rag.storage.tables import LanceStore
@@ -173,17 +174,19 @@ def test_kb_filter_includes_standalone_chunks():
 def test_overlap_never_exceeds_half_chunk():
     for size in (64, 100, 512, 1024):
         for ratio in (0, 10, 25, 50, 99):
-            ov = chunking.overlap_chars(size, ratio)
+            ov = limits.overlap_chars(size, ratio)
             assert 0 <= ov < size, (size, ratio, ov)
 
 
 def test_plan_values_are_clamped():
-    assert chunking.clamp_size(0) == 0
-    assert chunking.clamp_size(1) == chunking.MIN_CHUNK_SIZE
-    assert chunking.clamp_size(10**9) == chunking.MAX_CHUNK_SIZE
-    assert chunking.clamp_ratio(-5) == 0.0
-    assert chunking.clamp_ratio(90) == chunking.MAX_OVERLAP_RATIO
-    assert chunking.clamp_ratio("bad") == 0.0
+    # 限幅住在 `storage/chunk_limits.py`（一个谁都可以指的叶子），
+    # 不再住在 plan 里 —— 挪走它正是为了拆掉 `repos/kbs → plan → repos` 这个环。
+    assert limits.clamp_size(0) == 0
+    assert limits.clamp_size(1) == limits.MIN_CHUNK_SIZE
+    assert limits.clamp_size(10**9) == limits.MAX_CHUNK_SIZE
+    assert limits.clamp_ratio(-5) == 0.0
+    assert limits.clamp_ratio(90) == limits.MAX_OVERLAP_RATIO
+    assert limits.clamp_ratio("bad") == 0.0
 
 
 def test_all_plan_shapes_expose_same_keys():

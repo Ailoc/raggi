@@ -7,12 +7,22 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
+from ..chunk_limits import clamp_ratio, clamp_size
 from ..sql import escape_sql, fetch_rows, now_iso, only_cols, scalar, scalar_rows
-from ..tables import LanceStore
 from ._engine import meta_of as _meta
 from .chunks import delete_kb_chunks
 from .documents import delete_document, docs_query
+
+if TYPE_CHECKING:
+    # LanceStore 在本模块只出现在注解里（文件顶部有 `from __future__ import
+    # annotations`），运行时不需要它。从 tables 侧看这是**真环**：
+    # tables 在回填列与 stats 时要 import repos（函数内），
+    # 而 repos/__init__ 会立刻加载 kbs ⇒ 两边都模块级导入就炸。
+    # 三个仓储（kbs/keys/plan）此前都是注解级导入却挂着模块级 import，
+    # 等于把环留在那里靠运气维持。
+    from ..tables import LanceStore
 
 logger = logging.getLogger("raggi.repos.kbs")
 
@@ -103,8 +113,6 @@ def create_kb(store: LanceStore, name: str,
               overlap_ratio: float = 0.0,
               default_size: int = 512,
               default_ratio: float = 0.0) -> dict:
-    from ..plan import clamp_ratio, clamp_size
-
     kb_id = str(uuid.uuid4())
     now = now_iso()
     size = clamp_size(chunk_size)
@@ -133,8 +141,6 @@ def update_kb(store: LanceStore, kb_id: str, *,
               description: str | None = None,
               chunk_size: int | None = None,
               overlap_ratio: float | None = None) -> dict | None:
-    from ..plan import clamp_ratio, clamp_size
-
     row = get_kb(store, kb_id)
     if row is None:
         return None

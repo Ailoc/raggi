@@ -42,6 +42,7 @@ from rag.storage.repos import (
     delete_documents,
     doc_chunk_index,
     get_document,
+    get_kb,
     list_documents,
     update_metadata,
 )
@@ -398,7 +399,10 @@ async def api_update_doc(request: Request, doc_id: str,
     try:
         row = await asyncio.to_thread(
             update_metadata, ctx.store, doc_id,
-            title=body.title, kb_id=body.kb_id)
+            title=body.title, kb_id=body.kb_id,
+            # 跨仓储的存在性校验由这一层提供（documents 仓储不该知道 kbs，
+            # 那对环就是这么来的）。见 repos/documents.py:update_metadata。
+            kb_exists=lambda kb: get_kb(ctx.store, kb) is not None)
     except Invalid as e:
         raise HTTPException(400, str(e))
     if row is None:

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from rag.core.errors import Invalid
@@ -375,7 +376,8 @@ def _lance_eq(eq, one_of, contains, ids) -> str | None:
 def update_metadata(store: "LanceStore", doc_id: str, *,
                     title: str | None = None,
                     meta: str | None = None,
-                    kb_id: str | None = None) -> dict | None:
+                    kb_id: str | None = None,
+                    kb_exists: Callable[[str], bool] | None = None) -> dict | None:
     """更新文档的可编辑元信息（标题、所属知识库）。
 
     标题曾完全不可改——粘贴文本的标题取首行前 60 字，写错就永久错了。
@@ -401,14 +403,24 @@ def update_metadata(store: "LanceStore", doc_id: str, *,
         values["meta"] = meta
 
     if kb_id is not None:
-        # 延迟导入：kbs.py 依赖本模块取文档，直接 import 会成环
-        from .kbs import get_kb
-
         target = str(kb_id).strip()
         # 目标库必须存在：允许 kb_id 指向已删除的库会留下悬空引用，
         # 文档从此不出现在任何列表里，且没有任何症状提示它去哪了。
-        if target and get_kb(store, target) is None:
-            raise Invalid(f"知识库不存在: {target}")
+        #
+        # 这个校验由**调用方注入**，本模块不再 import kbs。原先这里是
+        # `from .kbs import get_kb`（函数内延迟导入），而 kbs 又模块级依赖
+        # documents（要用 delete_document / docs_query）—— 一对真环。
+        # 方向只能是 kbs→documents（documents 是更低的仓储），
+        # 所以把「跨仓储的存在性校验」交给上面一层。
+        # 刻意不做成可选：`kb_exists=None` 时直接抛 Invalid ——
+        # 「忘了传校验器」必须当场炸，而不是静默允许悬空引用
+        # （那正是本仓反复在防的「不报错、只是结果悄悄不对」）。
+        if target:
+            if kb_exists is None:
+                raise Invalid(
+                    "改归属必须传 kb_exists 校验器（防悬空 kb_id）")
+            if not kb_exists(target):
+                raise Invalid(f"知识库不存在: {target}")
         if target == str(row.get("kb_id") or ""):
             # 原地不动也要走一遍（幂等），但不必改分块
             values["kb_id"] = target

@@ -32,6 +32,10 @@ from rag.api.system import router as system_router
 from rag.core import ratelimit, requestid
 from rag.core.config import Settings
 from rag.core.errors import RaggiError, short
+from rag.core.maintenance import (
+    mark_maintenance_done,
+    should_run_startup_maintenance,
+)
 from rag.core.ratelimit import RateLimiter
 from rag.models.embeddings import EmbedUnavailable
 from rag.models.registry import ModelRegistry
@@ -377,8 +381,6 @@ def _elapsed_ms(started: float) -> str:
 
 
 def _startup_maintenance(ctx: Ctx) -> None:
-    from rag.server import mark_maintenance_done, should_run_startup_maintenance
-
     # 「查标记 → 干活 → 写标记」必须在**跨进程写锁里**做。
     # 不持锁时的竞态是真的：4 个 worker 同时启动、同时看到「没做过」，
     # 于是同一份建索引/重建 FTS 干 4 遍，后 3 个撞 LanceDB 的乐观提交冲突
