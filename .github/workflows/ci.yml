@@ -47,9 +47,34 @@ jobs:
         run: ruff check rag tools tests
 
       - name: 测试
-        # -q：这台 CI 上不需要逐条用例名；-m "not perf" 由 pyproject 的
-        # addopts 之外的默认行为保证（perf 只在手动 -m perf 时跑）
-        run: pytest -q
+        id: pytest
+        # -rf：结束时列出失败用例名。配合下面那步把结果写进 job summary，
+        # 失败原因就变成**公开可见**的信息——Actions 日志本身要登录才能读，
+        # 一个只能靠人肉开浏览器看日志的门禁，等于没有门禁。
+        #
+        # `set -o pipefail` 是这条步骤能不能当门禁用的关键：
+        # GitHub 默认 shell 是 `bash -e`，**不带 pipefail**，
+        # 于是 `pytest … | tee …` 的退出码来自 tee（永远 0）——
+        # 测试全红流水线也全绿。写管道却不加 pipefail 的门禁是假门禁。
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q --tb=short -rf 2>&1 | tee /tmp/pytest.log
+
+      - name: 失败时把结果写进 job summary
+        if: failure()
+        run: |
+          {
+            echo "### pytest 失败摘要"
+            echo '```'
+            tail -n 80 /tmp/pytest.log
+            echo '```'
+            echo
+            echo "### 本次解析到的关键版本（与开发机不同就会表现不同）"
+            echo '```'
+            python -m pip list 2>/dev/null | grep -iE "^(lancedb|pylance|lance|pyarrow|fastapi|starlette|pydantic|langchain|numpy|pandas|pymupdf|uvicorn|httpx|orjson|jieba) " || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     # 前端产物新鲜度守卫（test_frontend_wiring.py）需要 web/dist 才能跑；
