@@ -400,7 +400,9 @@
           </div>
           <div class="kv"><dt>FTS 待重建</dt>
             <dd>
-              {#if health.fts_stale_count}
+              {#if health.checks_failed?.includes("fts_stale") || health.fts_stale_count < 0}
+                <span class="badge badge-warn">未知（检查没跑成）</span>
+              {:else if health.fts_stale_count}
                 <span class="badge badge-warn">{health.fts_stale_count}</span>
               {:else}<span class="badge badge-ok"><Icon name="check" />无</span>{/if}
             </dd>
@@ -409,7 +411,9 @@
           <div class="kv"><dt>嵌入模型</dt>
             <dd>
               {health.embedding_model}
-              {#if health.embedding_model_mismatch}
+              {#if health.checks_failed?.includes("embedding_model")}
+                <span class="badge badge-warn">未查到（不能说一致）</span>
+              {:else if health.embedding_model_mismatch}
                 <span class="badge badge-err"><Icon name="alert" />与表内不一致</span>
               {:else}<span class="badge badge-ok"><Icon name="check" />一致</span>{/if}
             </dd>

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -18,6 +19,8 @@ import pyarrow.compute as pc
 from .repos.documents import docs_count, docs_query
 from .sql import scalar_rows
 from .tables import LanceStore
+
+logger = logging.getLogger("raggi.health")
 
 
 def doc_ids_present(store: LanceStore) -> set[str]:
@@ -76,23 +79,43 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
     orphan = sum(1 for d in actual_by_doc
                  if d not in doc_ids and d not in ("", None))
 
+    # 下面三项检查在异常时**不许**回报「健康」。
+    # 改前的形状是这一整个审计的主线：`except Exception: fts_stale = 0`
+    # 与 `except Exception: embed_model_mismatch = False` —— 检查根本没跑成，
+    # 却交出「0 条待重建 / 模型一致」这两个**肯定回答**，而
+    # `embed_model_mismatch` 还直接参与 `status` 的计算 ⇒ 坏消息被翻译成绿灯，
+    # 且一行日志都不留（默认日志级别下无人看见）。
+    # 现在：失败记进 `checks_failed` 对外可见，值用「未知」而不是「没事」，
+    # 并留 warning 级日志。字段类型保持不变（前端与契约都按 int/bool 用），
+    # 未知用各自的哨兵表达：计数用 -1、布尔用「不算进 status 判定」。
+    checks_failed: list[str] = []
+
     # fts stale：编辑后尚未重建 FTS 的行数（由 ensure_fts_index 清除）
     try:
         fts_stale = int(chunks.count_rows(filter="fts_stale = true"))
-    except Exception:  # noqa: BLE001
-        fts_stale = 0
+    except Exception as e:  # noqa: BLE001
+        # -1 = 不知道（0 会被 UI 当成「没有待重建」显示成绿色）
+        fts_stale = -1
+        checks_failed.append("fts_stale")
+        logger.warning("fts_stale 计数失败，健康检查该项未知: %s", e)
 
     # 嵌入模型一致性：表中出现与当前配置不同的 embed_model 即视为不一致。
     # 用 unique() 而不是整列 to_pylist 后逐行比（10 万行时那是一趟全量 Python 循环）。
+    embed_model_checked = True
     try:
         embed_model_mismatch = any(m != embed_model for m in _unique_models(store))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         embed_model_mismatch = False
+        embed_model_checked = False
+        checks_failed.append("embedding_model")
+        logger.warning("embed_model 一致性检查失败，健康检查该项未知: %s", e)
 
     try:
         versions = len(chunks.list_versions())
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         versions = -1
+        checks_failed.append("lancedb_versions")
+        logger.warning("list_versions 失败: %s", e)
 
     # 索引覆盖状态（向量/FTS 是否存在及未索引行数）
     index_state = {}
@@ -101,17 +124,27 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
             exists, unindexed = store._index_state(col_name)
             index_state[col_name] = {"indexed": exists,
                                      "unindexed_rows": unindexed}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # indexed=False 至少不是好消息；unindexed_rows=-1 标出「没查到」
             index_state[col_name] = {"indexed": False, "unindexed_rows": -1}
+            checks_failed.append(f"index_state:{col_name}")
+            logger.warning("索引状态查询失败 (%s): %s", col_name, e)
 
     # 嵌入维度一致性：表中实际向量维度 vs 配置
     stored_dim = store.vector_dim()
     dim_mismatch = stored_dim is not None and stored_dim != embed_dim
 
     return {
+        # `status` 的语义如实改为「**能确认**没有不一致」。
+        # embed_model 这项检查没跑成时不再默认「一致」——它原本直接参与这个判定，
+        # 静默吞掉就等于把坏消息翻译成绿灯。
+        # 至于「哪几项压根没查成」，看 `checks_failed`：那是「不知道」，
+        # 与「查到了、没问题」是两种不同的状态，别混在一起。
         "status": "ok" if not mismatch and orphan == 0
-        and not embed_model_mismatch and not dim_mismatch
+        and embed_model_checked and not embed_model_mismatch
+        and not dim_mismatch
         else "degraded",
+        "checks_failed": checks_failed,
         "now": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "doc_count": doc_count,
         "chunk_count": chunk_count,

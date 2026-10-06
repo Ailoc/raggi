@@ -313,8 +313,15 @@ async def api_doc(request: Request, doc_id: str) -> DocumentOut:
 
 def _file_url(ctx, doc_id: str) -> str:
     """留档原文的可用 URL（按是否启用鉴权决定要不要签名）。"""
-    auth_on = bool((ctx.settings.token or "").strip()) or apikeys.has_keys(
-        ctx.store)
+    try:
+        auth_on = bool((ctx.settings.token or "").strip()) or apikeys.has_keys(
+            ctx.store)
+    except apikeys.ApiKeysUnavailable as e:
+        # 这里只是「要不要签名」，不是「放不放行」——所以保守取 True：
+        # 签了名的 URL 在没开鉴权时照样能用（签名会被忽略），
+        # 反之若误判成「无鉴权」，给出的裸 URL 一旦密钥其实存在就是 401 死链。
+        logger.warning("鉴权配置读不出来，原文 URL 按『已启用鉴权』签名: %s", e)
+        auth_on = True
     return ctx.signer.file_url(doc_id, auth_enabled=auth_on)
 
 

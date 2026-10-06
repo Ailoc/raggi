@@ -385,6 +385,13 @@ export interface Health {
   /** doc_id 为空、独立挂在知识库下的分块数 */
   standalone_chunks: number;
   fts_stale_count: number;
+  /**
+   * 压根没查成的检查名（如 "fts_stale" / "embedding_model"）。
+   * 空数组 = 每一项都真的查过；非空时 `status: degraded` 的含义是
+   * 「无法确认」而不是「查到问题了」——两者必须在界面上分开显示。
+   * 配套：`fts_stale_count` 为 -1 表示「未知」，不是「0 条待重建」。
+   */
+  checks_failed?: string[];
   embedding_dim: number;
   stored_embedding_dim: number | null;
   dim_mismatch: boolean;

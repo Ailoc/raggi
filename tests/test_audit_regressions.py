@@ -633,3 +633,152 @@ def test_upload_text_search_resplit_cycle(tmp_path):
     assert r.status_code == 200, r.text
     assert c.post(f"/api/documents/{doc_id}/resplit").status_code == 200
     assert c.get("/api/health").status_code == 200
+
+# ---- 检查失败不许翻译成绿灯（§3 C3 里最严重的一处）---------------------
+
+
+class _ChunksThatFail:
+    """只有「带 filter 的 count_rows」会坏 —— 模拟老版本 lancedb 的形态。"""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def count_rows(self, filter=None):   # noqa: A002 - 与 lancedb 签名一致
+        self.calls.append("filtered" if filter else "all")
+        if filter:
+            raise RuntimeError("ArrowInvalid: filter 不被这个版本支持")
+        return 3
+
+    def list_versions(self):
+        return [1, 2]
+
+
+class _StoreThatFails:
+    def __init__(self):
+        self.chunks = _ChunksThatFail()
+
+    def vector_dim(self):
+        return 4
+
+    def _index_state(self, col):
+        return True, 0
+
+
+def test_failed_health_checks_are_reported_as_unknown_not_ok(monkeypatch):
+    """`except Exception: fts_stale = 0` 是这一整个审计的主线形状。
+
+    检查根本没跑成，却交出「0 条待重建」「模型一致」两个**肯定回答**，
+    而 `embed_model_mismatch` 还直接参与 `status` ⇒ 坏消息变绿灯，
+    且默认日志级别下一行日志都没有。
+
+    这条断言三件事：未知要能被外部看到（checks_failed）、
+    哨兵值不许伪装成 0、以及**无法确认时不许说 ok**。
+    """
+    from rag.storage import health as health_mod
+
+    # 夹具本身必须**自洽**：stated 3 == actual 3，
+    # 否则 degraded 是从 count_mismatch 来的，就证明不了「失败检查」这条路径。
+    # （第一版就是这么错的，断言因此变成了假绿。）
+    monkeypatch.setattr(health_mod, "docs_count", lambda s: 1)
+    monkeypatch.setattr(health_mod, "docs_query",
+                        lambda s, cols: [{"doc_id": "d1", "chunk_count": 3}])
+    monkeypatch.setattr(health_mod, "scalar_rows",
+                        lambda t, cols: [{"doc_id": "d1"}] * 3)
+
+    def _boom(_store):
+        raise RuntimeError("embed_model 列读不出来")
+
+    monkeypatch.setattr(health_mod, "_unique_models", _boom)
+
+    store = _StoreThatFails()
+    res = health_mod.health(store, 4, "stub")
+
+    assert res["count_mismatch"] == [], "夹具不自洽，这条测试证明不了任何东西"
+    assert res["orphan_chunks"] == 0
+    assert "fts_stale" in res["checks_failed"], "fts 检查失败却没对外说明"
+    assert "embedding_model" in res["checks_failed"]
+    # -1 而不是 0：0 会被界面渲染成「没有待重建」的绿色徽章
+    assert res["fts_stale_count"] == -1, (
+        f"未知被伪装成健康值：{res['fts_stale_count']}")
+    assert res["status"] == "degraded", (
+        "一致性检查根本没跑成，却宣称健康 —— 这正是被修掉的谎")
+
+
+def test_healthy_store_reports_no_failed_checks(monkeypatch):
+    """反向对照：全都查成了时 `checks_failed` 必须是空列表、状态是 ok。
+
+    没有这条，上一条可以靠「永远把 checks_failed 填上」混过去。
+    """
+    from rag.storage import health as health_mod
+
+    monkeypatch.setattr(health_mod, "docs_count", lambda s: 1)
+    monkeypatch.setattr(health_mod, "docs_query",
+                        lambda s, cols: [{"doc_id": "d1", "chunk_count": 3}])
+    monkeypatch.setattr(health_mod, "scalar_rows",
+                        lambda t, cols: [{"doc_id": "d1"}] * 3)
+    monkeypatch.setattr(health_mod, "_unique_models", lambda s: {"stub"})
+
+    class _OkChunks(_ChunksThatFail):
+        def count_rows(self, filter=None):   # noqa: A002
+            return 3
+
+    store = _StoreThatFails()
+    store.chunks = _OkChunks()
+    res = health_mod.health(store, 4, "stub")
+    assert res["checks_failed"] == []
+    assert res["status"] == "ok", res
+    assert res["fts_stale_count"] == 3
+
+
+# ---- 鉴权配置读不出来 ≠ 「没配密钥」（fail-open 漏洞）-------------------
+
+
+def test_has_keys_raises_instead_of_answering_no_keys(tmp_path, monkeypatch):
+    """`except Exception: return False` 在鉴权路径上等于「全体放行」。
+
+    `has_keys()` 的两个调用点都把 False 当放行条件，而结果还会被缓存 10 秒
+    ⇒ 一次瞬时读失败 = 10 秒的无鉴权 API。修成抛 `ApiKeysUnavailable`，
+    并验证异常**不会**被缓存（第二次调用还是要抛，而不是记住上次的假设）。
+    """
+    from rag.storage.repos import keys as apikeys
+    from rag.storage.tables import LanceStore
+
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    apikeys._has_keys_cache.clear()
+
+    class _BoomMeta:
+        def count(self, table):
+            raise RuntimeError("元数据库打不开")
+
+    # 走 SQLite 分支：把 _meta() 换成一个 count 会炸的对象。
+    # （不去动 store.apikeys —— 它是只读 property， setattr 会 AttributeError。）
+    monkeypatch.setattr(apikeys, "_meta", lambda _s: _BoomMeta())
+
+    for i in (1, 2):
+        with pytest.raises(apikeys.ApiKeysUnavailable):
+            apikeys.has_keys(store)
+    # 第二次仍然真去查（说明失败值没被缓存成「有密钥」或「无密钥」）
+    apikeys._has_keys_cache.clear()
+
+
+def test_unreadable_auth_config_is_503_not_anonymous_pass_through(
+        tmp_path, monkeypatch):
+    """读不出鉴权配置时，请求必须被拒（503），不能被当成「无鉴权」放行。"""
+    from rag.storage.repos import keys as apikeys
+
+    c = _app(tmp_path)
+    assert c.get("/api/stats").status_code == 200   # 默认形态确实无需凭据
+
+    def boom(_store):
+        raise apikeys.ApiKeysUnavailable("模拟：apikeys 表读不出来")
+
+    # 必须用 monkeypatch：它按函数作用域还原。
+    # 写成 `auth_mod.apikeys.has_keys = boom` + `finally: del ...` 会把这个方法
+    # **整个删掉**（del 没有「恢复原值」的语义），于是后续每一条走鉴权的测试全红 ——
+    # 我第一版就是这么写的，一次带走了 16 条测试。
+    monkeypatch.setattr(apikeys, "has_keys", boom)
+    r = c.get("/api/stats")
+    assert r.status_code == 503, (
+        f"鉴权配置读失败却返回 {r.status_code}："
+        "把「不知道有没有密钥」当成了「没有密钥」⇒ 放行")
+    assert "暂时不可读" in r.json()["detail"]

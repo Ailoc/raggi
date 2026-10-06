@@ -535,6 +535,10 @@ class HealthOut(BaseModel):
     orphan_chunks: int
     standalone_chunks: int
     fts_stale_count: int
+    # 没查成的检查名字（不是布尔的「没问题」）。空列表 = 所有项都真的查过。
+    # fts_stale_count 为 -1、index_state.unindexed_rows 为 -1 时表示「未知」
+    # 而不是「0」——见 storage/health.py 的说明。
+    checks_failed: list[str] = Field(default_factory=list)
     embedding_dim: int
     stored_embedding_dim: int | None = None
     dim_mismatch: bool = False

@@ -80,6 +80,20 @@ def _doc_id_of(path: str) -> str:
     return m.group(1) if m else ""
 
 
+def _keys_configured(ctx) -> bool:
+    """「有没有配密钥」。读不出来时抛 503，**绝不**当成「没配」而放行。
+
+    下面两处都把 `has_keys() == False` 当作放行条件（无凭据直通、
+    以及零密钥时对 ADMIN_PREFIXES 开放）。所以「apikeys 表暂时读不出来」
+    一旦被翻译成 False，效果是整个 API 在那一刻变成无鉴权 ——
+    而且这个答案会被缓存 10 秒。鉴权拿不准时的默认值只能是拒绝。
+    """
+    try:
+        return apikeys.has_keys(ctx.store)
+    except apikeys.ApiKeysUnavailable as e:
+        raise AuthError(503, "鉴权配置暂时不可读，请稍后重试") from e
+
+
 def authenticate(ctx, request) -> dict | None:
     """校验请求凭据。
 
@@ -100,7 +114,7 @@ def authenticate(ctx, request) -> dict | None:
     sig = q.get("sig") or ""
 
     # 未配置任何鉴权 → 放行（保持单机自用的零摩擦体验）
-    if not secret and not legacy and not apikeys.has_keys(ctx.store):
+    if not secret and not legacy and not _keys_configured(ctx):
         return None
 
     # CORS 预检不带凭据，必须放行，否则浏览器端调用会被 401 挡住
@@ -143,7 +157,7 @@ def authenticate(ctx, request) -> dict | None:
     #    否则创建第一把密钥后就再也发不出第二把——把自己锁在门外；
     #    前端也需要先读到空列表才能渲染「还没有密钥」的引导。
     #    只在「零密钥」时成立；一旦有密钥，管理接口即受保护。
-    if not apikeys.has_keys(ctx.store) and path.startswith(ADMIN_PREFIXES):
+    if not _keys_configured(ctx) and path.startswith(ADMIN_PREFIXES):
         return None
     if not secret:
         raise AuthError(

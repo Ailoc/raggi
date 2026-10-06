@@ -152,6 +152,13 @@ def has_keys(store: LanceStore) -> bool:
 
     带 10s 缓存：这是**每个请求**都要回答的问题（未配密钥时直接放行），
     而 apikeys 表只在签发/吊销时变化。签发与吊销都会主动失效它。
+
+    **数不出来时必须抛，不能回答 False。** 这两个调用点都拿
+    「一把密钥都没有」当**放行**条件（`api/auth.py` 的无凭据直通与
+    ADMIN_PREFIXES 的引导分支）：回答 False 等于在读取失败的那一刻
+    **把整个 API 变成无鉴权**，而且这个答案会被缓存 10 秒 ——
+    一次瞬时故障就是 10 秒的全体放行。上面那段注释早就写着
+    「数错了不是性能问题而是安全问题」，却把唯一的错误路径写成了放行值。
     """
     def _load() -> bool:
         mdb = _meta(store)
@@ -163,16 +170,24 @@ def has_keys(store: LanceStore) -> bool:
             try:
                 return mdb.count("apikeys") > 0
             except Exception as e:  # noqa: BLE001
-                logger.debug("apikeys 计数失败: %s", e)
-                return False
+                logger.error("apikeys 计数失败（拒绝猜测『无密钥』以免放行）: %s",
+                             e)
+                raise ApiKeysUnavailable(f"鉴权配置暂时不可读：{e}") from e
         try:
             return store.apikeys.count_rows() > 0
         except Exception as e:  # noqa: BLE001
-            logger.debug("apikeys 计数失败: %s", e)
-            return False
+            logger.error("apikeys 计数失败（拒绝猜测『无密钥』以免放行）: %s", e)
+            raise ApiKeysUnavailable(f"鉴权配置暂时不可读：{e}") from e
 
     value = _has_keys_cache.cached(store.uri, _load)
     return bool(value)
+
+
+class ApiKeysUnavailable(RuntimeError):
+    """读不出「有没有密钥」。这与「没有密钥」是两件事，绝不能混。
+
+    API 层把它映射成 503（重试可能就好），而不是 200（放行）或 401（误导）。
+    """
 
 
 class ApiKeyAuthError(RuntimeError):

@@ -1009,8 +1009,13 @@ export const GROUPS: Group[] = [
     title: "系统运维",
     desc: "健康检查、容量统计、索引重建、数据对账与版本回滚。",
     notes: [
-      "健康检查的 status 为 degraded 时，count_mismatch / orphan_chunks / " +
-        "dim_mismatch / embedding_model_mismatch 任一非空即触发。",
+      "健康检查的 status 为 degraded 有两类原因，看 `checks_failed` 区分：" +
+        "一是 count_mismatch / orphan_chunks / dim_mismatch / " +
+        "embedding_model_mismatch 真的查出了问题；二是某项检查**根本没跑成**，" +
+        "此时「无法确认」也报 degraded —— 检查失败绝不翻译成绿灯" +
+        "（改前 `except Exception: embed_model_mismatch = False` 就是这个形状）。",
+      "「未知」用哨兵值表达：`fts_stale_count = -1`、`index_state.*.unindexed_rows = -1`" +
+        "都表示没查到，不是 0。",
       "索引在后台维护（去抖合并），入库响应不等待索引重建，" +
         "刚入库的数据可能要等片刻才能被 FTS 通道检索到。",
     ],
@@ -1025,7 +1030,8 @@ export const GROUPS: Group[] = [
           { name: "count_mismatch", type: "object[]", desc: "chunk_count 与实际不符的文档 {doc_id, stated, actual}" },
           { name: "orphan_chunks", type: "number", desc: "doc_id 在 documents 中不存在的分块数" },
           { name: "standalone_chunks", type: "number", desc: "独立分块数（doc_id 为空）" },
-          { name: "fts_stale_count", type: "number", desc: "待重建 FTS 的行数" },
+          { name: "fts_stale_count", type: "number", desc: "待重建 FTS 的行数；-1 = 这项没查成" },
+          { name: "checks_failed", type: "string[]", desc: "根本没跑成的检查名（空数组=所有项都查过）；非空时 degraded 的含义是「无法确认」" },
           { name: "embedding_dim / stored_embedding_dim", type: "number", desc: "配置的维度与表中实际维度" },
           { name: "dim_mismatch", type: "boolean", desc: "维度是否不一致（不一致会导致写入失败）" },
           { name: "embedding_model_mismatch", type: "boolean", desc: "表内 embed_model 是否与当前配置不一致" },
