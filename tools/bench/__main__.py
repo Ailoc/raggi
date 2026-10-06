@@ -5,7 +5,8 @@
   fake-embed  起 OpenAI 兼容的假模型服务
   quick       读端点并发矩阵
   ingest      入库并发矩阵（会写数据，请在副本上跑）
-  scan-paths  进程内存储开销归因
+  scan-paths    进程内存储开销归因
+  param-sweep 检索参数（candidate_k/nprobes/refine_factor）敏感性与结果重合度
   report      跑 quick+ingest 并存成 JSON 快照，与上一次对比
 """
 from __future__ import annotations
@@ -180,6 +181,20 @@ def cmd_report(a) -> int:
                       f"  {(n['rps'] - o['rps']) / o['rps'] * 100:+6.1f}%")
     return 1 if _check_gates(rows) else 0
 
+def cmd_param_sweep(a) -> int:
+    from tools.bench import paramsweep
+
+    rep = paramsweep.run(Path(a.data), dim=a.dim, queries=a.queries,
+                         top_k=a.top_k, repeats=a.repeats)
+    paramsweep.print_report(rep)
+    if a.out:
+        out = Path(a.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rep, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        print(f"\nJSON 已写入 {out}")
+    return 0
+
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="rag-bench",
@@ -206,6 +221,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dim", type=int, default=1024)
     p.add_argument("--out", default="")
     p.set_defaults(fn=cmd_scan_paths)
+
+    p = sub.add_parser("param-sweep")
+    p.add_argument("--data", default="data")
+    p.add_argument("--dim", type=int, default=1024)
+    p.add_argument("--queries", type=int, default=12)
+    p.add_argument("--top-k", dest="top_k", type=int, default=10)
+    p.add_argument("--repeats", type=int, default=9)
+    p.add_argument("--out", default="")
+    p.set_defaults(fn=cmd_param_sweep)
 
     p = sub.add_parser("gen")
     p.add_argument("--data", required=True)
