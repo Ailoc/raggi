@@ -1,0 +1,155 @@
+/* ============================================================
+   tokens.css — 语义令牌层（冷中性 / accent-hit 分离 / elevation 刻度）
+
+   加载顺序必须是 app.css → tokens.css → shell.css：本文件与 app.css
+   都只写 `:root`，靠"后定义者胜"来覆盖旧值；浅色块两边都是
+   `:root[data-theme="light"]`，特异性相同，同样靠顺序。
+
+   为什么不是直接改 app.css 里的值：那 1177 行里有 43 处边框依赖与
+   57 处主色使用点，一次性改色相会让"配色问题"和"布局问题"无法归因。
+   所以这里先建**语义层**，把旧令牌降级成过渡别名，视图逐个迁移。
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 冷中性色阶（原先是极轻暖色相 hue 85，现在统一到 hue 260）----
+     5 级背景 + 2 级描边 + 3 级文字，这套阶梯是"无边框分层"的地基：
+     边框退场后，层级只能靠 surface 步进与 elevation 表达。 */
+  --bg:          oklch(0.168 0.012 260);
+  --bg-sunken:   oklch(0.135 0.012 260);
+  --surface:     oklch(0.212 0.014 260);
+  --surface-2:   oklch(0.252 0.016 260);
+  --surface-3:   oklch(0.300 0.016 260);
+  --line:        oklch(0.305 0.014 260);
+  --line-strong: oklch(0.400 0.018 260);
+
+  --text:        oklch(0.950 0.006 260);
+  --text-2:      oklch(0.760 0.010 260);
+  --text-3:      oklch(0.610 0.012 260);
+
+  /* ---- 主色拆成两个语义，不再共用一个琥珀 ----
+     --accent：品牌 / 主操作 / 当前选中导航 / 开关（"这是可以点的"）
+     --hit   ：检索命中 / 高亮 / 命中的上下文条（"这是被匹配到的内容"）
+
+     混用的代价是具体的：今天 <mark>、.ctx.is-hit、选中行 inset 与
+     .btn-primary 都是同一个 --amber，命中信息会被读成"可点的东西"。
+     冷色基调下把两者分得更开——accent 走蓝青，hit 走亮柠檬。 */
+  --accent:        oklch(0.780 0.130 220);
+  --accent-fg:     oklch(0.200 0.050 240);
+  --accent-soft:   oklch(0.780 0.130 220 / 0.16);
+  --accent-line:   oklch(0.780 0.130 220 / 0.45);
+  --accent-strong: oklch(0.850 0.120 220);
+
+  --hit:        oklch(0.870 0.145 95);
+  --hit-fg:     oklch(0.210 0.050 95);
+  --hit-soft:   oklch(0.870 0.145 95 / 0.18);
+  --hit-line:   oklch(0.870 0.145 95 / 0.45);
+
+  /* 焦点环必须与 accent、hit 都不同色相，否则"焦点"和"选中/命中"混淆 */
+  --focus:      oklch(0.840 0.130 175);
+
+  /* 状态色：只承载状态，不承载布局信息（命名统一，旧名保留为别名） */
+  --ok:     oklch(0.760 0.140 155);
+  --warn:   oklch(0.830 0.150 90);
+  --danger: oklch(0.700 0.190 25);
+
+  /* ---- elevation 刻度 ----
+     这是本次换基调最大的隐藏成本：原先全站只有 1 个阴影令牌
+     （--shadow-pop），视觉层级完全由 26 处 `border: 1px solid`
+     + 17 处 `border-color` 撑着。边框要退场，就必须先把分层补上，
+     顺序不能反——否则中途界面会散架。
+     深色用不透明黑（深色下彩色影会发灰脏），浅色用低饱和冷色影
+     （纯黑影在浅色下显得脏且压不住白底）。 */  --elev-0: none;
+  --elev-1: 0 1px 2px oklch(0 0 0 / 0.40);
+  --elev-2: 0 2px 8px -2px oklch(0 0 0 / 0.50),
+            0 1px 2px oklch(0 0 0 / 0.35);
+  --elev-3: 0 16px 40px -16px oklch(0 0 0 / 0.65),
+            0 4px 12px -6px oklch(0 0 0 / 0.45);
+  /* 浮层顶部 1px 高光：深色下没有边框时，靠它读出边缘 */
+  --elev-edge: inset 0 1px 0 oklch(1 0 0 / 0.06);
+
+  /* ---- 外壳几何 ----
+     --content-max 是那条"原本就写进设计但从未生效"的限宽
+     （app.css:240 的 .view.active 没有任何组件产出 class="view"）。
+     --dock-w 由拖拽把手写入，范围见 lib/dock.svelte.ts 的 clamp。
+     命名一律用 dock，不复用 rail——旧守卫禁的是 .rail 那套死令牌。 */
+  --content-max: 1440px;
+  --dock-w: 264px;
+  --dock-w-min: 240px;
+  --dock-w-max: 320px;
+  --dock-collapsed-w: 56px;
+  --dock-handle-w: 5px;
+  --topbar-h: 52px;
+  --crumbbar-h: 44px;
+
+  /* 过渡别名见文件末尾——它们必须同时压过深色与浅色两套 app.css 定义 */
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:          oklch(0.985 0.004 260);
+  --bg-sunken:   oklch(0.955 0.006 260);
+  --surface:     oklch(1 0 0);
+  --surface-2:   oklch(0.975 0.004 260);
+  --surface-3:   oklch(0.940 0.006 260);
+  --line:        oklch(0.900 0.008 260);
+  --line-strong: oklch(0.790 0.012 260);
+
+  --text:        oklch(0.250 0.018 265);
+  --text-2:      oklch(0.470 0.016 265);
+  --text-3:      oklch(0.610 0.012 265);
+
+  /* 浅色下强调色要压暗才够对比度（正文底上的 13px 文字要 ≥ 4.5:1） */
+  --accent:        oklch(0.545 0.155 245);
+  --accent-fg:     oklch(0.985 0.010 240);
+  --accent-soft:   oklch(0.545 0.155 245 / 0.10);
+  --accent-line:   oklch(0.545 0.155 245 / 0.34);
+  --accent-strong: oklch(0.470 0.160 245);
+
+  --hit:        oklch(0.520 0.140 85);
+  --hit-fg:     oklch(0.990 0.015 90);
+  --hit-soft:   oklch(0.860 0.150 95 / 0.55);
+  --hit-line:   oklch(0.620 0.140 88 / 0.45);
+
+  --focus:      oklch(0.500 0.120 180);
+
+  --ok:     oklch(0.545 0.135 155);
+  --warn:   oklch(0.580 0.135 80);
+  --danger: oklch(0.545 0.190 25);
+
+  /* 浅色主题的影必须比深色弱得多，否则会糊成灰边——
+     无边框设计在浅色下最常见的翻车点就在这里。 */
+  --elev-0: none;
+  --elev-1: 0 1px 2px oklch(0.32 0.04 265 / 0.12);
+  --elev-2: 0 2px 8px -2px oklch(0.32 0.04 265 / 0.18),
+            0 1px 2px oklch(0.32 0.04 265 / 0.10);
+  --elev-3: 0 16px 40px -16px oklch(0.30 0.05 265 / 0.28),
+            0 4px 12px -6px oklch(0.30 0.05 265 / 0.14);
+  --elev-edge: inset 0 1px 0 oklch(1 0 0 / 0.60);
+}
+
+/* ============================================================
+   过渡别名：留给尚未迁移的 9 个视图
+   ============================================================
+   每迁移完一个视图，就把它用到的别名换成上面的语义令牌；全部迁完后
+   这批别名必须删掉——留着就是第二份事实来源。
+
+   选择器必须写成 `:root, :root[data-theme="light"]`：app.css 在
+   `:root[data-theme="light"]`（特异性 0,2,0）里也定义了一遍 --amber，
+   只写 `:root`（0,1,0）的别名会被它压过去。实测到的后果就是
+   **深色主题走新主色、浅色主题仍是旧琥珀**——同一个按钮两种颜色。
+   别名本身指向 --accent 等语义令牌，所以两个主题共用一条规则即可。 */
+:root, :root[data-theme="light"] {
+  /* --amber 统一指向 accent：单一站点内先保证"同一强调色"，
+     命中语义（mark / is-hit / 选中 inset）在迁移时改成 --hit */
+  --amber:       var(--accent);
+  --amber-fg:    var(--accent-fg);
+  --amber-soft:  var(--accent-soft);
+  --amber-line:  var(--accent-line);
+  --green:       var(--ok);
+  --yellow:      var(--warn);
+  --red:         var(--danger);
+  --shadow-pop:  var(--elev-3);
+}

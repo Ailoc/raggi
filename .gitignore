@@ -1,0 +1,22 @@
+# 前端源码在 web/src（TypeScript + Svelte），
+# web/dist 是 Vite 构建产物，运行前由 npm run build 生成，不入库
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+# setuptools 构建产物：rag/ 的陈旧副本，会污染全文搜索
+build/
+dist/
+
+# 数据目录（LanceDB + 留档原文 + config.toml）
+data/
+# Svelte/Vite 构建产物
+web/dist/
+
+# 代理/编辑器的本地状态（权限决定、口味文件），不是项目源码
+.commandcode/
+.venv/
+venv/

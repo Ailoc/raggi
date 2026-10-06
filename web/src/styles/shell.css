@@ -1,0 +1,211 @@
+/* ============================================================
+   shell.css — 双栏外壳（dock / section 切换器 / 对象树 / 把手）
+
+   只写"壳层"的样式。被折叠的是 dock 的内容，**折叠开关在顶栏**，
+   所以不存在"折叠后没有地方可点"——那是第一代侧栏的死锁成因，
+   由 tests/test_frontend_wiring.py::test_dock_collapse_is_self_recoverable
+   锁住。
+   ============================================================ */
+
+/* ---------- 顶栏新增件 ---------- */
+/* 折叠开关：画在 <Dock> 之外（App.svelte 里位置先于 <Dock），
+   这样 dock 无论展开/折叠/拖窄都不可能把它藏起来。 */
+.dock-toggle { margin-inline-end: var(--u2); }
+.dock-toggle.is-active { color: var(--accent); background: var(--accent-soft); }
+
+.topbar-spacer { flex: 1; min-width: 0; }
+
+/* 队列摘要：把"有没有任务在跑"从「必须切到 /jobs 才知道」
+   变成壳层常驻信息。 */
+.queue-chip {
+  display: inline-flex; align-items: center; gap: var(--u2);
+  padding: var(--u1) var(--u3);
+  background: var(--surface-2);
+  border-radius: 999px;
+  font-size: 12px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  transition: background 100ms var(--ease), color 100ms var(--ease);
+}
+.queue-chip:hover { background: var(--surface-3); color: var(--text); }
+.queue-chip.is-active { color: var(--text); }
+.queue-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--text-3);
+}
+.queue-chip.is-active .queue-dot {
+  background: var(--accent);
+  animation: queue-pulse 1.4s var(--ease) infinite;
+}
+@keyframes queue-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(1.35); }
+}
+
+/* ---------- dock 本体 ---------- */
+.dock {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  /* 与内容区用背景步进区分（--bg-sunken vs --bg），而不是靠 1px 边框：
+     无边框设计的层级要靠"底色 + elevation"表达。 */
+  background: var(--bg-sunken);
+  box-shadow: var(--elev-2);
+  overflow: hidden;
+}
+
+.dock-scroll {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: var(--u2) var(--u2) var(--u4);
+}
+
+.dock-foot {
+  flex: none;
+  padding: var(--u2);
+  display: flex; flex-direction: column; gap: var(--u1);
+}
+
+.dock-title {
+  padding: var(--u3) var(--u3) var(--u2);
+  font-size: 11px; font-weight: 650; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-3);
+  white-space: nowrap; overflow: hidden;
+}
+
+/* ---------- section 切换器 ---------- */
+.section-list { display: flex; flex-direction: column; gap: 2px; }
+
+.section-item {
+  display: flex; align-items: center; gap: var(--u3);
+  width: 100%;
+  padding: var(--u2) var(--u3);
+  background: none; border: 0; border-radius: var(--r-md);
+  color: var(--text-2); font-size: 13px; text-align: start;
+  cursor: pointer;
+  transition: background 100ms var(--ease), color 100ms var(--ease);
+}
+.section-item:hover { background: var(--surface-2); color: var(--text); }
+.section-item .ico { flex: none; }
+/* 当前 section：底色 + 左侧 2px inset 条。选中态用 inset 阴影而不是边框，
+   否则改变盒模型、让行高在选中前后抖动。 */
+.section-item.is-current {
+  background: var(--accent-soft); color: var(--text); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.section-key {
+  margin-inline-start: auto;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
+}
+
+/* 折叠态：只留图标，标签与快捷键提示退场 */
+.is-collapsed .dock { overflow: hidden; }
+.is-collapsed .section-item {
+  justify-content: center; padding: var(--u2); gap: 0;
+}
+.is-collapsed .section-item .section-label,
+.is-collapsed .section-key,
+.is-collapsed .dock-title,
+.is-collapsed .dock-tree,
+.is-collapsed .dock-search { display: none; }
+
+/* ---------- 对象树 ---------- */
+.dock-search { position: relative; padding: var(--u2) var(--u2) var(--u3); }
+.dock-search input { padding-inline-start: var(--u9); }
+.dock-search .search-ico {
+  position: absolute; inset-inline-start: var(--u4); top: 50%;
+  transform: translateY(-50%); color: var(--text-3); pointer-events: none;
+}
+
+.tree { display: flex; flex-direction: column; gap: 1px; }
+
+.tree-row {
+  display: flex; align-items: center; gap: var(--u2);
+  width: 100%; min-width: 0;
+  padding: var(--u1) var(--u2);
+  background: none; border: 0; border-radius: var(--r-sm);
+  color: var(--text-2); font-size: 12.5px; text-align: start;
+  cursor: pointer;
+  transition: background 90ms var(--ease), color 90ms var(--ease);
+}
+.tree-row:hover { background: var(--surface-2); color: var(--text); }
+.tree-row.is-current {
+  background: var(--accent-soft); color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tree-row .ico { flex: none; opacity: .8; }
+
+.tree-kb { font-weight: 600; color: var(--text); }
+.tree-name {
+  min-width: 0; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-count {
+  flex: none; font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 文档层缩进：树要有层次，但不用嵌套列表的默认标记 */
+.tree-docs { padding-inline-start: var(--u4); display: flex; flex-direction: column; gap: 1px; }
+.tree-expander {
+  flex: none; width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 0; border-radius: var(--r-sm);
+  color: var(--text-3); cursor: pointer;
+}
+.tree-expander .ico { width: 12px; height: 12px; transform: rotate(0deg);
+  transition: transform 120ms var(--ease); }
+.tree-expander[aria-expanded="true"] .ico { transform: rotate(90deg); }
+.tree-expander:hover { background: var(--surface-3); color: var(--text); }
+
+.tree-hint {
+  padding: var(--u2); font-size: 11.5px; color: var(--text-3);
+  line-height: 1.5;
+}
+
+/* ---------- 拖拽把手 ---------- */
+.dock-handle {
+  flex: none; width: var(--dock-handle-w);
+  margin: 0 calc(var(--dock-handle-w) / -2);
+  background: transparent;
+  cursor: col-resize;
+  z-index: 5;
+  transition: background 100ms var(--ease);
+}
+.dock-handle:hover,
+.dock-handle:focus-visible { background: var(--accent-line); }
+/* 拖动时把指针捕获到整屏，避免快速拖动时把手"跑脱"。
+   类挂在 .shell 上（App 里的 `class:is-resizing={resizing}` 状态驱动），
+   以前是 document.body.classList.add() —— 同一屏的第二个绕过框架改 DOM 的地方。 */
+.shell.is-resizing, .shell.is-resizing * { cursor: col-resize; user-select: none; }
+
+/* ---------- 浮层态（窄屏） ---------- */
+.dock-scrim {
+  position: fixed; inset: var(--topbar-h) 0 0 0;
+  z-index: 40;
+  background: oklch(0 0 0 / 0.45);
+  border: 0; padding: 0; cursor: pointer;
+}
+
+/* 断点必须与 lib/dock.svelte.ts 的 NARROW_QUERY 一致（CSS 读不到 JS 常量） */
+@media (max-width: 900px) {
+  /* 窄屏：dock 不再占列，改为浮层。默认折叠（.is-collapsed），
+     展开时盖在内容上并带 scrim——两种状态都能点顶栏开关回去。
+     必须连 .is-collapsed 一起覆盖：那条规则特异性更高，
+     漏掉它的话折叠态仍会保留 56px 的图标列。 */
+  .shell, .shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .shell > .workspace { grid-column: 1; }
+  .dock {
+    position: fixed; top: var(--topbar-h); bottom: 0; inset-inline-start: 0;
+    z-index: 50;
+    width: min(320px, 82vw);
+    transform: translateX(-102%);
+    transition: transform 160ms var(--ease);
+  }
+  .shell:not(.is-collapsed) .dock { transform: none; }
+  .dock-handle { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-chip.is-active .queue-dot { animation: none; }
+  .dock { transition: none; }
+  .tree-expander .ico { transition: none; }
+}
