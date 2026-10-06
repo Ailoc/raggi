@@ -37,7 +37,9 @@ A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已�
 | 性能 | 上一轮的收益是真实的，余量明确 | — | 5（P1–P5） |
 
 测试：491（改造前）→ 517（并发改造）→ 544（审计轮 +27）→ 548（A 档执行轮 +4）；
-加上 `addopts` 把延迟门槛移出默认套件后，**默认套件 547 passed / 1 deselected**，手动 `-m perf` 再补上最后一条。
+加上 `addopts = ["-m", "not perf"]` 把延迟门槛移出默认套件后，**默认套件 547 passed / 1 deselected**（手动 `pytest -m perf` 补最后一条）。
+**但「本机 547 全绿」在 §2.4b 之后被证明不够**：同一份代码在干净环境下是
+545 passed / 2 skipped / 1 deselected，而那 2 个 skip 之前是以 404 的形式失败的。
 
 ## 1. 架构专业性
 
@@ -187,6 +189,46 @@ Could not resolve "../data/apidoc" from "web/src/ui/Dock.svelte"
 **这也是本仓第一条由 CI（而不是由人或本地跑）发现的缺陷**。
 它同时印证了本文开头那个判断：这个后端的问题不在设计，而在
 "约定与实现之间的缝隙"—— `.gitignore` 也是一处约定。
+
+### 2.4b M4b · 测试套件依赖开发者机器上的**未跟踪产物**（严重，已修 —— 由 CI 发现）
+
+**现象**：CI 的 python job 从第一次运行起就失败，而本机 `pytest -q` 全绿。
+
+**定案方法**（值得记下来，因为它不需要任何 CI 凭据）：Actions 的日志与
+job summary 都要登录才能读，匿名 API 又受 IP 限流。所以**在本机复刻 CI**：
+
+```bash
+python3 -m venv /tmp/civenv                       # 干净解释器
+git archive HEAD | tar -x -C /tmp/ci_clean        # 无产物、无本地残留的工作树
+/tmp/civenv/bin/python -m pip install -e "/tmp/ci_clean[dev]"   # 只装声明的依赖
+cd /tmp/ci_clean && /tmp/civenv/bin/python -m pytest -q -rf
+```
+
+一跑就复现，两条用例：
+
+```
+tests/test_apikeys.py::test_static_assets_not_protected   assert 404 == 200
+tests/test_e2e_flow.py::test_frontend_assets_served       assert 404 == 200
+```
+
+**根因**：`web/dist` 是不入库的 Vite 产物。本机永远有 ⇒ 常绿；
+干净检出没有 ⇒ `/` 的挂载不存在 ⇒ 404。也就是说**这不是 CI 的问题，
+是套件不干净**：它依赖开发者机器上一个未被跟踪的目录。
+
+两处各自的问题不太一样，而且第二处更难看：
+
+- `test_frontend_assets_served` 的 docstring 明写「测试不应强制依赖
+  `npm run build`：未构建时跳过产物断言」，**但 skip 判断写在
+  `assert client.get("/") == 200` 之后**。于是那句承诺从来没成立过。
+- `test_static_assets_not_protected` 的主题是「静态路径不吃鉴权」，
+  却把断言写成 `== 200`，等于把「鉴权没拦」和「产物存在」混为一谈。
+  改为先断言不变量（不是 401/403），产物在场时才进一步要求 200。
+
+**验证两个方向**：干净环境 42 passed + 1 skipped；本机 43 passed
+（产物资源逐个取回的断言仍在跑）。CI 等价环境跑完整套件 545 passed / 2 skipped。
+
+> 这一条也修正本文 §3 之前的一句判断：我曾把「本机全绿」当作状态写进文档。
+> 本机全绿只证明**这一台机器**能过；能证明"任何检出都能过"的只有干净环境。
 
 ### 2.5 M5 · 「文档式注释」正在漂移（中等，部分已修）
 
@@ -482,6 +524,10 @@ DDL↔清单与 Model↔清单**两条都会红**。
 cd /home/admin/Raggi
 python3 -m pytest -q                                    # 547 passed, 1 deselected
 python3 -m pytest -q -m perf                             # 那条延迟门槛，手动跑
+# 干净环境复现（等价于 CI；本机全绿不代表这里全绿，见 §2.4b）：
+#   python3 -m venv /tmp/civenv && git archive HEAD | tar -x -C /tmp/ci_clean
+#   /tmp/civenv/bin/python -m pip install -e "/tmp/ci_clean[dev]"
+#   (cd /tmp/ci_clean && /tmp/civenv/bin/python -m pytest -q -rf)
 python3 -m pytest -q tests/test_sql_safety.py \
                    tests/test_cache.py \
                    tests/test_meta_store.py \
