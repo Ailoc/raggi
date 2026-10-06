@@ -19,7 +19,6 @@ import argparse
 import logging
 import os
 
-from rag.api import Ctx, create_app
 from rag.core.maintenance import mark_maintenance_done
 
 log = logging.getLogger("raggi")
@@ -28,10 +27,20 @@ log = logging.getLogger("raggi")
 def build_app():
     """装配并返回 ASGI 应用。uvicorn 以 factory 形式在每个 worker 进程里调它。
 
-    `from rag.api import …` 现在在模块顶部：api 与 server 之间**不再有环**
-    （它们共用的小约定搬到了 `rag/core/maintenance.py`），
-    所以这条边没有理由继续藏在函数体里 —— 藏在里面只会让依赖图少一条边。
+    **这条导入必须留在函数体里，不是历史包袱。**
+    `rag.api` 会连带导入 `rag.core.config`，而它在模块级就构造出
+    `settings = Settings()` 单例（config.py:234）。一旦 `rag.server` 在模块级
+    导入 api，`rag serve --host/--port/--data` 就全部失效：CLI 是在
+    `main()` 里解析完参数、把值写进 `RAG_*` 环境变量**之后**才 import 配置的，
+    而那个 import 早已在 `import rag.server` 时发生 —— 单例被冻结成
+    config.toml 里的值，命令行参数静默不生效（实测 `rag serve --host 127.0.0.1`
+    仍然绑定 `0.0.0.0:8000`）。
+
+    C 档拆 api↔server 循环依赖时我把这条导入提到过模块级，就是上面这个回归，
+    561 条测试全绿也没发现 —— 因为没有任何一条测试从**真正的入口**跑一遍。
+    现已由 `tests/test_server_cli.py` 钉住。
     """
+    from rag.api import Ctx, create_app
     from rag.core.config import settings
     from rag.models.registry import ModelRegistry
     from rag.storage.backend import build_backend

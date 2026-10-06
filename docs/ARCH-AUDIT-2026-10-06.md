@@ -56,7 +56,7 @@ A 档四项与 mypy 均已落地，且**每一条门禁都有本地等价物**
 → 555（B 档执行轮 +7）→ **562**（C 档执行轮 +7：行为守卫改写 4 条原地替换不计数、
 双向导入探针 1、入口可安装性 1、health 诚实性 2（含 1 条反向对照）、
 fail-open 鉴权 2、reconcile 走对引擎 1，减去删掉的文本守卫 1，加 mypy 门槛 1）。
-默认套件 **561 passed / 1 deselected**，`ruff check rag tools tests` 与
+默认套件 **563 passed / 1 deselected**，`ruff check rag tools tests` 与
 `python -m mypy` 均全绿（两条都同时挂在 CI 与 pytest 上）。
 **但「本机全绿」在 §2.4b 之后被证明不够**：同一份代码在干净环境下是
 545 passed / 2 skipped / 1 deselected，而那 2 个 skip 之前是以 404 的形式失败的。
@@ -971,6 +971,37 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
 证明不了它声称要证明的那条路径 —— 断言当时是绿的，但**测的是别的东西**。
 
 
+### 5.9 启动服务时发现：我上一轮的改动弄坏了 CLI 覆盖（已修，并已钉住）
+
+用户要求「启动这个项目」。用 `rag serve --host 127.0.0.1` 起服务时横幅写的是
+**`http://0.0.0.0:8000`** —— `--host` 被静默忽略。
+
+根因是本审计自己上一轮引入的回归：C 档拆 `api ↔ server` 环时，我把
+`rag/server.py` 里 `from rag.api import Ctx, create_app` 从函数体提到模块级，
+理由写得很漂亮（「环已经没了，这条边没理由再藏着」）。但 `rag.api` 连带导入
+`rag.core.config`，而它在**模块级就构造** `settings = Settings()` 单例
+（`config.py:234`）⇒ `import rag.server` 这一步就按 config.toml 冻结了单例，
+而 `main()` 是解析完 argv **之后**才写 `RAG_HOST` 的。于是
+**`--host` / `--port` / `--data` 三个参数全部静默失效**。
+
+难看的是这句话：**当时 561 条测试全绿。** 所有测试都直接
+`create_app(Ctx(settings, store, registry))`，**没有任何一条走 `rag.server.main()`**
+—— 入口层的「参数解析 → 环境变量 → 单例构造时机」这条链，整套件覆盖不到。
+
+处置：
+1. 那句导入放回函数体，并写明**这次是真的必须延迟导入**（不是历史包袱）；
+2. 新增 `tests/test_server_cli.py` 两条：一条从**真入口**起服务，断言横幅与
+   `http://127.0.0.1:<port>/api/health` 真在那个地址上（并用 `--data` 指向临时目录，
+   让 config.toml 无从帮忙 —— 覆盖一旦失效就必然暴露）；另一条测**机制**：
+   `import rag.server` 之后 `RAG_HOST` 必须仍然有效。
+   变异验证：把那句导入改回模块级 ⇒ **两条都红**，第一条的失败信息里直接打出
+   `Raggi 启动: http://0.0.0.0:8000` 与 `Address already in use`。
+
+⇒ **修正 §1.3 的一句话**：那里说「剩下的函数内 import 都不是环，也就不是结构性问题」——
+方向对，结论太软。有些延迟导入是有硬理由的（避开导入期副作用的时机耦合），
+一律「提到模块级以求诚实」就会换来这一类回归。判据应当是
+「**提到模块级会不会改变某个模块级副作用的发生时机**」，而不是「它是不是环」。
+
 ## 6. 推进顺序与当前状态
 
 **A 档（1 天内，低风险）—— 四项已全部完成（2026-10-06）**
@@ -1072,7 +1103,7 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
 
 ```bash
 cd /home/admin/Raggi
-python3 -m pytest -q                                    # 561 passed, 1 deselected
+python3 -m pytest -q                                    # 563 passed, 1 deselected
 python3 -m pytest -q -m perf                             # 那条延迟门槛，手动跑
 # 干净环境复现（等价于 CI；本机全绿不代表这里全绿，见 §2.4b）：
 #   python3 -m venv /tmp/civenv && git archive HEAD | tar -x -C /tmp/ci_clean
