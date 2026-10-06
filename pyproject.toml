@@ -33,6 +33,15 @@ dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6"]
 [tool.pytest.ini_options]
 # perf 标记默认不跑：这些门槛在 4 核 + 桌面常驻的开发机上抖动很大，
 # 放进默认套件只会得到假红（结构性门槛留在默认套件里，见 test_perf_gates.py）。
+#
+# 光写 `markers = [...]` **不会**让它不跑——那只是声明哪些标记名合法，
+# 真正的排除必须靠 addopts。所以这条注释描述的behavior此前并不存在：
+# `pytest -q` 的收集结果里一直包含 `test_latency_budgets`（p50 < 150ms 这种
+# 绝对延迟断言），而它自己的 docstring 写着「只在 pytest -m perf 下跑」。
+# 属于「注释说 X、实现是 Y」这一类，只是本地机器够快一直没炸。
+#
+# 手动跑延迟门槛：`pytest -m perf`（命令行最后的 -m 覆盖这里的 addopts）。
+addopts = ["-m", "not perf"]
 markers = [
     "perf: 延迟/吞吐门槛（需要 rag-bench 的服务与合成数据集，手动跑）",
 ]
