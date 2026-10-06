@@ -11,8 +11,12 @@ __pycache__/
 build/
 dist/
 
-# 数据目录（LanceDB + 留档原文 + config.toml）
-data/
+# 运行时数据目录（LanceDB + 留档原文 + config.toml）。
+# **必须带前导斜杠**：不锚定的 `data/` 会匹配任意层级里叫 data 的目录，
+# 于是把源码 `web/src/data/apidoc.ts`（手写接口文档，三个测试直接读它）
+# 一起排除掉 —— 结果是仓库从干净检出根本构建不起来，而本地因为已有那份文件
+# 一切正常，只有 CI 能发现。这个坑真踩过，见 docs/ARCH-AUDIT-2026-10-06.md。
+/data/
 # Svelte/Vite 构建产物
 web/dist/
 
