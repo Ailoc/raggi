@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 import time
 
-from lancedb.rerankers import RRFReranker
 
 from rag.core.config import RetrieveConfig
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment
 from rag.retrieval.highlight import make_snippet
-from rag.storage.repos import contexts_for, docs_query, escape_sql, fetch_rows
+from rag.storage.repos import (chunk_prefilter, contexts_for, docs_query,
+                               search_chunks)
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.retrieve")
@@ -35,19 +35,6 @@ logger = logging.getLogger("raggi.retrieve")
 # 摘要默认长度（字符）
 DEFAULT_SNIPPET_CHARS = 220
 
-# 检索命中行**真正被返回**的列。
-#
-# 必须显式 select：不写时 LanceDB 返回该表的**全部列**，其中包括
-# `vector`（1024 维 float）与 `text_seg`（jieba 分词串）。实测 20k 块 /
-# candidate_k=50 时单行 dict 约 22.8 KB，其中向量占绝对大头
-# （A/B 交替测得 38.29ms vs 35.69ms，均值 48.34 vs 36.43）。
-# 收益不是数量级的，但它是**免费的**：不改变召回与排序，只少搬运数据，
-# 而且在并发下少分配几百 KB/请求的 Python 对象。
-#
-# 分数列（_distance/_score/_relevance_score）由查询自己附加，不用写在这里。
-HIT_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "heading_path", "page",
-            "text", "char_start", "char_end", "offset_valid",
-            "edited", "enabled", "origin"]
 
 
 def _score_of(row: dict) -> tuple[float, str]:
@@ -67,56 +54,6 @@ def _score_of(row: dict) -> tuple[float, str]:
         # 余弦距离 ∈ [0, 2]，0 表示完全一致 → 折算到 [-1, 1]，越大越相关
         return 1.0 - float(row["_distance"]) / 2.0, "cosine_similarity"
     return 0.0, "none"
-
-
-def _build_where(filters: dict) -> str | None:
-    conds: list[str] = []
-    # 停用的分块不参与检索（数据保留，可恢复）。
-    # 迁移已把存量行回填为 true，故此处直接等值过滤即可。
-    if filters.get("include_disabled") is not True:
-        conds.append("enabled = true")
-    if filters.get("origin"):
-        conds.append(f"origin = '{escape_sql(filters['origin'])}'")
-    if filters.get("kb_id"):
-        conds.append(f"kb_id = '{escape_sql(filters['kb_id'])}'")
-    doc_conds: list[str] = []
-    if filters.get("doc_ids"):
-        ids = ", ".join(f"'{escape_sql(i)}'" for i in filters["doc_ids"])
-        doc_conds.append(f"doc_id IN ({ids})")
-    # DESIGN §7：mime / parser_engine 过滤。
-    # 这两列在 documents 而非 chunks 上，先解析成 doc_id 集合再套用。
-    for key in ("mime", "parser_engine"):
-        val = filters.get(key)
-        if not val:
-            continue
-        vals = val if isinstance(val, (list, tuple)) else [val]
-        ids = _doc_ids_by_attr(filters.get("_store"), key, vals)
-        # 解析不出 doc_id 时**绝不能**跳过这个条件。早前 `if ids is not None`
-        # 让查询异常退化成「不加该过滤」——传 mime=application/pdf 却返回
-        # 全库结果，调用方会以为已过滤。查不到就当无匹配（返回 0 条）。
-        doc_conds.append(_in_clause(ids) if ids
-                         else "doc_id IN ('__no_match__')")
-    conds.extend(doc_conds)
-    return " AND ".join(conds) if conds else None
-
-
-def _in_clause(ids) -> str:
-    return "doc_id IN (" + ", ".join(
-        f"'{escape_sql(i)}'" for i in ids) + ")"
-
-
-def _doc_ids_by_attr(store, key: str, vals) -> list[str] | None:
-    """按 documents 列（mime / parser_engine）取 doc_id 集合。"""
-    if store is None:
-        return None
-    # 走仓储层的统一读入口：mime / parser_engine 这些列现在住在元数据引擎里，
-    # 自己拼 where 会读错引擎（元数据搬到 SQLite 后过滤条件恒空）。
-    try:
-        vals = list(vals)
-        rows = docs_query(store, ["doc_id"], one_of={key: vals})
-        return [str(r["doc_id"]) for r in rows]
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _doc_meta(store: LanceStore, doc_ids: list[str]) -> dict[str, dict]:
@@ -255,44 +192,28 @@ def search(
     """
     top_k = top_k or cfg.top_k
     filters = dict(filters or {})
-    filters["_store"] = store   # 供 mime/parser_engine → doc_id 解析
-    where = _build_where(filters)
+    # where 由仓储层生成（SQL 文本只许出现在 storage 层）。改前这里还有一行
+    # `filters["_store"] = store`——把 store 塞进「用户可传的过滤条件」字典里
+    # 一路带到 SQL 拼装处，那是一条隐式通道：filters 同时扮演两种角色，
+    # 任何人把它原样回显或转发就会带出内部状态。
+    where = chunk_prefilter(store, filters)
     q_seg = segment(q) if cfg.use_jieba else q
     q_vec = embedder.embed_one(q)
-    tbl = store.chunks
 
     t0 = time.perf_counter()
     degraded = None
     # 应用层精排器（HTTP / 本地 CrossEncoder）在所有通道下统一在召回之后应用；
     # LanceDB 原生 reranker 则交给它内部的融合流程。
     app_rerank = _is_app_layer_reranker(reranker)
+    # 交给 hybrid 通道的融合器：应用层精排时仍要 RRF，保证两路召回被正确归一，
+    # 所以这里传 None 而不是把精排器塞进引擎。
+    native_reranker = None if app_rerank else reranker
     try:
-        if cfg.mode == "hybrid":
-            qb = tbl.search(query_type="hybrid").vector(q_vec).text(q_seg)
-            if where:
-                qb = qb.where(where, prefilter=True)
-            qb = qb.limit(cfg.candidate_k).nprobes(cfg.nprobes).refine_factor(
-                cfg.refine_factor)
-            if app_rerank:
-                # 融合仍用 RRF 保证两路召回被正确归一，精排在其后做
-                qb = qb.rerank(RRFReranker(K=cfg.k_rrf))
-            else:
-                qb = qb.rerank(reranker) if reranker is not None else qb.rerank(
-                    RRFReranker(K=cfg.k_rrf))
-            rows = fetch_rows(qb.select(HIT_COLS))
-        elif cfg.mode == "vector":
-            qb = tbl.search(q_vec, vector_column_name="vector")
-            if where:
-                qb = qb.where(where, prefilter=True)
-            qb = qb.limit(cfg.candidate_k).nprobes(cfg.nprobes).refine_factor(
-                cfg.refine_factor)
-            rows = fetch_rows(qb.select(HIT_COLS))
-        else:  # fts：仅全文召回，不接受向量专属参数
-            qb = tbl.search(q_seg, query_type="fts")
-            if where:
-                qb = qb.where(where, prefilter=True)
-            qb = qb.limit(cfg.candidate_k)
-            rows = fetch_rows(qb.select(HIT_COLS))
+        rows = search_chunks(
+            store, mode=cfg.mode, vector=q_vec, text=q_seg, where=where,
+            limit=cfg.candidate_k, nprobes=cfg.nprobes,
+            refine_factor=cfg.refine_factor, rrf_k=cfg.k_rrf,
+            native_reranker=native_reranker)
     except Exception as e:  # noqa: BLE001
         # 索引缺失等原因时降级为纯向量召回
         logger.warning("%s 检索失败，降级 vector: %s", cfg.mode, e)
@@ -300,11 +221,10 @@ def search(
         # 异常原文常含文件路径、Arrow 表名、SQL 片段——api/__init__.py 的
         # 兜底 handler 刻意不回传这类信息，降级路径不能自己破例。
         degraded = f"{cfg.mode} 不可用，已降级 vector（详见服务端日志）"
-        qb2 = tbl.search(q_vec, vector_column_name="vector").limit(
-            cfg.candidate_k).nprobes(cfg.nprobes).refine_factor(cfg.refine_factor)
-        if where:
-            qb2 = qb2.where(where, prefilter=True)
-        rows = fetch_rows(qb2.select(HIT_COLS))
+        rows = search_chunks(
+            store, mode="vector", vector=q_vec, where=where,
+            limit=cfg.candidate_k, nprobes=cfg.nprobes,
+            refine_factor=cfg.refine_factor)
 
     # 精排失败时降级而非报错——召回结果本身仍然可用
     if app_rerank and rows:

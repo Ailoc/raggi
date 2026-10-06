@@ -401,11 +401,25 @@ def test_chunk_click_reveals_source():
     assert "is-selected" in view, "缺少选中态"
 
 
-def test_chunks_api_exposes_locator_fields():
-    """分块列表必须返回定位所需字段，否则前端无从跳转。"""
-    api = (ROOT / "rag/api/chunks.py").read_text(encoding="utf-8")
+def test_chunks_api_exposes_locator_fields(client):
+    """分块列表必须真的把定位字段返回来，否则前端无从跳页 / 高亮。
+
+    原来这条是**读 `rag/api/chunks.py` 的源码文本**找 `"page"` 字符串。
+    那是个假绿守卫：它断言的不是「接口返回了这个字段」，而是
+    「这个文件里出现过这个字面量」。本轮把列清单从端点挪进仓储层
+    （`repos/chunks.py:LIST_COLS`）之后它立刻红了，而接口行为一点没变——
+    恰好证明它一直在测错的东西。
+
+    现在走真实请求：入库一篇文本，从 `/api/chunks` 的响应里取一条，
+    逐个字段检查**键存在**（值对不对另有条目管，这里守的是契约形状）。
+    """
+    did = client.post("/api/documents/text", json={
+        "text": "定位字段回归测试：这一段必须足够长以产生至少一个分块。",
+        "title": "locator"}).json()["doc_id"]
+    items = client.get("/api/chunks", params={"doc_id": did}).json()["items"]
+    assert items, "没有分到块，这条断言会退化成空断言"
     for col in ("page", "char_start", "char_end", "offset_valid"):
-        assert f'"{col}"' in api, f"/api/chunks 未返回 {col}"
+        assert col in items[0], f"/api/chunks 未返回 {col}：{sorted(items[0])}"
 
 
 def test_lists_surface_total_for_pagination():

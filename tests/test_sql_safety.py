@@ -250,37 +250,39 @@ def test_lance_models_and_sqlite_columns_agree():
 # ---- 配置接线 ----------------------------------------------------------
 
 
-def test_sql_text_helpers_do_not_spread_outside_storage():
-    """分层债务的**棘轮**：`escape_sql` / `fetch_rows` 这类拼 SQL 的工具
-    只应该在 `rag/storage/` 里出现。
+def test_no_sql_text_outside_storage_layer():
+    """分层不变量：SQL 文本工具只能在 `rag/storage/` 里出现。
 
-    现状是三个模块绕过了仓储层自己拼 where：`api/chunks.py`、
-    `retrieval/answer.py`、`retrieval/search.py`（chunks 表仍在 LanceDB，
-    没有对应的意图接口）。这条测试不假装债务已还清，而是**禁止它长大**：
-    新增一个文件就红一次，逼后来人在 `repos/chunks.py` 里加意图型函数，
-    而不是继续抄一段拼接。
+    这是一条**棘轮**，而且已经还清了。2026-10-06 审计时它还带着三个例外
+    （`api/chunks.py`、`retrieval/answer.py`、`retrieval/search.py` 各自
+    拼 where），因为 chunks 表没有意图型读接口；B 档把
+    `chunk_filters` / `chunks_page` / `chunk_prefilter` / `search_chunks`
+    补进 `repos/chunks.py` 之后，例外清单可以清空。
 
-    为什么不用「禁止一切跨层导入」：`now_iso`/`scalar` 这类纯工具无害，
+    为什么值得钉住：绕过仓储层拼 SQL 的后果**不是立刻出错**，而是
+    ① 转义漏一处就是注入或「莫名查不到」（本项目真出过），
+    ② 同一份过滤条件在两个地方各写一遍，迟早悄悄分叉
+    （`answer.py` 就自己抄了一份 `chunk_id IN (...)`，而仓储层早就有
+    `texts_by_id` 做同一件事——那份副本存在期间，没人发现它是死的）。
+
+    为什么不禁「一切跨层导入」：`now_iso` / `scalar` 这类纯工具无害，
     真正的风险只在「自己拼 SQL 文本」。
     """
-    allowed = {"rag/api/chunks.py", "rag/retrieval/answer.py",
-               "rag/retrieval/search.py"}
     helper = re.compile(r"\b(escape_sql|escape_like|scalar_rows|fetch_rows|"
-                        r"count_rows|quote_in)\b")
-    found = set()
+                        r"count_rows|quote_in|only_cols)\b")
+    found = []
     for f in sorted((ROOT / "rag").rglob("*.py")):
         rel = str(f.relative_to(ROOT))
         if rel.startswith("rag/storage/"):
             continue
-        for line in f.read_text(encoding="utf-8").splitlines():
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             if re.match(r"\s*(from|import)\s", line) and "storage" in line \
                     and helper.search(line):
-                found.add(rel)
-                break
-    assert found <= allowed, (
-        f"新的模块开始自己拼 SQL 了：{sorted(found - allowed)}。"
-        "正确做法是在 rag/storage/repos/ 里加一个意图型函数"
-        "（参考 docs_query / kbs_query：传意图，不传 SQL 文本）")
+                found.append(f"{rel}:{n}")
+    assert not found, (
+        f"这些位置又开始自己拼 SQL 了：{found}。正确做法是在 "
+        "rag/storage/repos/ 里加意图型函数"
+        "（参考 docs_query / chunks_page：传意图，不传 SQL 文本）")
 
 
 def test_engine_dispatch_has_exactly_one_implementation():

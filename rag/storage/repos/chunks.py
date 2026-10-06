@@ -1,11 +1,14 @@
 """分块仓储：chunks 表的全部读写。"""
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from ..sql import (
     chunk_defaults,
+    escape_like,
     escape_sql,
+    fetch_rows,
     fill_missing,
     now_iso,
     quote_in,
@@ -15,6 +18,8 @@ from ..sql import (
 
 if TYPE_CHECKING:
     from ..tables import LanceStore
+
+logger = logging.getLogger("raggi.repos.chunks")
 
 # 列表列：原文对照需要 page/char_* 做定位，offset_valid 决定偏移是否可信
 LIST_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "origin", "edited",
@@ -100,6 +105,171 @@ def delete_kb_chunks(store: "LanceStore", kb_id: str) -> None:
     kb_id 下、且仍能被检索命中的数据。
     """
     store.chunks.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
+
+
+def chunk_filters(*, doc_id: str = "", kb_id: str = "",
+                  only_standalone: bool = False, q: str = "") -> str | None:
+    """把分块列表的过滤条件翻成 where 子句（**SQL 文本只在这层出现**）。
+
+    `doc_id` 与 `kb_id` 是**互斥优先**而不是 AND：调用方给了 doc_id 就只按
+    文档取，这是前端文档详情页与知识库列表页共用一个端点的前提。
+    """
+    conds: list[str] = []
+    if doc_id:
+        conds.append(f"doc_id = '{escape_sql(doc_id)}'")
+    elif kb_id:
+        # kb_id 在入库时即写入每个分块，故库下全部块（含独立分块）都能命中
+        conds.append(f"kb_id = '{escape_sql(kb_id)}'")
+    if only_standalone:
+        # doc_id='' 是「独立分块」的存储形态，须下推到 SQL 而非事后过滤
+        conds.append("doc_id = ''")
+    needle = (q or "").strip()
+    if needle:
+        # 子串过滤下推成 ILIKE（本机实测对中文有效），并且必须过 escape_like：
+        # 查询词含 % 或 _ 时不能当通配符，否则「包含 foo」会变成「foo 开头」。
+        conds.append(f"text ILIKE '%{escape_like(needle)}%'")
+    return " AND ".join(conds) if conds else None
+
+
+def chunks_page(store: "LanceStore", *, doc_id: str = "", kb_id: str = "",
+                only_standalone: bool = False, q: str = "",
+                limit: int = 100, offset: int = 0
+                ) -> tuple[list[dict], int]:
+    """分块列表页：过滤、排序、分页、计数**全部下推**。
+
+    为什么收在仓储层：改前这个端点自己拼 where 再调 `scalar_rows` /
+    `count_rows`——「只有 storage 层碰 SQL 文本」这条纪律就被绕过了，
+    而绕过的代价不是立刻出错，是**下一处过滤条件各写一份**（转义漏一处
+    就是查询结果为空或通配符误命中，且都不报错）。
+
+    次级排序键必须是 chunk_id：`ordinal` **只在单文档内唯一**，按库或
+    不带条件列时它会大量重复，只按 ordinal 排序的分页在并列处会重复/漏项。
+    """
+    from ..sql import count_rows, scalar_rows
+
+    n = max(1, int(limit))
+    where = chunk_filters(doc_id=doc_id, kb_id=kb_id,
+                          only_standalone=only_standalone, q=q)
+    rows = scalar_rows(store.chunks, cols=LIST_COLS, where=where,
+                       order_by=[("ordinal", True), ("chunk_id", True)],
+                       limit=n, offset=int(offset) or None)
+    return rows, count_rows(store.chunks, where)
+
+
+# 检索命中行真正需要返回的列。必须显式投影：不写时 LanceDB 返回**全部列**，
+# 其中包括 `vector`（1024 维 float）与 `text_seg`（jieba 分词串）——
+# 实测 20k 块 / candidate_k=50 时单行 dict 约 22.8 KB，向量占绝对大头。
+# 分数列（_distance/_score/_relevance_score/_rerank_score）由查询自己附加。
+SEARCH_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "heading_path", "page",
+               "text", "char_start", "char_end", "offset_valid",
+               "edited", "enabled", "origin"]
+
+
+def _in_clause(column: str, ids) -> str:
+    """值集合 → SQL IN (…)。**空集合绝不能写成 `IN ()`**：那是语法错误，
+    而且若被上层 except 吞掉就会退化成「不加这个过滤」，调用方以为过滤过了。
+    """
+    return f"{column} IN (" + ", ".join(
+        f"'{escape_sql(i)}'" for i in ids) + ")"
+
+
+def chunk_prefilter(store: "LanceStore", filters: dict) -> str | None:
+    """把检索过滤条件翻成 chunks 的 where 子句（SQL 文本只在这层出现）。
+
+    这里守着的两件事都**不会报错**，所以必须集中在一个地方：
+
+    - `enabled = true`：停用的分块不参与检索（数据保留、可恢复）。
+    - mime / parser_engine 这两列在 **documents** 上，要先解析成 doc_id 集合
+      再套到 chunks 上；解析失败或解析出空集合时**必须产生恒假条件**，
+      绝不能跳过该过滤——改前 `if ids is not None` 就是这个意思：
+      传 `mime=application/pdf` 却返回全库结果，调用方看不出来。
+
+    `store` 是显式参数。改前它被塞进 `filters["_store"]` 一路带下来，
+    那是一种隐式通道：filters 同时是「用户可传的过滤条件」和
+    「内部携带的对象」，任何人把 filters 原样回显或转发都会带出内部状态。
+    """
+    conds: list[str] = []
+    if filters.get("include_disabled") is not True:
+        conds.append("enabled = true")
+    if filters.get("origin"):
+        conds.append(f"origin = '{escape_sql(filters['origin'])}'")
+    if filters.get("kb_id"):
+        conds.append(f"kb_id = '{escape_sql(filters['kb_id'])}'")
+    if filters.get("doc_ids"):
+        conds.append(_in_clause("doc_id", filters["doc_ids"]))
+    # DESIGN §7：mime / parser_engine 过滤。
+    for key in ("mime", "parser_engine"):
+        val = filters.get(key)
+        if not val:
+            continue
+        vals = val if isinstance(val, (list, tuple)) else [val]
+        ids = doc_ids_by_attr(store, key, vals)
+        # 解析失败（ids 为 None）与解析出空集合，都必须产生**恒假条件**。
+        # 改前这里是 `if ids is not None`，于是查询异常退化成「不加该过滤」——
+        # 传 mime=application/pdf 却返回全库结果，调用方会以为已经过滤过了。
+        # 宁严勿松：返回 0 条是可见的空结果，返回全库是不可见的错误结果。
+        conds.append(_in_clause("doc_id", ids) if ids
+                     else "doc_id IN ('__no_match__')")
+    return " AND ".join(conds) if conds else None
+
+
+def doc_ids_by_attr(store: "LanceStore", column: str, vals) -> list[str] | None:
+    """按 documents 的列（mime / parser_engine）取 doc_id 集合；None = 读不了。"""
+    if store is None:
+        return None
+    # 走仓储层的统一读入口：这些列现在住在元数据引擎里，
+    # 自己拼 where 会读错引擎（元数据搬到 SQLite 后过滤条件恒空）。
+    from .documents import docs_query
+
+    try:
+        rows = docs_query(store, ["doc_id"], one_of={column: list(vals)})
+    except Exception:  # noqa: BLE001
+        logger.warning("按 %s 解析 doc_id 失败", column, exc_info=True)
+        return None
+    return [str(r["doc_id"]) for r in rows]
+
+
+def search_chunks(store: "LanceStore", *, mode: str = "vector",
+                  vector=None, text: str = "", where: str | None = None,
+                  limit: int = 50, nprobes: int = 20, refine_factor: int = 10,
+                  rrf_k: int | None = None, native_reranker=None) -> list[dict]:
+    """一次检索查询（vector / fts / hybrid），返回命中行（含分数列）。
+
+    hybrid 走 LanceDB **原生一次查询**（`query_type="hybrid"`），
+    不是「向量 + FTS 两条各自查完再合并」——审计时确认过这点，
+    所以「把三条通道并发化」这个看起来显然的优化**并不适用**。
+
+    失败时抛给调用方而不是就地降级：降级成 vector 是**检索策略**
+    （要写进响应的 `degraded` 字段告诉调用方结果口径变了），
+    不属于存储层该做的决定。
+    """
+    from lancedb.rerankers import RRFReranker
+
+    tbl = store.chunks
+    if mode == "hybrid":
+        qb = tbl.search(query_type="hybrid").vector(vector).text(text)
+        if where:
+            qb = qb.where(where, prefilter=True)
+        qb = qb.limit(limit).nprobes(nprobes).refine_factor(refine_factor)
+        if native_reranker is not None:
+            qb = qb.rerank(native_reranker)
+        else:
+            # 应用层精排在召回之后做；融合仍然用 RRF，保证两路召回被正确归一
+            qb = qb.rerank(RRFReranker(K=rrf_k or limit))
+        return _exec(qb)
+    if mode == "fts":
+        qb = tbl.search(text, query_type="fts")
+        if where:
+            qb = qb.where(where, prefilter=True)
+        return _exec(qb.limit(limit))
+    qb = tbl.search(vector, vector_column_name="vector")
+    if where:
+        qb = qb.where(where, prefilter=True)
+    return _exec(qb.limit(limit).nprobes(nprobes).refine_factor(refine_factor))
+
+
+def _exec(qb) -> list[dict]:
+    return fetch_rows(qb.select(SEARCH_COLS))
 
 
 def get_chunk(store: "LanceStore", chunk_id: str) -> dict | None:

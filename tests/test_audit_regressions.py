@@ -412,27 +412,25 @@ def test_score_kind_reports_mixed_instead_of_first_row():
 # ---- 过滤失败不得静默放行（P1-5）-------------------------------------
 
 
-def test_attr_filter_failure_yields_no_match_not_everything(tmp_path):
-    """mime/parser_engine 查询失败时返回 0 条，而不是全库结果。
+def test_attr_filter_failure_yields_no_match_not_everything():
+    """mime/parser_engine 解析不出文档时返回 0 条，而不是全库结果。
 
     回归背景：早前 `if ids is not None:` 让解析异常直接跳过该过滤条件，
     传 mime=application/pdf 却返回全库，调用方会以为已过滤。
+
+    这条原来是 `inspect.getsource(_build_where)` 里找
+    `"if ids is not None"` 字符串——又一处文本型守卫。它守的其实是
+    「解析失败必须退化成恒假条件」这个**行为**，而行为可以直接测出来：
+    传一个读不了的 store（None）与一个空匹配的属性值，两种情况都必须
+    得到恒假条件，且不得抛异常、不得返回 None（None = 不加过滤）。
     """
-    import inspect
+    from rag.storage.repos import chunk_prefilter
 
-    from rag.retrieval.search import _build_where
-
-    # 只看代码本身（不含 docstring/注释），否则会被解释性注释误伤
-    src = inspect.getsource(_build_where)
-    code = "\n".join(
-        ln for ln in src.splitlines()
-        if not ln.strip().startswith("#"))
-    assert "if ids is not None" not in code, \
-        "属性过滤失败仍会静默放行"
-
-    where = _build_where({"mime": "application/pdf", "_store": None})
-    assert "__no_match__" in where, \
-        "store 缺失时应产生恒假条件而非忽略过滤"
+    for filters in ({"mime": "application/pdf"},
+                    {"parser_engine": "docling"}):
+        where = chunk_prefilter(None, filters)
+        assert where is not None, "返回 None 等于不加过滤，会返回全库"
+        assert "__no_match__" in where, f"{filters} 没产生恒假条件: {where}"
 
 
 # ---- 批量编辑的 force 语义（P1-1）-----------------------------------

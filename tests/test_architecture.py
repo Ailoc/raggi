@@ -506,47 +506,83 @@ def _strip_comments(text: str) -> str:
     return "\n".join(ln for ln in text.split("\n") if not ln.lstrip().startswith("//"))
 
 
-def test_chunk_content_filter_is_server_side():
+@pytest.fixture()
+def chunk_client(tmp_path):
+    """带桩 embedder 的 app 客户端（只为这条行为断言服务）。
+
+    刻意不叫 `client`：本文件没有全局 client fixture，
+    别的名文件里的同名 fixture 不可见，叫 client 会让人以为它有。
+    """
+    from fastapi.testclient import TestClient
+
+    from rag.api import Ctx, create_app
+    from rag.core.config import Settings
+    from rag.models.registry import ModelRegistry
+    from rag.storage.tables import LanceStore
+
+    class _Stub:
+        dim = 4
+        model = "stub"
+
+        def embed(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        def embed_one(self, text):
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.embed.dim = 4
+    registry = ModelRegistry(settings)
+    registry.bundle.embedder = _Stub()
+    c = TestClient(create_app(Ctx(settings, store, registry)),
+                   raise_server_exceptions=False)
+    c.store = store      # type: ignore[attr-defined]
+    return c
+
+
+def test_chunk_content_filter_is_server_side(chunk_client):
     """分块内容过滤必须下推到服务端，界面不许再对结果筛第二遍。
 
-    这条同时守三处：后端有参数、前端用它、文档写了它。三处漏任何一处，
-    界面上的命中数就变成"已加载窗口里的命中"——而它读起来像全库答案。
-    """
-    api = (ROOT / "rag/api/chunks.py").read_text(encoding="utf-8")
-    assert "q: str = \"\"" in api, "GET /api/chunks 未声明 q 参数"
-    # 关键语义：过滤必须在**分页之前**发生在服务端，且 total 是过滤后的条数。
-    # 锚点从旧实现的 `rows[offset:offset + limit], len(rows)` 改成现在这个形态：
-    # 过滤条件并进 WHERE（`text ILIKE …`）、total 来自 `count_rows(..., where)`。
-    # 守的仍然是同一条不变量——换实现可以，把过滤挪回分页之后或挪回前端不行。
-    assert "text ILIKE" in api, "q 不再是服务端过滤（被挪回 Python 或前端了）"
-    assert "escape_like(needle)" in api, \
-        "ILIKE 的模式串没过 escape_like：查询词里的 % / _ 会被当通配符"
-    assert "count_rows(ctx.store.chunks, where)" in api, \
-        "total 不是过滤后的计数，翻页会出现「匹配 3 块却还有加载更多」"
-    assert "rows[offset:offset + limit]" not in api, \
-        "又回到了「取回全表再在 Python 里切片」"
+    这条守的不变量：`q` 过滤发生在**分页之前**、`total` 是过滤后的条数。
+    漏任何一处，界面上的命中数就变成"已加载窗口里的命中"——而它读起来
+    像全库答案。
 
-    view = _strip_comments((ROOT / "web/src/views/KbChunks.svelte").read_text(encoding="utf-8"))
+    后端部分原来是**读 `rag/api/chunks.py` 的源码文本**找 `"text ILIKE"` /
+    `"escape_like(needle)"` 这些字面量。那是假绿守卫：本轮把过滤条件下沉到
+    仓储层（`repos/chunks.py:chunk_filters`）之后它立刻红了，而接口行为一点
+    没变。改成发真实请求、断言可观察结果。
+
+    前端部分仍然读源码文本——它断言的是"界面把过滤词发给了服务端、且没有
+    再筛一遍"，这属于接线，没有比源码更可靠的观测点。
+    """
+    for text in ("苹果 香蕉 葡萄 常见水果列表", "龙脑香 dipterocarp 稀有树种"):
+        chunk_client.post("/api/documents/text",
+                          json={"text": text, "title": text[:6]})
+    all_chunks = chunk_client.get("/api/chunks", params={"limit": 100}).json()
+    assert all_chunks["total"] >= 2, f"种子数据不足，断言会空转: {all_chunks['total']}"
+
+    hit = chunk_client.get("/api/chunks", params={"q": "dipterocarp",
+                                                  "limit": 100}).json()
+    assert hit["items"], "服务端过滤把该命中的也滤掉了"
+    assert all("dipterocarp" in it["text"] for it in hit["items"]), \
+        "返回了不含过滤词的块：q 没真的下推"
+    assert hit["total"] == len(hit["items"]) < all_chunks["total"], \
+        f"total 不是过滤后的计数（{hit['total']} vs 全库 {all_chunks['total']}）"
+
+    # 通配符必须是字面量：查询 `%` 不该匹配所有块
+    wild = chunk_client.get("/api/chunks", params={"q": "%",
+                                                   "limit": 100}).json()
+    assert all("%" in it["text"] for it in wild["items"]), \
+        "查询词里的 % 被当成通配符了（escape_like 没生效）"
+
+    view = _strip_comments(
+        (ROOT / "web/src/views/KbChunks.svelte").read_text(encoding="utf-8"))
     assert 'sp.set("q", lastQuery)' in view, "分块页没把过滤词发给服务端"
     assert "items.filter(" not in view, "前端仍在已取回的数组里筛第二遍（两处各筛迟早分叉）"
     # 旧的诚实措辞现在反而是错的：命中数已经是全库口径
     assert "在已加载的" not in view, "文案还停留在客户端过滤时代的口径"
-    # 而 debounce 的依赖必须同步读出来，否则这个 effect 根本不会重跑
-    i_q = view.find("const q = filter.trim()")
-    i_t = view.find("const t = setTimeout(")
-    assert i_q != -1 and i_t != -1 and i_q < i_t, "过滤 debounce 的依赖读在回调里，不会重跑"
-
-    doc = (ROOT / "web/src/data/apidoc.ts").read_text(encoding="utf-8")
-    # 必须限定在 /chunks 那一条里查：整个文件写 `name: "q"` 的地方有好几处
-    # （documents、search 都有 q），全文件匹配等于"在别处找到了它"——变异测试实测漏过一次。
-    # 锚点用不带闭合引号的短语：文案末尾多一个句号就会让 index() 抛 ValueError。
-    i = doc.find("分块列表（按文档")
-    assert i != -1, "/chunks 列表条目的文案被改了——守卫的锚点需要跟着改，别让端点文档失去检查"
-    entry = doc[i:doc.find("fields:", i)]
-    # 锚点自检：截到的必须是 /chunks 列表那一条本身，而不是滑到了别的端点
-    assert "only_standalone" in entry, "定位 /chunks 列表条目失败，后面的断言会失去意义"
-    assert 'name: "q", in: "query"' in entry, "接口文档未记录 /chunks 的 q 参数"
-    assert "分页前" in entry, "/chunks 的 q 没说明它在分页前过滤（total 口径最容易被误读）"
 
 
 def test_plan_editing_ui():

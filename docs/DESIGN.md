@@ -908,10 +908,11 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 - **行为断言**（`test_audit_fixes.py`，45 项）：错误响应不含 `Traceback`、不含内部路径、不含误导向的"embedding 服务不可用"。
 - **架构边界**：只有 `storage/` 可接触数据库连接与建表。
   > 该规则曾写得过宽而误报 5 处——**导入 LanceDB 的算法原语（`RRFReranker`、`ColumnOrdering`）是允许的**，被禁止的是连接与建表。规则已相应收窄。
-  > 2026-10-06 审计轮把同一条纪律补到了第二个引擎上：`sqlite3.connect` 也只许出现在 `storage/`
-  > （`test_sql_safety.py`）。另外加了一条**棘轮**：目前仍有 3 个模块在 storage 之外自己拼 SQL 文本
-  > （`api/chunks.py`、`retrieval/answer.py`、`retrieval/search.py`，chunks 表还没有意图型读接口），
-  > 测试不假装债已还清，而是禁止它长大——新增一个文件就红一次。
+  > 2026-10-06 审计轮把同一条纪律补到了第二个引擎上：`sqlite3.connect` 也只许出现在 `storage/`。
+  > 当时它还是一条**棘轮**（允许 3 个模块例外，只禁止扩大）；B 档补完
+  > `repos/chunks.py` 的 `chunk_filters` / `chunks_page` / `chunk_prefilter` / `search_chunks`
+  > 之后已收紧为**零例外的不变量**（`test_no_sql_text_outside_storage_layer`）：
+  > storage 之外任何文件导入 `escape_sql`/`scalar_rows`/`fetch_rows`/`count_rows`/`only_cols` 都会红。
 - **SQL 文本层**（`test_sql_safety.py`，18 项）：含 `'` 的**合法**值必须照样查得回来（转义做过头会让
   用户看到「文档存在但搜不到」且全程无报错）；`' OR 1=1--` 匹配不到任何行；LIKE/ILIKE 里的
   `%` `_` 必须保持字面量；**投影过白名单**（列名无法做成占位符，`SELECT {', '.join(cols)}` 是唯一

@@ -15,7 +15,7 @@ from typing import AsyncIterator
 from rag.core.config import RetrieveConfig
 from rag.models.embeddings import Embedder
 from rag.retrieval.search import search
-from rag.storage.repos import escape_sql, fetch_rows
+from rag.storage.repos import texts_by_id
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.answer")
@@ -58,16 +58,12 @@ async def prepare(
     # 一次性取回命中分块全文（避免 snippet 过短影响答案质量）。
     # 必须放线程池：这是同步 LanceDB 读，跑在事件循环里会阻塞整个
     # 服务——而这里正处在 answer_stream 的协程内，阻塞等于服务无响应。
-    ids = ", ".join(f"'{escape_sql(r['chunk_id'])}'" for r in results)
-
     def _fetch():
-        return fetch_rows(store.chunks.search().where(
-            f"chunk_id IN ({ids})").select(["chunk_id", "text"]))
+        return texts_by_id(store, [r["chunk_id"] for r in results])
 
-    texts = {}
+    texts: dict[str, str] = {}
     try:
-        rows = await asyncio.to_thread(_fetch)
-        texts = {r["chunk_id"]: r["text"] for r in rows}
+        texts = await asyncio.to_thread(_fetch)
     except Exception as e:  # noqa: BLE001
         logger.warning("取回命中全文失败: %s", e)
 

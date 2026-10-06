@@ -248,18 +248,29 @@ def test_search_empty_filter_returns_zero_results(client):
         assert r.json()["results"] == []
 
 
-def test_build_where_never_emits_empty_in_clause():
-    """SQL 层守卫：无论调用方如何，_build_where 不产出空 IN ()。"""
+def test_chunk_prefilter_never_emits_empty_in_clause():
+    """SQL 层守卫：无论调用方给什么，预过滤条件里不许出现空 `IN ()`。
+
+    空 IN 是语法错误；若它被上层的 `except` 吞掉，检索就静默退化成
+    「不加这个过滤」——调用方以为过滤过了。
+
+    函数已从 `rag.retrieval.search._build_where` 搬到
+    `rag.storage.repos.chunk_prefilter`（SQL 文本只许出现在 storage 层），
+    守卫跟着搬家，断言本身没变。
+    """
     import tempfile as _tf
 
-    from rag.retrieval.search import _build_where
+    from rag.storage.repos import chunk_prefilter
     from rag.storage.tables import LanceStore
 
     with _tf.TemporaryDirectory() as d:
         store = LanceStore.for_data_dir(Path(d), 4)
-        where = _build_where({"mime": "nope", "_store": store})
+        where = chunk_prefilter(store, {"mime": "nope"})
         assert where is not None
         assert "IN ()" not in where
+        # doc_ids 传空列表同样不许产出空 IN（调用方常从检索结果直接构造）
+        where2 = chunk_prefilter(store, {"doc_ids": ["a", "b"]})
+        assert "doc_id IN ('a', 'b')" in where2
 
 
 # ---- B2：错误分类 -------------------------------------------------------

@@ -5,7 +5,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from rag.api._common import get_ctx, scalar_dict
+from rag.api._common import get_ctx
 from rag.api.responses import (
     ChunkBatchEditedOut,
     ChunkBatchEnabledOut,
@@ -34,24 +34,12 @@ from rag.chunk_edit import (
     set_chunks_enabled,
 )
 from rag.core.errors import EditConflict
-from rag.storage.repos import count_rows, escape_like, escape_sql, scalar_rows
+from rag.storage.repos import chunks_page
 
 router = APIRouter(
     tags=["chunks"],
     responses=error_responses(not_found=True, unavailable=True),
 )
-
-# 列表要返回的列。抽出来是因为加了 q 过滤之后有两条取数路径，
-# 列清单写两遍迟早不一致（一条少返回 offset_valid，前端的高亮就会静默不生效）。
-CHUNK_LIST_COLS = [
-    "chunk_id", "doc_id", "kb_id", "ordinal", "origin", "edited",
-    "enabled", "token_count", "heading_path", "text", "created_at",
-    "updated_at",
-    # 原文对照需要：page 用于 PDF 跳页，char_* 用于文本高亮，
-    # offset_valid 决定偏移是否可信
-    "page", "char_start", "char_end", "offset_valid",
-]
-
 
 @router.get("/chunks")
 async def api_chunks_list(request: Request, doc_id: str = "",
@@ -73,40 +61,11 @@ async def api_chunks_list(request: Request, doc_id: str = "",
     ctx = get_ctx(request)
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    conds: list[str] = []
-    if doc_id:
-        conds.append(f"doc_id = '{escape_sql(doc_id)}'")
-    elif kb_id:
-        # kb_id 在入库时即写入每个分块，故库下全部块（含独立分块）都能命中
-        conds.append(f"kb_id = '{escape_sql(kb_id)}'")
-    if only_standalone:
-        # doc_id='' 是「独立分块」的存储形态，须下推到 SQL 而非事后过滤
-        conds.append("doc_id = ''")
-    needle = (q or "").strip()
-    if needle:
-        # 子串过滤下推成 ILIKE（本机实测对中文有效），并且必须过 escape_like：
-        # 查询词含 % 或 _ 时不能当通配符，否则「包含 foo」会变成「foo 开头」。
-        conds.append(f"text ILIKE '%{escape_like(needle)}%'")
-    where = " AND ".join(conds) if conds else None
-
-    def _fetch():
-        # 排序 + 分页 + total 全部下推，走 lance 原生投影（scalar_rows）。
-        # 改前是 `search().select(...).order_by(...).limit().offset()`：
-        # 同一条页在本机慢 ~3×（6.8ms vs 2.3ms），且带 q 时是「取回全表
-        # 再在 Python 里筛+切片」——一页数据把整库正文搬进内存。
-        #
-        # 次级排序键补了 chunk_id：ordinal **只在单文档内唯一**，
-        # 按库或不带条件列时它会大量重复，只有 ordinal 排序的分页
-        # 在并列处会重复/漏项（旧注释说「按它排分页才不会重复/漏项」，
-        # 那个前提只在 doc_id 过滤下成立）。
-        rows = scalar_rows(ctx.store.chunks, cols=CHUNK_LIST_COLS,
-                           where=where,
-                           order_by=[("ordinal", True), ("chunk_id", True)],
-                           limit=limit, offset=offset or None)
-        total = count_rows(ctx.store.chunks, where)
-        return [scalar_dict(r) for r in rows], total
-
-    items, total = await asyncio.to_thread(_fetch)
+    # 过滤/排序/分页/计数的实现都在仓储层的 chunks_page（SQL 文本只许出现在
+    # storage 层）。这里只负责把 HTTP 参数收进范围并交给它。
+    items, total = await asyncio.to_thread(
+        chunks_page, ctx.store, doc_id=doc_id, kb_id=kb_id,
+        only_standalone=only_standalone, q=q, limit=limit, offset=offset)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
