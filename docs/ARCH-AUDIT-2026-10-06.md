@@ -33,7 +33,7 @@
 | 代码规范性 | 一致性高于一般个人项目 | 4 | 3（C1–C3） |
 | 性能 | 上一轮的收益是真实的，余量明确 | — | 5（P1–P5） |
 
-测试：491（改造前）→ 517（并发改造）→ **544**（本轮 +27），
+测试：491（改造前）→ 517（并发改造）→ **544**（审计轮 +27）→ **548**（A 档执行轮 +4），
 `python3 -m pytest -q` 三次独立运行全绿。
 
 ## 1. 架构专业性
@@ -388,31 +388,60 @@ DDL↔清单与 Model↔清单**两条都会红**。
   `DESIGN` §17.1 的 outbox 待办、`PERF-IMPLEMENTATION` §3 第 2 条与测试数、
   `DESIGN` §15 的测试计数与新守卫条目。
 
-## 6. 建议的推进顺序
+## 6. 推进顺序与当前状态
 
-**A 档（1 天内，低风险）**
-1. `git init` + 首次提交（M1）—— 之后所有改动才谈得上 review 与回滚；
-2. `ruff` + 一条跑 `pytest -q` 的 CI（M2 ①②，顺手治 C1/C2）；
-3. `create_app` 拆成 4 个 `_wire_*`（M3，纯移动）；
-4. `_meta(store)` 收到一处，并让默认配置下取不到 meta 直接启动失败（A3）。
+**A 档（1 天内，低风险）—— 四项已全部完成（2026-10-06）**
 
-**B 档（2–4 天，需要实测护航）**
+| # | 项目 | 状态 | 落点 |
+|---|---|---|---|
+| 1 | `git init` + 首次提交 | ✅ | 两个提交：`chore: 建立版本控制基线`（171 文件）在前，之后每一步都可 diff / 回滚 / bisect |
+| 2 | ruff + 一条跑 `pytest -q` 的 CI | ✅ | `pyproject.toml` 的 `[tool.ruff]`（E9/F/I）+ `.github/workflows/ci.yml` |
+| 3 | `create_app` 拆分 | ✅ | 180 → 55 行，拆出 `_http_guards` / `_wire_routers` / `_wire_exception_handlers` |
+| 4 | `_meta(store)` 收到一处 + 回退规则改对 | ✅ | `rag/storage/repos/_engine.py`（守卫禁止副本再长出来）+ `sqlite_holds_data()` |
+
+两处值得单独记的**副产品**，都比原目标更有价值：
+
+- 第 3 项让 `test_auth_is_threaded_off_event_loop` 变红，而它红的方式
+  恰好证明它本来是**假绿**：它用 `inspect.getsource(create_app)` 找字符串，
+  所以代码搬个位置就红（假红），反过来只要那行字串还在、行为怎么坏它都照过
+  （假绿）。已改成行为断言（利用「工作线程里 `asyncio.get_running_loop()`
+  必然抛 RuntimeError」来判定 `authenticate` 到底在哪个线程跑）——
+  确定性、无计时、与函数叫什么名字无关。
+  **同样的文本型守卫还剩 5 处**（`tests/test_audit_regressions.py:264/397/407/426/460`），
+  本次没有一并重写，属于同一类待清理项。
+- 第 4 项的实现过程里，我自己写的两条新测试立刻抓出两个我自己的 bug：
+  `sqlite_holds_data` 若忘了 `mode=ro`，会在「拒绝启动」这条错误路径上
+  凭空建出一个空库，下次启动就被当成「已有数据」——**防分裂的守卫自己制造分裂**；
+  以及我按 3.11 写的 `tomllib` 在本项目声明的 `requires-python >=3.10` 上是坏的
+  （项目早就为此依赖了 `tomli`）。两条现在都有断言兜着。
+
+关于 CI 的一句实话：本仓没有 remote，`.github/workflows/ci.yml`
+**从未真正执行过**。在推上 GitHub 之前，它是「期望的门禁」而不是「已在把守的门禁」；
+现在就能用的等价命令写在 §7。
+
+**B 档（2–4 天，需要实测护航）—— 未开始**
 5. `chunks_query` 意图接口，收掉 3 个模块的自拼 SQL（A1），
    改完跑 `rag-bench quick/ingest` 对比，并把棘轮测试的白名单清空；
 6. `embed` 合批（P1）；
 7. `refine_factor` / `nprobes` 敏感性实测后再定默认值（P2）。
 
-**C 档（先定职责再动）**
+**C 档（先定职责再动）—— 未开始**
 8. 解掉四对循环：`api ↔ server`、`plan ↔ repos`、
    `repos/documents ↔ repos/kbs`、`tables ↔ repos`（A2）；
 9. mypy 从 `rag/storage/` 起步（M2 ③）；
-10. `reconcile` 移出请求路径（A4）。
+10. `reconcile` 移出请求路径（A4）；
+11. 把那 5 处文本型守卫改成行为断言（第 3 项暴露出来的同一类问题）。
+
+**刻意没做的一件事**：没有把 `sqlite_holds_data` 挂到 `LanceStore.meta`
+属性上做「自动探测」。那会让每次构造 store 都碰一次文件系统——
+包括测试与 `rag-bench` 的脚本路径，而那里的速度是有意义的。
+探测只允许出现在启动的失败分支上。
 
 ## 7. 怎么复现这次审计的检查
 
 ```bash
 cd /home/admin/Raggi
-python3 -m pytest -q                                    # 544 passed
+python3 -m pytest -q                                    # 548 passed
 python3 -m pytest -q tests/test_sql_safety.py \
                    tests/test_cache.py \
                    tests/test_meta_store.py \
