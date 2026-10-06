@@ -708,16 +708,19 @@ B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场�
   以及我按 3.11 写的 `tomllib` 在本项目声明的 `requires-python >=3.10` 上是坏的
   （项目早就为此依赖了 `tomli`）。两条现在都有断言兜着。
 
-关于 CI 的两句实话（都更新过，第一次写得过于乐观）：
+关于 CI 的三句实话（这一节改过三次，每次都是因为它自己说得过头了）：
 
 - 本仓现在有 remote（`git@github.com:Ailoc/raggi.git`），CI **真的在跑**。
   它已经在把守，不是「期望的门禁」。
 - **但它被弄红过一次，是这次审计的作者自己弄的**：B5 提交 `f751957` 带着两条
   `ruff I001` 上了 main（本地 551 条测试全绿，因为 pytest 里没有 lint）。
-  这条不是猜的 —— 在干净检出（`git archive HEAD`）上跑 CI 用的同一条命令
-  `ruff check rag tools tests` 直接返回 2 errors。本机没 gh CLI、
- 匿名 API 已被限流，所以「CI 红」是从「门禁命令在 HEAD 上失败」这一条**已验证事实**
-  推出的，而不是看了一次运行。修法见 §5.7(b)。
+  现在有两道独立证据：干净检出（`git archive HEAD`）上跑门禁命令返回 2 errors；
+  Actions 侧 `f751957` 的 check-run 是 **python=failure / frontend=success**
+  —— 红在 lint 那一步而不是测试，与推断完全一致。
+  修好之后 `61835d6` 两条 check-run 都是 **success**。
+- 查 CI 状态用 `commits/<sha>/check-runs` 这**一个**端点：本机没有 gh CLI，
+  匿名 API 限流 60 次/小时（本轮实测剩 14），而日志与 job summary 仍要登录。
+  修法见 §5.7(b)，本地等价命令写在 §7。
 
 **B 档（2–4 天，需要实测护航）—— 三项都有了结论**
 5. ✅ **已完成** `chunks_*` 意图接口，收掉 3 个模块的自拼 SQL（A1），
