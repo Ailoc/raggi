@@ -751,8 +751,8 @@ dock 是 **section-aware** 的：顶栏那 5 项全局导航已移进 dock 顶�
 
 | 项 | 措施 |
 |---|---|
-| 检索 | hybrid 单次调用（Rust 原生）；`prefilter` 下推 + 标量索引；`nprobes/refine_factor` 旋钮；只 `select` 需要的列 |
-| 写入 | 批量 `pyarrow.Table` + `merge_insert` 幂等；embedding 分片并发 + 进程级闸门（`embed.concurrency`，`models/http.ScaledSemaphore`）；解析在入库队列 worker 线程内联 |
+| 检索 | hybrid 单次调用（Rust 原生）；`prefilter` 下推 + 标量索引；只 `select` 需要的列。`nprobes/refine_factor` 旋钮的**敏感性与 top-k 重合度已实测**（审计 §4.3）：`refine_factor=1` 省 60% 时间但只剩 27.5% 的 top-10 与基准相同 ⇒ **默认值不动**；`nprobes` 在 IvfHnswFlat 上既不花钱也不改结果（4→80 重合恒 1.0），它不是延迟旋钮 |
+| 写入 | 批量 `pyarrow.Table` + `merge_insert` 幂等；embedding 按 `embed.batch` 合批 + 分片并发 + **进程级**闸门（`embed.concurrency`，`models/http.ScaledSemaphore`，按 permits 缓存的单例）；解析在入库队列 worker 线程内联。<br>> 这道闸曾每次调用新建一把，等于每文档一张独立门票、乘积没被封顶（审计 §5.7a，2026-10-06 修复）。<br>> 它**只覆盖入库路径**，`/api/models/test` 的探针直连 provider；且仍是每进程一把，多进程总并发 = 进程数 × 配置值 |
 | 元数据 | OLTP（jobs/apikeys/kbs/documents）走 SQLite(WAL) 的复合索引；分块与向量留 LanceDB。点查实测 5.68ms → 0.008ms |
 | 版本治理 | 全部表的 `optimize(cleanup_older_than=…)` 由后台维护按阈值触发（改前只有手工 `rag reindex` 且只作用 chunks，于是版本无界增长） |
 | 观测端点 | `/health`、`/stats` 结果缓存 3s + `X-Snapshot-Age-Ms` 头；任何成功的写作废快照（否则用户改完看到的还是旧账） |
@@ -888,7 +888,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **547 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 548 条）。
+当前 **554 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 555 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
@@ -933,11 +933,27 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
   三项分别覆盖：已有数据必须拒启 / 空库可以安全回退 / 探测必须真是只读
   （`sqlite_holds_data` 若忘写 `mode=ro`，会在这条错误路径上凭空建出一个空库，
   下次启动就被当成「已有数据」——**防分裂的守卫自己制造分裂**，这是新测试抓出来的第一个 bug）。
-- **手写并发件**（`test_cache.py`，10 项）：`TTLCache` 站在鉴权与观测两条关键路径上，
+- **手写并发件**（`test_cache.py`，12 项）：`TTLCache` 站在鉴权与观测两条关键路径上，
   改造前直接测试为 0。逐条钉住它注释里声称的承诺：按项 TTL、并发写下上界不被突破、LRU 次序、
   `invalidate` 立即可见、键作用域（跨数据目录串键就是越权）、`None` 也是有效值、
   以及 **`loader` 在锁外执行**——这条是它存在的性能理由，用一个线程在 loader 里等事件、
   另一个线程必须仍能读写来验证。
+  > 另 2 项测的是**站在它上面的** `Embedder.embed_one`：同文本第二次不许再打远端、
+  > **换 embedding 模型必须重算**（缓存键里带模型名，否则拿到另一个模型空间的向量）；
+  > 以及一条**故意断言现状**的测试——缓存不合并「正在飞」的同 key 请求（stampede），
+  > 这是审计 §4.2 里被否证后**保留**的行为，将来实现 in-flight 合并时它会红，
+  > 届时该连决定一起改而不是把断言改小。
+- **入库并发闸与合批形状**（`test_queue.py`，4 项）：`_embed_gate` 必须跨调用复用同一实例、
+  4 文档 × 4 分片的**峰值在途 ≤ permits**、`peak > 1`（否则「串行也算过」会让上界断言变成空话），
+  以及一条**变异检查**：把闸门退回「每次新建」后峰值必须突破 permits——它证明上一条测的是闸门而不是线程数。
+  另钉 `embed.batch` 的合批形状（200 chunks / batch=64 → `[64,64,64,8]`，15 chunks → 一次打完）：
+  这个配置全仓只有一个读取点，改坏了不会有任何测试红。
+  背景见审计 §5.7a：闸门原本每次调用新建一把，**「任务数 × 分片数」这个乘积从未被封顶**，
+  而默认配置下 2×4 恰好等于名义上限 8，所以看不出来。
+- **CI 门槛的本地副本**（`test_lint_gate.py`，1 项）：把 CI 那条
+  `ruff check rag tools tests` 原样跑一遍。理由很硬：B5 提交带着两条 ruff 违规上了 main，
+  CI 当场红，而本地 551 条测试全绿——因为 pytest 里没有一条跑过 lint。
+  门槛 0.09s，漏一次的代价是一次红色的 main。
 - **守卫自身的守卫**：`test_audit_regressions.py::test_auth_is_threaded_off_event_loop`
   原来是 `inspect.getsource(create_app)` 里找一行字串。把中间件体拆出去之后它变红，
   而**行为一点没变**——这恰好证明它是假绿的一种：字串还在就算过，行为怎么坏它都照过。

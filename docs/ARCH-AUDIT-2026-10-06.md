@@ -17,28 +17,37 @@
 入库从「越并发越慢」（2.81 docs/s @c=32）变成单调上升（60.5 docs/s）。
 
 **真正的问题集中在一个模式上：隐式协议。**
-「双引擎分派」「跨进程写锁」「手写缓存」「配置读取」这四件事都靠
+「双引擎分派」「跨进程写锁」「手写缓存」「配置读取」「并发闸门」这几件事都靠
 *约定*而不是*类型或构造*来保证——属性恰好被挂上、调用方记得传对参数、
-配置项恰好有人在读。这类东西出错时不会报错，只会**结果悄悄不对**。
-本轮在这一个模式上抓出并修掉了 5 个严重缺陷（§5.1 与 §2.4），
+配置项恰好有人在读、闸门恰好是单例。这类东西出错时不会报错，只会**结果悄悄不对**。
+本轮在这一个模式上抓出并修掉了 5 个严重缺陷（§5.1 与 §2.4）+ 1 个中等（§5.7a 的假闸门），
 其中两个直接导致数据丢失与鉴权失效，一个由 **CI** 首先发现。
+B 档执行轮又添了一条同类证据：**闸门在默认配置下的错误数值正好等于期望数值**
+（2 workers × 4 shards = 8 = 名义上限），所以它从来没人看得见。
 
 **工程实践的缺口比代码问题更该先补，而且已经补上了**：
 本仓原先没有 git、没有 lint、没有 CI，也没有类型检查；
 A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已在本轮完成。
 补上的第二天就见了效——第一次真实 CI 运行就抓出 `.gitignore` 写错导致
 **推上去的仓库从干净检出构建不起来**（§2.4），而这个问题在本地永远不可见。
+然后 CI 自己也**被本审计的作者弄红过一次**：B5 提交带着两条 ruff 违规上了 main，
+本地 551 条测试全绿（pytest 里没人跑 lint）。已补 `tests/test_lint_gate.py`（§5.7b）。
 
 | 维度 | 结论 | 本轮已修 | 仍开放 |
 |---|---|---|---|
 | 架构专业性 | 骨架正确，分派机制是隐式的 | 1 | 4（A1–A4） |
 | 可维护性 | 工具链从无到有；注释仍在漂移 | 4（git / ruff+CI / create_app / `.gitignore`） | 2（M3 其余 11 个长函数、M5 文档漂移；mypy 归 M2） |
 | 代码规范性 | 一致性高于一般个人项目 | 4 | 3（C1–C3） |
-| 性能 | 上一轮的收益是真实的，余量明确 | — | 5（P1–P5） |
+| 性能 | 上一轮的收益是真实的；B 档两项已**测完定案** | 2 定案（P1 不做、P2 不改默认值）+ 1 修（P3 进程内那半）+ 1 记录（P6） | P3 跨进程那半、P4 段错误、P5 未测清单 |
 
-测试：491（改造前）→ 517（并发改造）→ 544（审计轮 +27）→ 548（A 档执行轮 +4）；
-加上 `addopts = ["-m", "not perf"]` 把延迟门槛移出默认套件后，**默认套件 547 passed / 1 deselected**（手动 `pytest -m perf` 补最后一条）。
-**但「本机 547 全绿」在 §2.4b 之后被证明不够**：同一份代码在干净环境下是
+测试（下面一律按**收集到的条数**计，避免「passed 数」被 `perf` 标记的移出/移入扰动）：
+491（改造前）→ 517（并发改造）→ 544（审计轮 +27）→ 548（A 档执行轮 +4）
+→ **555**（B 档执行轮 **+7**：闸门 3、合批形状 1、`embed_one` 缓存承诺 2、
+本地 lint 门槛 1，再把一条会随机红的阶段测试换成事件闸门版本 —— 净 +7 是
+「新增 8 条、删掉 1 条」，见 §5.7d）。
+默认套件 **554 passed / 1 deselected**（`addopts = ["-m", "not perf"]` 把延迟门槛
+移出默认套件，手动 `pytest -m perf` 补最后一条）。
+**但「本机全绿」在 §2.4b 之后被证明不够**：同一份代码在干净环境下是
 545 passed / 2 skipped / 1 deselected，而那 2 个 skip 之前是以 404 的形式失败的。
 
 ## 1. 架构专业性
@@ -97,7 +106,11 @@ A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已�
 （每请求查询次数、`builder == 0`、`rows <= limit`、分页不重不漏）全过，
 这比在 3GB 机器上采一次噪声很大的延迟样本更能说明「没有回归」；
 真正的吞吐对比留到 B6（embed 合批）一次做掉，那时本来就要建数据集。
-全量套件 547 passed / 1 deselected，ruff 全绿。
+全量套件本轮结束时 **554 passed / 1 deselected**（见 §0 的计数链）。
+> 这里原来写的是「547 passed，ruff 全绿」——**那句 ruff 全绿对本节所属的那个提交
+> （`f751957`）是不成立的**：干净检出上 `ruff check rag tools tests` 返回 2 条 `I001`。
+> 一句话的自评必须能被重跑，否则它就会变成第二条 §2.5 的注释漂移；
+> 现在这句话由 `tests/test_lint_gate.py` 代劳（§5.7b）。
 
 ### 1.3 A2 · 四对真循环依赖，靠函数内 import 掩盖（中等，开放）
 
@@ -332,29 +345,141 @@ uvloop 可用性探测。
 最后一行是这轮改造最重要的数字：写放大被拆掉了，
 剩下的版本增长与**真实数据量**成正比，「用得越久越慢」的机制不存在了。
 
-### 4.2 P1 · `embed` 合批没实现（中等，开放 —— 唯一还没兑现的 S5 条目）
+### 4.2 P1 · `embed` 合批：前提经实测基本不成立，剩下的那半不值得做（已定案）
 
-`PERF-FINAL-DECISION` S5 写了「10–20ms 窗口内 embed 合批」，
-但 `rag/models/embeddings.py` 里没有任何批处理队列
-（grep `batch` / `deque` / 窗口相关为空）。并发入库时每个文档的分片各自打一次 HTTP。
-这是入库吞吐下一个最可期待的提升点。
+原判断（S5 遗留）：「并发入库时每个文档的分片各自打一次 HTTP，合批是入库吞吐
+下一个最可期待的提升点」。**这句话是错的**，错在把「一次 HTTP 一批」当成「一次 HTTP 一条」。
 
-### 4.3 P2 · 检索的 57.5ms 是不含模型网络的下界，且瓶颈不在 Python（中等，需实测）
+实测（假 embedding，进程内计数，不联网不花额度；关键事实已固化成断言，命令见 §7）：
 
-审计时先否掉了一个直觉优化：**「把三条检索通道并发化」不适用** ——
-`search()` 走 LanceDB 原生 hybrid（`tbl.search(query_type="hybrid")`，一次查询），
-不是 vector + FTS + scalar 三次串行（`retrieval/search.py:272`）。
-真实构成是 `candidate_k=50 × refine_factor=10` ⇒ 引擎内部对 500 条候选精确重排，
-实测这段约 48ms，占整次检索 80% 以上（`refine_factor=1` 时同样查询 22.6ms）。
-**但 `refine_factor` 是召回质量旋钮，不该由性能单方面调**。
-建议：用 `rag-bench scan-paths` 做 `refine_factor` / `nprobes` 敏感性实测，
-再决定默认值 —— 而不是照搬「减半延迟」这个数。
+| # | 场景 | embed 请求次数 | 每次条数 | 墙钟 |
+|---|---|---|---|---|
+| A1 | 入库 15 chunks | 1 | [15] | 20ms |
+| A2 | 入库 100 chunks | 2 | [64, 36] | 21ms |
+| A3 | 入库 200 chunks | 4 | [64, 64, 64, 8] | 22ms |
+| A4 | 入库 1000 chunks | 16 | 15×[64] + [40] | 89ms |
+| B | 16 并发**同一**查询（冷缓存） | **16** | 16×[1] | 26ms |
+| C | 16 并发同一查询（缓存已热） | 0 | — | 0ms |
+| D | 16 并发**各异**查询 | 16 | 16×[1] | 24ms |
+| E | **串行** 16 次同一查询 | 1 | [1] | 20ms |
 
-### 4.4 P3 · 并发闸是每进程一把（轻微，已声明）
+入库路径早就合批了：`pipeline._embed_concurrently` 把整篇 texts 按
+`embed.batch`（默认 64）切片，`ThreadPoolExecutor` 并发，`ex.map` 保序
+（`rag/ingest/pipeline.py:155-172`）。唯一读 `batch` 的地方就是这一行，
+所以「batch 配了没人读」这个怀疑也被否掉了。
 
-`ScaledSemaphore` 的多进程总并发 = 进程数 × 配置值，
-类注释与 `PERF-FINAL-DECISION` §5 的契约表都写明了。
+真正没实现的只有**查询路径的跨请求 in-flight 合并**。B 与 E 是同一批 16 条
+相同查询，只差在并发与否：**串行 1 次请求，并发 16 次**（A/B/C 三行里
+`TTLCache` 只缓存**已完成**的结果，不合并正在飞的同 key 请求）。
+这是一个可证的 cache stampede —— 但也仅此而已：
+
+- **可测的是重复请求数（16 vs 1），不可测的是真实流量里它发生的频率**。
+  合批省的是「同一时刻热点 query 高度重复」那部分，而本机没有任何真实
+  流量分布可以支撑这个频率假设（§4.6 第 1 条）。
+- **代价是确定的**：S5 设想的队列式合批要引入 10–20ms 等待窗口，
+  等于把单次检索 p50 的尾部绑到「最慢的那条同批请求」上，
+  并把一个请求的失败半径扩大到整批。为省一个频率未知的重复请求付这个代价，不划算。
+- **有一个不引入等待窗口的替代**：in-flight 合并（同 key 只发一次，其余等待同一结果）
+  拿到 B→E 的全部收益，且不改变任何一条请求的返回内容。
+  真要收益，先做这个，落点在 `Embedder._one_cache` 那一层
+  （键已带模型名，见 `embeddings.py:106`）。
+
+**决定：不做队列式合批。** 两个关键事实都固化成了断言，不会随本轮脚本一起蒸发：
+合批形状 → `tests/test_queue.py::test_embed_batches_by_configured_size`；
+「不合并 in-flight」这个**有记录的现状** →
+`tests/test_cache.py::test_embed_one_does_not_merge_inflight_identical_queries`
+（它故意断言「会重复调用」，谁实现了合并它会红 —— 那时要连本节的决定一起改，
+而不是顺手把断言改小）。
+
+### 4.3 P2 · 检索参数敏感性：已测完，**结论是「不要按延迟调默认值」**（已定案）
+
+工具：`tools/bench/paramsweep.py`（`rag-bench param-sweep`）。
+数据集 20000 分块 / dim=1024 / 12 查询 / top_k=10 / 每格 9 次重复；
+除延迟外还量**与基准配置的 top-10 重合度** —— 只看延迟会把默认值调到更快但更差。
+
+单机单进程、随机向量（成本真实，排序只是弱代理）。基准 = 现在的默认值
+`candidate_k=50 / nprobes=20 / refine_factor=10`。单位是**单次查询毫秒**。
+
+**mode=vector**（基准 p50 ≈ 32–36ms，三次独立基准测量互相差 ±10%）
+
+| 参数 | 值 | 单次 p50 | 相对成本 | top-10 重合 |
+|---|---|---|---|---|
+| refine_factor | 1 | 14.3ms | 0.40× | **0.275** |
+| refine_factor | 2 | 17.0ms | 0.48× | 0.408 |
+| refine_factor | 5 | 24.2ms | 0.68× | 0.75 |
+| refine_factor | 10 | 34.0ms | 0.95× | 1.0（基准） |
+| refine_factor | 20 | 53.9ms | 1.51× | 0.917 |
+| candidate_k | 10 | 15.3ms | 0.48× | **0.408** |
+| candidate_k | 20 | 20.0ms | 0.63× | 0.708 |
+| candidate_k | 100 | 47.9ms | 1.50× | 0.917 |
+| nprobes | 4→80 | 31.2–32.5ms | 1.00–1.04× | **全部 1.0** |
+
+**mode=hybrid**（基准 ≈37ms）：`refine_factor=1` → 18.3ms / 0.5× / 重合 0.667；
+`=2` → 0.57× / 0.733；`=5` → 0.74× / 0.875；`=20` → 1.43× / 0.95。
+`candidate_k=10` → 0.54× / 0.733。nprobes 同样全是 1.0 重合、±16% 噪声。
+**mode=fts**（基准 ≈6.4ms）：`candidate_k` 10→100 成本 0.96–1.07×，重合全 1.0
+—— 全文通道根本不在这个旋钮上花钱。
+
+四条结论：
+
+1. **`refine_factor` / `candidate_k` 减半延迟的代价是换掉大部分结果集**：
+   vector 模式下 `refine_factor=1` 只有 27.5% 的 top-10 与基准相同。
+   所以「48ms→22.6ms 减半」这类数字**不能**当作免费性能，默认值不动。
+   （§4.1 那对 48/22.6ms 是 `scan-paths` 的另一条路径，绝对值比本表高约 1.3×，
+   但**比值 0.47 vs 本表 0.5 一致** —— 结论方向相同，本表为准。）
+2. **`nprobes` 在当前索引形态（IvfHnswFlat）上既免费又无效**：4→80 成本不变、
+   top-10 重合恒为 1.0。它不是延迟旋钮；能不能当召回旋钮，
+   这份数据回答不了（随机向量下本来就没有「正确排序」可言），
+   需要真实 embedding + 标注集才能定。**唯一安全的动作是：它加钱不太多，
+   等真实召回实测时可以直接往上扫**。
+3. **`refine_factor=20` 是被支配的**：多付 50% 延迟，结果还与基准不一致（0.917）。
+   没有任何理由超过 10。
+4. **fts 通道的参数不敏感**（6.4ms，改 candidate_k 无变化）——
+   之前把「检索慢」归因到候选量上，对 hybrid/vector 成立，对 fts 不成立。
+
+顺带记一条**方法论**：这个工具的第一版把「12 个查询一批计时」的总毫秒当成
+单次 p50 打印出来（382ms vs 真实 32ms，12× 误读），是 `_timed` 没有除回批量条数。
+已在工具里修掉（`divide=len(qv)`，键名改成 `p50_per_query_ms`，报表显式标单位）。
+一个单位标错的测量工具比没有工具更糟——它会让人拿着 12 倍的差去做决策。
+
+### 4.4 P3 · 跨进程的全局闸仍不存在（轻微，已声明；进程内那条已修）
+
+`ScaledSemaphore` 的多进程总并发 = 进程数 × 配置值，这条边界仍然成立，
 真要做全局闸需要跨进程信号量，属于「多机」议题，现在做只会增加故障面。
+
+但**进程内那一半原本是假的**：见 §5.7（本轮抓到并修掉的第 6 个隐式协议缺陷）。
+
+### 4.4b P6 · `_distance` 靠 Lance 的「自动投影」才在（中等，**已记录并已被现有断言守住**）
+
+`SEARCH_COLS` 是显式投影列表，里面**没有**分数列，但 `retrieval/search.py:_score_of`
+读的就是 `_distance` / `_score` / `_relevance_score`。它们之所以在行 dict 里，
+是因为 Lance 的 scoring autoprojection 在补 —— 而 scanner **每次查询**都在为此打一条
+Rust Deprecation 警告：「目前会自动补，将来不补了，请调
+`disable_scoring_autoprojection` 采纳新行为」。一次 20000 分块的参数扫描里
+这类警告有 3436 行（≈1.7 条/查询）。
+
+实测了这个依赖断掉的形状（`_score_of` 的兜底是 `return 0.0, "none"`）：
+
+| 行内容 | `_score_of` 返回 |
+|---|---|
+| `{"_distance": 0.2}` | `(0.9, "cosine_similarity")` |
+| `{}` | `(0.0, "none")` |
+
+也就是：真到那一天，vector 检索**不报错**，而是每条命中都拿 0. 分 ——
+`score_kind` 变 `none`、`score_threshold` 把所有结果过滤光。标准 §4 开头那句话的形状。
+
+两点决定：
+
+1. **不调那个开关**。消除警告的代价是把一条隐式依赖变成静默退化，不值。
+2. **不加新测试**：这条依赖已经有行为断言在守 ——
+   `tests/test_search_api.py::test_score_kind_matches_mode` 逐模式要求
+   vector→`cosine_similarity`、fts→`bm25`、hybrid→`rrf|bm25`，
+   哪一条分数列消失，对应模式立刻红；`test_score_threshold_filters`
+   则在全 0 分时因「阈值未生效」红。升级 lance 时会先撞上它们，而不是线上。
+   真正缺的是**说明**，已补在 `rag/storage/repos/chunks.py:159-171`
+   （原来那句「分数列由查询自己附加」恰好把这条依赖说成了无关巧合，
+   属于 §2.5 的注释漂移）。
+
 
 ### 4.5 P4 · 观察到一次 native 段错误（事实记录，未定位）
 
@@ -488,6 +613,74 @@ DDL↔清单与 Model↔清单**两条都会红**。
   `DESIGN` §17.1 的 outbox 待办、`PERF-IMPLEMENTATION` §3 第 2 条与测试数、
   `DESIGN` §15 的测试计数与新守卫条目。
 
+### 5.7 B 档执行轮：闸门是假的、CI 被自己人弄红、以及两条决定（2026-10-06）
+
+**(a) embedding 并发闸形同虚设（§4.4 的第 6 个隐式协议缺陷，已修）**
+
+`rag/ingest/pipeline.py:125-129` 用五行注释解释了这道闸门为什么必须存在：
+「并发任务数 × 每个任务内的分片会相乘（默认 2×4=8），无上限时远端会限流，
+而 `_is_retryable` 认 429 ⇒ 每个分片各自退避重试 3 次 ⇒ 级联重试风暴」。
+`_embed_gate()` 的 docstring 也写着「进程级」。
+
+**但它每次调用新建一把。** `gate = _embed_gate(cfg)` 在 `_embed_concurrently`
+函数体内，作用域是「一个文档」。实测（假 embedding，每请求睡 50ms，数最大在途）：
+
+| docs | chunks/doc | concurrency | 修复前峰值在途 | 修复后 | 应得上限 |
+|---|---|---|---|---|---|
+| 1 | 200 | 4 | 4 | 4 | 8 |
+| 4 | 200 | 4 | **16** | 8 | 8 |
+| 8 | 200 | 4 | **32** | 8 | 8 |
+
+修复前的峰值随文档数**线性增长** —— 也就是那个乘积一点没被封顶，
+注释描述的事故机制完好地保留着。默认配置下它恰好看不出来：
+`ingest_workers=2` × `concurrency=4` = 8 = 期望上限 2×4 = 8，**两个错数正好相等**。
+只要 `ingest_workers` 调到 3 以上（或 `rag serve --processes N`，每个进程一套队列）
+闸门就消失，而这正是 S4 多进程形态落地后的使用方式。
+
+修法：进程级按 permits 缓存 + 双检锁（两个文档同时起步只能有一个实例进字典）。
+守卫三条（`tests/test_queue.py`）：闸门实例跨调用复用、
+4 文档 × 4 分片峰值 ≤ permits、以及一条**变异检查** ——
+把 `_embed_gate` 退回「每次新建」后峰值必须 > permits。
+第三条是必要的：它证明前一条测的是闸门，而不是恰好线程数少。
+`peak > 1` 也单独断言了，否则「串行也算过」会让上界断言变成空话。
+
+顺带在 docstring 里补了一条本来就没做到的边界：**这道闸只覆盖入库路径**，
+`api/models.py:94` 的连通性探针直连 `embedder.embed`，不排队。
+
+**(b) `main` 被我自己弄红了一次（流程缺陷，已补本地门槛）**
+
+B5 那个提交（`f751957`）把两条 `ruff I001` 推上了 main，CI 当场红，
+而**本地 551 条测试全绿** —— pytest 里没有任何一条跑过 ruff，
+所以「CI 是门槛」只在推上去之后才成立。那两条 I001 正是本轮源码手术留下的残迹
+（AST 删函数留下的空行、手工插进去的 import 顺序）。
+
+补了 `tests/test_lint_gate.py`：把 CI 那条 `ruff check rag tools tests`
+原样在本地跑一遍（ruff 不在就 skip）。验证过它会红：临时插一个未排序 import
+→ `FAILED`。**门槛重复一份不贵（0.09s），漏一次的代价是一次红色的 main。**
+
+**(c) 两条「不做」的决定**
+
+§4.2（不做队列式 embed 合批）与 §4.3（不按延迟调 `refine_factor`/`nprobes` 默认值）
+都是**测完之后的否证**，不是跳过。写清楚理由、把可复现的判据留在 §7，
+是为了下次不必再花一轮去怀疑同一件事。
+
+**(d) CI 里有一条会随机红的测试，已经改成不赌时序**
+
+本轮为修闸门跑全量套件，4 次全量跑里 `test_stage_progress_observed` **红了一次**
+（`seen == ['done']`：第一次轮询任务就已经终态），而它单跑 5/5 绿。
+它靠「桩睡 0.12s vs 每 20ms 轮询」制造观测窗口 —— 那是一次赛跑，
+负载稍高就输。这类红的结局不是「发现问题」，而是**门禁被忽略**，
+所以必须处理而不是标注为已知 flake。
+
+改法：`_GatedEmbedder` 把 provider 卡在一个事件上，测试在「provider 确实还卡着」
+的时候去读阶段，然后放行。窗口由事件构造，与机器快慢无关。
+顺带把断言从「非终态就行」收紧成「阶段必须是 `embed`」——
+前者在「整条流水线只在结束时写一次任务行」的回归下依然会绿
+（它会看到创建时的 `queued`），等于没测进度。
+本文件里 `_VerySlowEmbedder` 的注释早就写下过同一条教训（不要用绝对墙钟阈值），
+这条测试是同一个坑的第二份证据。
+
+
 ## 6. 推进顺序与当前状态
 
 **A 档（1 天内，低风险）—— 四项已全部完成（2026-10-06）**
@@ -495,7 +688,7 @@ DDL↔清单与 Model↔清单**两条都会红**。
 | # | 项目 | 状态 | 落点 |
 |---|---|---|---|
 | 1 | `git init` + 首次提交 | ✅ | 两个提交：`chore: 建立版本控制基线`（171 文件）在前，之后每一步都可 diff / 回滚 / bisect |
-| 2 | ruff + 一条跑 `pytest -q` 的 CI | ✅ | `pyproject.toml` 的 `[tool.ruff]`（E9/F/I）+ `.github/workflows/ci.yml` |
+| 2 | ruff + 一条跑 `pytest -q` 的 CI | ✅ | `pyproject.toml` 的 `[tool.ruff]`（E9/F/I）+ `.github/workflows/ci.yml`；B5 弄红之后又补了 `tests/test_lint_gate.py`，让本地 `pytest -q` 覆盖 CI 那条命令（§5.7b） |
 | 3 | `create_app` 拆分 | ✅ | 180 → 55 行，拆出 `_http_guards` / `_wire_routers` / `_wire_exception_handlers` |
 | 4 | `_meta(store)` 收到一处 + 回退规则改对 | ✅ | `rag/storage/repos/_engine.py`（守卫禁止副本再长出来）+ `sqlite_holds_data()` |
 
@@ -515,15 +708,29 @@ DDL↔清单与 Model↔清单**两条都会红**。
   以及我按 3.11 写的 `tomllib` 在本项目声明的 `requires-python >=3.10` 上是坏的
   （项目早就为此依赖了 `tomli`）。两条现在都有断言兜着。
 
-关于 CI 的一句实话：本仓没有 remote，`.github/workflows/ci.yml`
-**从未真正执行过**。在推上 GitHub 之前，它是「期望的门禁」而不是「已在把守的门禁」；
-现在就能用的等价命令写在 §7。
+关于 CI 的两句实话（都更新过，第一次写得过于乐观）：
 
-**B 档（2–4 天，需要实测护航）**
+- 本仓现在有 remote（`git@github.com:Ailoc/raggi.git`），CI **真的在跑**。
+  它已经在把守，不是「期望的门禁」。
+- **但它被弄红过一次，是这次审计的作者自己弄的**：B5 提交 `f751957` 带着两条
+  `ruff I001` 上了 main（本地 551 条测试全绿，因为 pytest 里没有 lint）。
+  这条不是猜的 —— 在干净检出（`git archive HEAD`）上跑 CI 用的同一条命令
+  `ruff check rag tools tests` 直接返回 2 errors。本机没 gh CLI、
+ 匿名 API 已被限流，所以「CI 红」是从「门禁命令在 HEAD 上失败」这一条**已验证事实**
+  推出的，而不是看了一次运行。修法见 §5.7(b)。
+
+**B 档（2–4 天，需要实测护航）—— 三项都有了结论**
 5. ✅ **已完成** `chunks_*` 意图接口，收掉 3 个模块的自拼 SQL（A1），
    棘轮白名单已清空并升级为零例外不变量；延迟 A/B 未跑，理由见 §1.2。
-6. `embed` 合批（P1）；
-7. `refine_factor` / `nprobes` 敏感性实测后再定默认值（P2）。
+6. ✅ **测完，决定不做**（P1）：前提「每个分片各打一条 HTTP」在入库路径上是错的，
+   那里早就按 `embed.batch` 合批；剩下查询路径的 in-flight 合并，
+   收益频率无法在本机测得、而队列式合批的代价（等待窗口 + 失败半径）是确定的。
+   数据与判定见 §4.2。**调查过程里抓到同形的真缺陷**（§5.7a）。
+7. ✅ **测完，决定不改默认值**（P2）：`tools/bench/paramsweep.py` +
+   `rag-bench param-sweep`，成本与 top-k 重合度一起量。结论是
+   「按延迟调 `refine_factor`/`nprobes` 会把默认值调到更快但更差」——
+   vector 模式下 `refine_factor=1` 只有 27.5% 的 top-10 与基准相同。
+   数据、四条结论与那条「单位坑」见 §4.3。
 
 **C 档（先定职责再动）—— 未开始**
 8. 解掉四对循环：`api ↔ server`、`plan ↔ repos`、
@@ -531,6 +738,14 @@ DDL↔清单与 Model↔清单**两条都会红**。
 9. mypy 从 `rag/storage/` 起步（M2 ③）；
 10. `reconcile` 移出请求路径（A4）；
 11. 把那 5 处文本型守卫改成行为断言（第 3 项暴露出来的同一类问题）。
+
+**卡在「没有真实数据」上的一档（本机做不了，别在假数据上继续）**
+12. `nprobes` 到底能不能换召回：需要真实 embedding + 一个哪怕 30 条的标注召回集。
+    本轮的敏感性数据只能说明「它在当前索引上不花钱也不改变结果」（§4.3 第 2 条），
+    这条结论在随机向量上**不可能**被推翻，继续扫是浪费。
+13. `embed` in-flight 合并值不值得做：需要真实查询流量的重复度分布（§4.2）。
+14. 真实模型服务下的端到端并发与延迟（§4.6 第 1 条）——
+    这一条不做完，P1/P2 的一切「收益」都只是引擎内层的相对数。
 
 **刻意没做的一件事**：没有把 `sqlite_holds_data` 挂到 `LanceStore.meta`
 属性上做「自动探测」。那会让每次构造 store 都碰一次文件系统——
@@ -541,7 +756,7 @@ DDL↔清单与 Model↔清单**两条都会红**。
 
 ```bash
 cd /home/admin/Raggi
-python3 -m pytest -q                                    # 547 passed, 1 deselected
+python3 -m pytest -q                                    # 554 passed, 1 deselected
 python3 -m pytest -q -m perf                             # 那条延迟门槛，手动跑
 # 干净环境复现（等价于 CI；本机全绿不代表这里全绿，见 §2.4b）：
 #   python3 -m venv /tmp/civenv && git archive HEAD | tar -x -C /tmp/ci_clean
@@ -555,6 +770,26 @@ python3 -m ruff check rag tools tests                     # 门禁（E9/F/I）�
 python3 -m pyflakes rag tools                            # 只剩 1 条有意的 noqa 探测
 ```
 
-本轮全部实验在 `/tmp/raggi_*` 与 `/tmp/dbg_*` 的副本上进行，
-`data/` 未被任何写操作触碰；模型调用全部走 `tools/bench` 的假 embedding，
+B 档两项的复现（都不碰 `data/`，都不打真实模型）：
+
+```bash
+# §4.3 检索参数敏感性：先造 2000 文档 / 20000 分块的临时数据集到 /tmp/ps/data
+#（python3 -m tools.bench gen --data /tmp/ps/data --docs 2000 --chunks-per 10），然后
+python3 -m tools.bench param-sweep --data /tmp/ps/data \
+       --queries 12 --repeats 9 --out /tmp/ps/sweep.json
+#   报表单位是「单次查询毫秒」；重合度=与基准配置的 top-10 交集比例。
+#   注意：跑之前确认这台 4 核机没有别的负载（load 3.0 时低延迟端会漂 ±35%）。
+
+# §5.7a 闸门失效的复现已固化成测试，直接看三条：
+python3 -m pytest -q tests/test_queue.py -k gate -v
+#   test_embed_gate_is_reused_within_the_process   —— 单例
+#   test_concurrent_ingests_share_one_gate         —— 峰值在途 <= permits
+#   test_gate_actually_throttles_when_shared       —— 退回 per-call 必须红
+# §4.2 的合批形状与「不合并 in-flight」两条现状也固化成了测试：
+python3 -m pytest -q tests/test_queue.py::test_embed_batches_by_configured_size \
+                   tests/test_cache.py::test_embed_one_does_not_merge_inflight_identical_queries
+```
+
+本轮全部实验在 `/tmp/raggi_*`、`/tmp/dbg_*` 与 `/tmp/ps` 的副本上进行，
+`data/` 未被任何写操作触碰；模型调用全部走假 embedding（进程内计数或 `tools/bench`），
 未产生真实额度消费。

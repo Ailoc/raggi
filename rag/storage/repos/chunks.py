@@ -159,7 +159,18 @@ def chunks_page(store: "LanceStore", *, doc_id: str = "", kb_id: str = "",
 # 检索命中行真正需要返回的列。必须显式投影：不写时 LanceDB 返回**全部列**，
 # 其中包括 `vector`（1024 维 float）与 `text_seg`（jieba 分词串）——
 # 实测 20k 块 / candidate_k=50 时单行 dict 约 22.8 KB，向量占绝对大头。
-# 分数列（_distance/_score/_relevance_score/_rerank_score）由查询自己附加。
+# 分数列**不在**这个列表里，却会出现在返回的行 dict 中：Lance 的
+# `scoring autoprojection` 在显式投影缺 `_distance`/`_score` 时把它们补回来。
+# 这是一条**依赖**而不是巧合 —— `retrieval/search.py:_score_of` 读的正是它们，
+# 而 scanner 每次查询都在为此打一条 Rust Deprecation 警告：
+# 「将来不再自动补，请调 `disable_scoring_autoprojection` 采纳新行为」。
+# 所以两点必须知道：
+#   1. **不要**为了消除警告去调那个开关 —— 分数列会消失，`_score_of` 的
+#      兜底 `return 0.0, "none"` 让它静默退化（排序、score_threshold、
+#      score_kind 一起说谎），这正是本文件反复在防的「结果悄悄不对」。
+#   2. 升级 lance/lancedb 时如果这个行为变了，会由
+#      `tests/test_search_api.py::test_score_kind_matches_mode`
+#      （vector 必须拿到 `cosine_similarity`）先变红，而不是等到线上静默。
 SEARCH_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "heading_path", "page",
                "text", "char_start", "char_end", "offset_valid",
                "edited", "enabled", "origin"]
