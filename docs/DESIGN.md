@@ -888,11 +888,12 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **548 个测试通过**。
+当前 **547 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 548 条）。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
 
+- **默认套件的边界**：`addopts = ["-m", "not perf"]` 把绝对延迟门槛关在默认套件外。此前只声明了 `markers = [...]`——那只是允许这个标记名，**不会**排除它，于是 `test_latency_budgets`（断言 `p50 < 150ms`）一直每天在默认套件里跑，而它自己的 docstring 第一行写着「只在 `pytest -m perf` 下跑」。注释与行为现在由 addopts 对齐；两条命令都验过（默认 547 passed / 1 deselected；`-m perf` 单跑通过）。
 - **隔离**：`tests/conftest.py` 把 `RAG_DATA_DIR` 指向临时目录。必须如此——`Settings()` 会读 `{data_dir}/config.toml`，测试若不隔离就会读到开发机上的生产配置（实测：本地开启 `features.answer` 后，断言"默认关闭"的测试立刻失败）。
 - **静态守卫**（`test_frontend_wiring.py`，33 条）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、浏览器副作用只允许有 `lib/actions.ts` 一份实现。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
   > 曾针对「手写 HTML + tsc 直出」校验 import 可解析与 DOM id 存在；改用 Svelte 后这两类由编译器与组件结构接管，保留只会变成噪声，已移除。

@@ -36,8 +36,8 @@ A 档四项（`git init` / ruff / CI / 装配函数拆分 + 分派收口）已�
 | 代码规范性 | 一致性高于一般个人项目 | 4 | 3（C1–C3） |
 | 性能 | 上一轮的收益是真实的，余量明确 | — | 5（P1–P5） |
 
-测试：491（改造前）→ 517（并发改造）→ **544**（审计轮 +27）→ **548**（A 档执行轮 +4），
-`python3 -m pytest -q` 三次独立运行全绿。
+测试：491（改造前）→ 517（并发改造）→ 544（审计轮 +27）→ 548（A 档执行轮 +4）；
+加上 `addopts` 把延迟门槛移出默认套件后，**默认套件 547 passed / 1 deselected**，手动 `-m perf` 再补上最后一条。
 
 ## 1. 架构专业性
 
@@ -179,7 +179,7 @@ Could not resolve "../data/apidoc" from "web/src/ui/Dock.svelte"
 确认没有别的源码被同一条规则吞掉。
 
 **为什么本地完全看不出来**：本机是唯一检出，那份文件一直在，
-构建与 548 个测试全部通过。这类"排除规则写错"只惩罚**新克隆的仓库**，
+构建与全部测试都通过（本机是唯一检出，那份文件一直在）。这类"排除规则写错"只惩罚**新克隆的仓库**，
 在唯一的开发机上永远不发作。第一次 CI 运行两个 job 都红
 （`frontend` 在 `npm run build`，`python` 在 `pytest`），
 就是把这条规则从"看起来有门禁"变成"真门禁"的价值所在。
@@ -201,6 +201,15 @@ Could not resolve "../data/apidoc" from "web/src/ui/Dock.svelte"
   —— 骗人的注释比没有注释更坏，因为它让后来人不敢清理；
 - `meta.py` 的性能对照表里有一行「领取一个排队任务 0.009ms」，
   对应的是从未实现的 `claim_job`。
+
+审计之后又找到两例同一形状的漂移，都由「CI/新检出」这个视角照出来：
+
+- **`.gitignore` 的 `data/` 未锚定**（§2.4）——本地是唯一检出，所以永远看不见；
+- **`pyproject` 里「perf 标记默认不跑」这句注释不成立**：只声明 `markers`
+  不会排除用例，排除要靠 `addopts`。于是那条 `p50 < 150ms` 的延迟门槛
+  一直混在默认套件里跑，而它自己的 docstring 第一行就写着「只在
+  `pytest -m perf` 下跑」。本地机器快、负载稳，所以没炸——
+  **注释描述的机制不存在，和注释描述的行为不符，是同一类问题的两种形态**。
 
 同一轮还发现 `PERF-FINAL-DECISION` 的架构图声称 SQLite 里有
 `doc_text` 独立表、`ratelimit` 表、`idempotency` 表、`outbox` 表 ——
@@ -471,7 +480,8 @@ DDL↔清单与 Model↔清单**两条都会红**。
 
 ```bash
 cd /home/admin/Raggi
-python3 -m pytest -q                                    # 548 passed
+python3 -m pytest -q                                    # 547 passed, 1 deselected
+python3 -m pytest -q -m perf                             # 那条延迟门槛，手动跑
 python3 -m pytest -q tests/test_sql_safety.py \
                    tests/test_cache.py \
                    tests/test_meta_store.py \
