@@ -177,12 +177,14 @@ def set_kb_plan(store: LanceStore, kb_id: str, *, chunk_size,
     「恢复系统默认」，此时**物化**为默认数值，而不是留一个需要
     运行时解释的 0。
     """
-    size = clamp_size(chunk_size)
-    ratio = clamp_ratio(overlap_ratio)
+    size: int = clamp_size(chunk_size)
+    ratio: float = clamp_ratio(overlap_ratio)
     if size <= 0:
         g = global_plan(settings) if settings is not None else {
             "chunk_size": 512, "overlap_ratio": 12.5}
-        size, ratio = g["chunk_size"], g["overlap_ratio"]
+        # 显式转换而不是直接赋值：`global_plan()` 返回的是无类型的 dict，
+        # 拿它的值赋给已声明为 int/float 的变量，正是 mypy 该拦下来的那种事。
+        size, ratio = int(g["chunk_size"]), float(g["overlap_ratio"])
     set_kb_fields(store, kb_id, chunk_size=size, overlap_ratio=ratio)
 
 

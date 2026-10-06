@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..chunk_limits import clamp_ratio, clamp_size
 from ..sql import escape_sql, now_iso, only_cols, scalar, scalar_rows
@@ -144,7 +144,10 @@ def update_kb(store: LanceStore, kb_id: str, *,
     row = get_kb(store, kb_id)
     if row is None:
         return None
-    values = {"updated_at": now_iso()}
+    # 这一行的值是混合类型（updated_at 是 str，chunk_size 是 int，
+    # overlap_ratio 是 float）。不标注会被推断成 dict[str, str]，
+    # 于是下面两个数值赋值各报一条 mypy 错。
+    values: dict[str, Any] = {"updated_at": now_iso()}
     if name is not None:
         values["name"] = name
     if description is not None:

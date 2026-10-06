@@ -112,7 +112,11 @@ def chunk_schema(dim: int):
         offset_valid: bool = True     # 编辑导致偏移失效时置 False
         fts_stale: Optional[bool] = None  # 编辑后尚未重建 FTS 的标记（ensure_fts_index 清除）
         embed_model: str = ""
-        vector: Vector(dim)
+        # lancedb 的 Vector 是**运行时参数化**的（`Vector(dim)` 返回一个
+        # 固定长度 list 的类型构造器），这对 pydantic 是对的，但类型检查器
+        # 把「调用结果当注解」判成非法语法 —— 这是 lancedb 没有 stub 造成的，
+        # 不是这里写错了。用 ignore 而不是改写：改成任何静态形式都会破坏建表。
+        vector: Vector(dim)  # type: ignore[valid-type]
         created_at: str = ""
         updated_at: str = ""
 

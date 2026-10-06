@@ -47,6 +47,11 @@ jobs:
       - name: 静态检查（ruff E9/F/I）
         run: ruff check rag tools tests
 
+      - name: 类型检查（mypy，范围 = rag/storage/）
+        # 范围写在 pyproject 的 [tool.mypy] files 里，不在命令行重复一遍：
+        # 两边各写一次就可能出现「CI 查的目录」与「本地查的目录」不一致。
+        run: python -m mypy
+
       - name: 测试
         id: pytest
         # -rf：结束时列出失败用例名。配合下面那步把结果写进 job summary，

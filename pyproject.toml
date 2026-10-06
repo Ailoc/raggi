@@ -28,7 +28,7 @@ dependencies = [
 docling = ["langchain-docling>=0.2", "docling>=2.0"]
 unstructured = ["langchain-unstructured>=0.1", "unstructured>=0.14"]
 local-models = ["langchain-huggingface>=0.1", "sentence-transformers>=3.0"]
-dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6"]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6", "mypy>=1.8"]
 
 [tool.pytest.ini_options]
 # perf 标记默认不跑：这些门槛在 4 核 + 桌面常驻的开发机上抖动很大，
@@ -91,6 +91,31 @@ rag-bench = "tools.bench.__main__:main"
 # 所以这个缺陷只有真装一次才看得见 —— 与 §2.4 的 `.gitignore` 是同一课。
 [tool.setuptools.packages.find]
 include = ["rag*", "tools*"]
+
+# mypy 从 `rag/storage/` 起步（审计 M2 的第 ③ 项）。
+#
+# **为什么先只圈这一个目录**：存储层是本仓全部「隐式协议」事故的发生地
+# （无鉴权、8 篇说 7 篇、迁移丢正文、假闸门、修复计数写错引擎 —— 五起都在这里），
+# 而它同时也是最靠「约定」而非「类型」维持的一层：dict 到处当行用、
+# 值可能是 str 也可能已经是 int、Optional 一路 `.get()`。
+# 实测首轮 11 条报错里没有一条是纯噪音：3 条是 dict 值类型被推断错（会掩盖
+# 真实赋值错误）、2 条是同一个变量在两种引擎方言间复用（含义都不同）、
+# 1 条 `bool(row) and row.get(...)` 根本无法收窄、其余是运行时参数化的注解。
+#
+# **刻意不做什么**：不开 `strict`。第一次就红 200 条的检查器只会被长期
+# `--ignore`，等于没有（同 ruff 的规则集决定）。也不假装全仓已覆盖 ——
+# `files` 就是范围，扩大它需要一次目录一次目录地做。
+[tool.mypy]
+files = ["rag/storage"]
+python_version = "3.10"
+# lancedb / pyarrow / pydantic v1 兼容层都没有可靠的类型信息，
+# 缺 stub 是既成事实；报 import-untyped 只会淹没真错误。
+ignore_missing_imports = true
+# 未标注的函数默认不检查（否则第一年的收益全是「缺少注解」的噪声）。
+disallow_untyped_defs = false
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
 
 [build-system]
 requires = ["setuptools>=68"]

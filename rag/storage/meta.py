@@ -331,7 +331,10 @@ class MetaStore:
             (key, str(value)))
 
     def stats(self) -> dict:
-        out = {}
+        # 混合值：行数是 int，取不到用 -1，完整性检查与 journal mode 是 str。
+        # 不标注的话 mypy 会按第一次赋值把它钉成 dict[str, int]，
+        # 后面四个 str 赋值全报错——那 4 条噪音正是这么来的。
+        out: dict[str, Any] = {}
         for t in ("documents", "jobs", "kbs", "apikeys"):
             try:
                 out[t] = self.count(t)

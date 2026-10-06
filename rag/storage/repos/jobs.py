@@ -99,26 +99,34 @@ def list_jobs(store: "LanceStore", limit: int = 50,
     n = max(1, min(int(limit), 500))
     meta = _meta(store)
     if meta is not None:
-        where, params = ("", ())
+        # 两个引擎的「过滤条件」不是一种东西：SQLite 要 `WHERE …` 片段 +
+        # 参数元组，Lance 要一个完整的 filter 表达式。
+        # 改前两个分支复用同一个 `where` 名字，类型与含义都串了
+        # （mypy 报的就是这个：str 与 str|None 互相赋值）。分名之后
+        # 「这条 SQL 归谁」在代码里看得见。
+        sql_where: str = ""
+        sql_params: tuple[str, ...] = ()
         if kb_id:
-            where, params = "WHERE kb_id=?", (kb_id,)
+            sql_where, sql_params = "WHERE kb_id=?", (kb_id,)
         rows = meta.query(
-            f"SELECT {', '.join(JOB_COLS)} FROM jobs {where} "
-            "ORDER BY started_at DESC, job_id LIMIT ?", (*params, n))
-        return rows, meta.count("jobs", where or None, params)
-    where = f"kb_id = '{escape_sql(kb_id)}'" if kb_id else None
-    rows = scalar_rows(store.jobs, cols=JOB_COLS, where=where,
+            f"SELECT {', '.join(JOB_COLS)} FROM jobs {sql_where} "
+            "ORDER BY started_at DESC, job_id LIMIT ?", (*sql_params, n))
+        return rows, meta.count("jobs", sql_where or None, sql_params)
+    lance_where = f"kb_id = '{escape_sql(kb_id)}'" if kb_id else None
+    rows = scalar_rows(store.jobs, cols=JOB_COLS, where=lance_where,
                        order_by=[("started_at", False), ("job_id", True)],
                        limit=n)
     try:
-        total = store.jobs.count_rows(filter=where) if where \
+        total = store.jobs.count_rows(filter=lance_where) if lance_where \
             else store.jobs.count_rows()
     except Exception:  # noqa: BLE001
         total = len(rows)
     return rows, int(total)
 
 def is_terminal(row: dict | None) -> bool:
-    return bool(row) and str(row.get("stage")) in TERMINAL_STAGES
+    # `bool(row) and …` 不能把 `row` 从 dict|None 收窄成 dict（mypy 的
+    # union-attr 报的就是这里）；`is not None` 既做同样的判断又可收窄。
+    return row is not None and str(row.get("stage")) in TERMINAL_STAGES
 
 def prune_jobs(store: "LanceStore", cutoff_iso: str) -> int:
     """删除 started_at 早于 cutoff **且已终结**的任务记录，返回删除条数。
