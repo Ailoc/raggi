@@ -8,9 +8,13 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from rag.storage.repos import keys as apikeys
+
+WEB_DIST_INDEX = Path(__file__).resolve().parent.parent / "web" / "dist" / "index.html"
 
 
 class _StubEmbedder:
@@ -329,8 +333,21 @@ def test_legacy_token_still_works(env):
 
 
 def test_static_assets_not_protected(env):
+    """静态前端路径**不该被鉴权拦掉**。
+
+    原来只断言 `env.get("/") == 200`，但 200 依赖 `web/dist/index.html`
+    真的存在——那是个不入库的构建产物。本机永远有，于是这条常绿；
+    干净检出与 CI 上没有产物，挂载就不存在，返回 404 而**不是** 401/403，
+    这时候鉴权其实是对的，测试却红了（假红；CI 首次运行正是挂在这里）。
+
+    这条真正要守的不变量是「非 /api 路径不吃鉴权」，所以先断言
+    「不是 401/403」；只有产物在场时才进一步要求 200。
+    """
     apikeys.create_key(env.store, "a", scope="read")
-    assert env.get("/").status_code == 200
+    r = env.get("/")
+    assert r.status_code not in (401, 403), "静态资源被鉴权拦截了"
+    if WEB_DIST_INDEX.exists():
+        assert r.status_code == 200, "有产物时静态首页应可访问"
 
 
 def test_cors_preflight_passes_auth(cors_env):

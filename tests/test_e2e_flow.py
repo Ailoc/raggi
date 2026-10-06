@@ -180,13 +180,18 @@ def test_frontend_assets_served(client):
     未构建时跳过产物断言，构建后则确保 **index.html 引用的每个资源**
     都能真的取到——文件名带哈希，漏掉任何一个都会在浏览器里 404，
     而构建成功与静态检查都发现不了。
-    """
-    index = client.get("/")
-    assert index.status_code == 200
 
+    顺序很要紧：**skip 判断必须在任何断言之前**。这条原本先无条件
+    `assert client.get("/") == 200`，再判断产物是否存在 —— 于是没有产物时
+    挂载不存在、直接 404 失败，那句"不应强制依赖 npm run build"的注释
+    从来没有真的成立过。CI 上一直如此，只是没人读到日志。
+    """
     entry = WEB_DIR / "dist" / "index.html"
     if not entry.exists():
         pytest.skip("未构建前端产物（npm run build）")
+
+    index = client.get("/")
+    assert index.status_code == 200
 
     # 从真实产物里解析出被引用的资源，逐个取一次
     html = entry.read_text(encoding="utf-8")
