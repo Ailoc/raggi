@@ -251,24 +251,14 @@ def test_touch_is_throttled(tmp_path):
 # ---- 锁范围（M1 / M2）----------------------------------------------
 
 
-def test_next_ordinal_is_computed_under_lock(tmp_path):
-    """_next_ordinal 的调用点必须在 write_lock 内。
-
-    回归背景：早前在锁外先取 ordinal 再进锁，两个并发的「新增分块」
-    会读到相同 max(ordinal) → ordinal 冲突，而分页排序依赖它唯一。
-    """
-    import inspect
-
-    from rag import chunk_edit
-
-    src = inspect.getsource(chunk_edit.add_manual_chunk)
-    lock_at = src.index("with store.write_lock():")
-    ord_at = src.index("_next_ordinal(store, doc_id)")
-    assert ord_at > lock_at, "_next_ordinal 又跑回锁外了"
-
-
 def test_concurrent_manual_chunks_get_distinct_ordinals(tmp_path):
-    """并发新增分块不得产生重复 ordinal（真并发验证，不只是看代码）。"""
+    """并发新增分块不得产生重复 ordinal（真并发验证，不只是看代码）。
+
+    这里原来还有一条 `test_next_ordinal_is_computed_under_lock`：
+    用 `inspect.getsource` 比 `_next_ordinal` 与 `with store.write_lock():`
+    两个子串的字符位置。它守的行为本条已经直接测到了，而且文本版是假绿工厂 ——
+    再加一个**锁外**的 `_next_ordinal` 调用点它照样绿（位置关系没变）。
+    """
     from rag import chunk_edit
     from rag.storage.tables import LanceStore
 
@@ -294,8 +284,11 @@ def test_concurrent_manual_chunks_get_distinct_ordinals(tmp_path):
     from rag.storage.repos import escape_sql, fetch_rows
     rows = fetch_rows(store.chunks.search().select(["ordinal"]).where(
         f"doc_id = '{escape_sql(doc_id)}'"))
-    ords = [int(r["ordinal"]) for r in rows]
-    assert len(ords) == len(set(ords)), f"ordinal 冲突：{sorted(ords)}"
+    ords = sorted(int(r["ordinal"]) for r in rows)
+    assert len(ords) == len(set(ords)), f"ordinal 冲突：{ords}"
+    # 只断言「不重复」还不够：锁外读 max 的那类竞态会让序号跳号，
+    # 重复会被上一条抓到，**空洞**只有这一条抓得到（分页与上下文窗口都依赖连续序）
+    assert ords == list(range(len(ords))), f"ordinal 不连续（有空洞）：{ords}"
 
 
 def _seed_doc(store) -> str:
@@ -388,25 +381,70 @@ def test_answer_top_k_is_bounded():
 # ---- 降级信息脱敏（M5）----------------------------------------------
 
 
-def test_degraded_reason_hides_exception_text():
-    """降级说明不得回传异常原文（可能含路径 / 表名 / SQL）。"""
-    import inspect
+def test_degraded_reason_hides_exception_text(tmp_path, monkeypatch):
+    """降级说明不得回传异常原文（可能含路径 / 表名 / SQL 片段）。
 
-    from rag.retrieval.search import search
+    原来是 `inspect.getsource(search)` 里断言 `"已降级 vector: {e}" not in src`
+    —— 一个「查 absence」的守卫：写成 `f"...{str(e)}"`、`f"{type(e)}: {e}"`
+    或干脆把异常塞进另一个字段，字串都不在，泄漏照样回来。
+    行为断言直接把哨兵值放进异常里，看它会不会出现在响应中。
+    """
+    from rag.core.config import RetrieveConfig
+    from rag.retrieval import search as search_mod
+    from rag.storage.tables import LanceStore
 
-    src = inspect.getsource(search)
-    assert "已降级 vector: {e}" not in src, "降级路径仍在回传异常原文"
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    doc_id = _seed_doc(store)
+    sentinel = "/var/lib/raggi/secret.chunks: SELECT * FROM chunks WHERE 1=1"
+
+    def fake_search_chunks(store_, *, mode, **kw):
+        if mode != "vector":
+            # 真实场景里这就是 Lance 抛的那类话：带表名、列名、SQL 片段
+            raise RuntimeError(f"hybrid 检索失败：{sentinel}")
+        return [{"chunk_id": "c1", "doc_id": doc_id, "ordinal": 0,
+                 "text": "hello", "_distance": 0.2}]
+
+    monkeypatch.setattr(search_mod, "search_chunks", fake_search_chunks)
+    res = search_mod.search(store, _StubEmbedder(), None, "逆变器",
+                            RetrieveConfig(mode="hybrid"),
+                            include_context=False)
+    assert res["results"], "降级后仍应返回结果"
+    assert res["degraded_reason"], "降级了却没告诉调用方"
+    assert sentinel not in res["degraded_reason"], "降级信息回传了异常原文"
+    assert "chunks" not in res["degraded_reason"], (
+        f"降级信息带出了内部表名：{res['degraded_reason']}")
+    assert "详见服务端日志" in res["degraded_reason"]
 
 
-def test_score_kind_reports_mixed_instead_of_first_row():
-    """混有不同分来源时必须报 mixed，不能拿首行冒充全体。"""
-    import inspect
+def test_score_kind_reports_mixed_instead_of_first_row(tmp_path, monkeypatch):
+    """混有不同分来源时必须报 mixed，不能拿首行冒充全体。
 
-    from rag.retrieval.search import search
+    原来是 `assert 'score_kind = scored[0][2]' not in src`：
+    写成 `score_kind = scored[0].kind` 或 `next(iter(kinds))` 就绕过字串检查，
+    而 bug 一模一样回来。行为断言：造两种分量纲的行，看顶层敢不敢声明单一量纲。
+    """
+    from rag.core.config import RetrieveConfig
+    from rag.retrieval import search as search_mod
+    from rag.storage.tables import LanceStore
 
-    src = inspect.getsource(search)
-    assert 'score_kind = scored[0][2]' not in src, \
-        "score_kind 又退回取首行"
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    doc_id = _seed_doc(store)
+    rows = [
+        {"chunk_id": "c1", "doc_id": doc_id, "ordinal": 0, "text": "hello",
+         "_relevance_score": 0.9},          # hybrid/RRF 量纲
+        {"chunk_id": "c2", "doc_id": doc_id, "ordinal": 1, "text": "world",
+         "_distance": 0.2},                 # 余弦距离量纲
+    ]
+    monkeypatch.setattr(search_mod, "search_chunks",
+                        lambda *a, **kw: list(rows))
+    res = search_mod.search(store, _StubEmbedder(), None, "逆变器",
+                            RetrieveConfig(mode="hybrid"),
+                            include_context=False)
+    per_row = [h["score_kind"] for h in res["results"]]
+    assert set(per_row) == {"rrf", "cosine_similarity"}, (
+        f"单项 score_kind 没如实标注：{per_row}")
+    assert res["score_kind"] == "mixed", (
+        f"整列量纲不一致却声明了单一量纲：{res['score_kind']}")
 
 
 # ---- 过滤失败不得静默放行（P1-5）-------------------------------------
@@ -436,28 +474,87 @@ def test_attr_filter_failure_yields_no_match_not_everything():
 # ---- 批量编辑的 force 语义（P1-1）-----------------------------------
 
 
-def test_batch_edit_force_default_applies():
-    """批量级 force 必须真的生效（早前形参形同虚设 → 解析块必 403）。"""
-    import inspect
+def test_batch_edit_force_is_a_real_three_state_default(tmp_path):
+    """批量级 force 是「默认值」而不是「总开关」：单项 force 必须优先。
 
-    from rag.chunk_edit import batch_edit_chunks
-    sig = inspect.signature(batch_edit_chunks)
-    assert sig.parameters["force"].default is None, \
-        "force 默认应是 None（三态），否则单项缺失时回落不到批量级默认值"
+    原来是 `inspect.signature(batch_edit_chunks).parameters["force"].default is None`
+    —— 结构断言，不是行为断言：默认值对而 `_force_of` 写反了（`return bool(force)`
+    忽略单项）它照样绿，而那才是历史上真正犯过的 bug。
+    四种组合各自测：批量 True/False × 单项给/不给。
+    断言的是 `PermissionError` —— 它是本仓**故意**当作 403 信号用的内建异常
+    （`api/chunks.py:141` 与 `:157` 各映射一次，`core/errors.py` 里没有对应类），
+    不是实现随手抛错了类型。
+    """
+    from rag import chunk_edit
+    from rag.storage.repos import upsert_chunks
+    from rag.storage.tables import LanceStore
+
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    doc_id = _seed_doc(store)
+    vec = [1.0] + [0.0] * (store.dim - 1)
+    upsert_chunks(store, [{
+        "chunk_id": "cp1", "doc_id": doc_id, "ordinal": 0, "text": "解析出来的正文",
+        "text_seg": "解析 出来", "heading_path": "", "page": None,
+        "char_start": 0, "char_end": 8, "token_count": 4,
+        "origin": "parsed", "edited": False, "original_text": None,
+        "offset_valid": True, "embed_model": "stub", "vector": vec,
+        "created_at": "", "updated_at": "",
+    }])
+    edits = [{"chunk_id": "cp1", "text": "改过的正文"}]
+
+    def _run(**kw):
+        return chunk_edit.batch_edit_chunks(store, _StubEmbedder(), edits, **kw)
+
+    # 单项没给 force ⇒ 回落到批量级
+    _run(force=True)                       # 必须放行（早前 force=False 时必 403）
+    with pytest.raises(PermissionError):
+        _run(force=False)                  # 批量级关掉 ⇒ 解析块不许改
+    # 单项给了 ⇒ 覆盖批量级，两个方向都要覆盖
+    with_item_true = [{"chunk_id": "cp1", "text": "x", "force": True}]
+    chunk_edit.batch_edit_chunks(store, _StubEmbedder(), with_item_true,
+                                 force=False)
+    with_item_false = [{"chunk_id": "cp1", "text": "y", "force": False}]
+    with pytest.raises(PermissionError):
+        chunk_edit.batch_edit_chunks(store, _StubEmbedder(), with_item_false,
+                                     force=True)
 
 
 # ---- 启动期维护失败要留痕（M4）---------------------------------------
 
 
-def test_startup_maintenance_logs_error_not_silent():
-    """索引维护失败必须 error 级留痕（服务可能跑在坏索引上）。"""
-    import inspect
+def test_startup_maintenance_logs_error_with_stack(tmp_path, caplog):
+    """索引维护失败必须 error 级 + 带堆栈留痕（服务可能跑在坏索引上）。
 
-    from rag.api import _startup_maintenance
+    原来是 `inspect.getsource(_startup_maintenance)` 里查 `"logger.error"`
+    与 `"exc_info=True"` 两个字串是否在 —— 只要这两个词出现在函数任何位置就过，
+    包括出现在注释里，而真实失败路径可以悄悄降回 warning。
+    行为断言：真的让维护抛一次，看日志里到底留下了什么。
+    """
+    import logging
 
-    src = inspect.getsource(_startup_maintenance)
-    assert "logger.error" in src, "启动维护失败仍只是 warning"
-    assert "exc_info=True" in src, "未记录堆栈"
+    from rag.api import Ctx, _startup_maintenance
+    from rag.core.config import Settings
+    from rag.models.registry import ModelRegistry
+    from rag.storage.tables import LanceStore
+
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.embed.dim = 4
+    ctx = Ctx(settings, store, ModelRegistry(settings))
+
+    def boom():
+        raise RuntimeError("向量索引建不起来：dim 不匹配")
+
+    store.ensure_vector_index = boom
+    with caplog.at_level(logging.DEBUG):
+        _startup_maintenance(ctx)
+
+    errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errs, "启动期索引维护失败没有 error 级留痕（运维看不到）"
+    assert any(r.exc_info and r.exc_info[1] is not None for r in errs), \
+        "error 日志没带堆栈，下一次事故无从诊断"
+    assert "不完整索引" in errs[0].getMessage()
 
 
 # ---- 队列竞态（H2）---------------------------------------------------
