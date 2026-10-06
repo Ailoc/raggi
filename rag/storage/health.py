@@ -13,11 +13,10 @@ from __future__ import annotations
 import datetime
 import logging
 
-import pyarrow as pa
 import pyarrow.compute as pc
 
+from .repos.chunks import chunk_counts_by_doc
 from .repos.documents import docs_count, docs_query
-from .sql import scalar_rows
 from .tables import LanceStore
 
 logger = logging.getLogger("raggi.health")
@@ -31,19 +30,6 @@ def doc_ids_present(store: LanceStore) -> set[str]:
     """
     return {str(r["doc_id"]) for r in docs_query(store, ["doc_id"])
             if r.get("doc_id") is not None}
-
-
-def chunk_counts_by_doc(store: LanceStore) -> dict[str, int]:
-    """全库分块数按 doc 聚合：一次窄列扫描 + 向量化 value_counts。
-
-    替代两类旧写法：
-    - 「取回全部 chunk 行再数」——那会把 text（乃至 vector）带进 Python；
-    - 「每个 doc 一次 `count_rows(filter=…)`」——20 篇文档就是 20 次 ~1.2ms 的扫描。
-    """
-    values = [r["doc_id"] for r in scalar_rows(store.chunks, cols=["doc_id"])]
-    vc = pc.value_counts(pa.chunked_array([values]))
-    return {str(v): int(c) for v, c in zip(
-        vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
 
 
 def _unique_models(store: LanceStore) -> set[str]:

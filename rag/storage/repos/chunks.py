@@ -4,6 +4,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from ..sql import (
     chunk_defaults,
     escape_like,
@@ -105,6 +108,24 @@ def delete_kb_chunks(store: "LanceStore", kb_id: str) -> None:
     kb_id 下、且仍能被检索命中的数据。
     """
     store.chunks.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
+
+
+def chunk_counts_by_doc(store: "LanceStore") -> dict[str, int]:
+    """全库分块数按 doc 聚合：一次窄列扫描 + 向量化 value_counts。
+
+    住在 chunks 仓储而不是 `storage/health.py` 里，是因为它有**两个**消费者
+    （健康检查与「修复计数」），而第二处原先自己写了一份
+    「`fetch_rows(search().select(["doc_id"]))` 然后在 Python 里数」——
+    那既把全部分块行 materialize 进内存，又和 health 的口径可能分叉。
+
+    替代两类旧写法：
+    - 「取回全部 chunk 行再数」——那会把 text（乃至 vector）带进 Python；
+    - 「每个 doc 一次 `count_rows(filter=…)`」——20 篇文档就是 20 次 ~1.2ms 的扫描。
+    """
+    values = [r["doc_id"] for r in scalar_rows(store.chunks, cols=["doc_id"])]
+    vc = pc.value_counts(pa.chunked_array([values]))
+    return {str(v): int(c) for v, c in zip(
+        vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
 
 
 def chunk_filters(*, doc_id: str = "", kb_id: str = "",

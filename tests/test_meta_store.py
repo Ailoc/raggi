@@ -442,3 +442,74 @@ def test_sqlite_holds_data_probe_is_read_only(tmp_path):
     assert sqlite_holds_data(other) is False
     assert not (empty / "raggi.db").exists(), \
         "探测在缺失的路径上创建了数据库"
+
+
+# ---- 对账必须改「真源所在的那个引擎」-----------------------------------
+
+
+def test_reconcile_fixes_the_engine_that_holds_the_truth(tmp_path):
+    """`POST /api/reconcile` 修的是不是真源，是一个能让人等出结果的功能问题。
+
+    缺陷形状：`reconcile_doc_counts` 直接写 `store.documents.update(...)`
+    ——那是 **Lance 表**。而 S3 之后 documents 的真源在 SQLite，
+    读又统一走 `docs_query`（引擎分派）。于是：
+
+      写 → Lance 旧副本；读 → SQLite 真源
+      ⇒ 接口回报 `fixed: 1`，`/api/health` 的 count_mismatch 一条没少。
+
+    「点了修复、显示成功、数字没变」——没有任何异常，正是本仓反复在防的那类。
+    顺带：`set_doc_fields` 的存在理由就是「只有一个地方知道两个方言怎么写」，
+    这个调用点是它唯一的绕行者。
+    """
+    from fastapi.testclient import TestClient
+
+    from rag.api import Ctx, create_app
+    from rag.models.registry import ModelRegistry
+    from rag.storage.meta import prepare_meta_store
+    from rag.storage.repos import docs_query, set_doc_fields
+    from rag.storage.tables import LanceStore
+
+    class _Stub:
+        dim = 4
+        model = "stub"
+
+        def embed_one(self, text):  # noqa: ARG002
+            return [1.0, 0.0, 0.0, 0.0]
+
+        def embed(self, texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    settings = Settings()
+    settings.data_dir = tmp_path
+    settings.embed.dim = 4
+    store = LanceStore.for_data_dir(tmp_path, 4)
+    meta = prepare_meta_store(settings, store)
+    assert meta is not None, "夹具没建起 SQLite 真源，这条测试会退化成空跑"
+    registry = ModelRegistry(settings)
+    registry.bundle.embedder = _Stub()
+    c = TestClient(create_app(Ctx(settings, store, registry, meta=meta)),
+                   raise_server_exceptions=False)
+
+    doc_id = c.post("/api/documents/text",
+                    json={"text": "计数对账 测试内容 " * 20, "title": "d"}
+                    ).json()["doc_id"]
+
+    # 让真源里的声明值与实际不符（模拟漏回写的那条路径）
+    set_doc_fields(store, doc_id, chunk_count=999)
+
+    def stated() -> int:
+        rows = docs_query(store, ["doc_id", "chunk_count"])
+        return {str(r["doc_id"]): int(r["chunk_count"] or 0) for r in rows}[doc_id]
+
+    assert stated() == 999
+
+    res = c.post("/api/reconcile")
+    assert res.status_code == 200, res.text
+
+    assert stated() != 999, (
+        f"reconcile 回报 fixed={res.json().get('fixed')} 却没改正真源里的计数 "
+        "—— 它写的是 Lance 旧副本，读的是 SQLite，两个引擎各说各话")
+    # 界面与健康检查必须一致地变好，而不是只有接口返回值变好
+    h = c.get("/api/health").json()
+    assert h["count_mismatch"] == [], (
+        f"修复后 health 仍报不一致：{h['count_mismatch']}")

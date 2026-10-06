@@ -682,8 +682,8 @@ def test_failed_health_checks_are_reported_as_unknown_not_ok(monkeypatch):
     monkeypatch.setattr(health_mod, "docs_count", lambda s: 1)
     monkeypatch.setattr(health_mod, "docs_query",
                         lambda s, cols: [{"doc_id": "d1", "chunk_count": 3}])
-    monkeypatch.setattr(health_mod, "scalar_rows",
-                        lambda t, cols: [{"doc_id": "d1"}] * 3)
+    monkeypatch.setattr(health_mod, "chunk_counts_by_doc",
+                        lambda s: {"d1": 3})
 
     def _boom(_store):
         raise RuntimeError("embed_model 列读不出来")
@@ -714,8 +714,8 @@ def test_healthy_store_reports_no_failed_checks(monkeypatch):
     monkeypatch.setattr(health_mod, "docs_count", lambda s: 1)
     monkeypatch.setattr(health_mod, "docs_query",
                         lambda s, cols: [{"doc_id": "d1", "chunk_count": 3}])
-    monkeypatch.setattr(health_mod, "scalar_rows",
-                        lambda t, cols: [{"doc_id": "d1"}] * 3)
+    monkeypatch.setattr(health_mod, "chunk_counts_by_doc",
+                        lambda s: {"d1": 3})
     monkeypatch.setattr(health_mod, "_unique_models", lambda s: {"stub"})
 
     class _OkChunks(_ChunksThatFail):

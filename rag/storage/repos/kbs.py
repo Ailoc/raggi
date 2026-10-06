@@ -10,10 +10,10 @@ import uuid
 from typing import TYPE_CHECKING
 
 from ..chunk_limits import clamp_ratio, clamp_size
-from ..sql import escape_sql, fetch_rows, now_iso, only_cols, scalar, scalar_rows
+from ..sql import escape_sql, now_iso, only_cols, scalar, scalar_rows
 from ._engine import meta_of as _meta
-from .chunks import delete_kb_chunks
-from .documents import delete_document, docs_query
+from .chunks import chunk_counts_by_doc, delete_kb_chunks
+from .documents import delete_document, docs_query, set_doc_fields
 
 if TYPE_CHECKING:
     # LanceStore 在本模块只出现在注解里（文件顶部有 `from __future__ import
@@ -236,18 +236,26 @@ def reconcile_doc_counts(store: LanceStore) -> int:
     """按实际分块数回写全部 documents.chunk_count，返回修复条数。
 
     删除分块等路径可能漏掉计数回写，导致 /api/health 长期 degraded。
+
+    两个必须记住的约束（这一版之前都不满足，而且**接口回报成功**）：
+
+    1. **写必须走 `set_doc_fields`**。documents 的真源在 S3 之后是 SQLite，
+       原先这里直接 `store.documents.update(...)` 写的是 **Lance 旧副本**：
+       接口返回 `fixed: 1`，而 `/api/health` 的 count_mismatch 一条没少
+       —— 「点了修复、显示成功、数字没变」，全程无异常。
+       （现由 `tests/test_meta_store.py::test_reconcile_fixes_the_engine_that_holds_the_truth`
+       钉住。）
+    2. **实际计数与 health 用同一个口径**（`chunks.chunk_counts_by_doc`）。
+       原先这里自己写了一份「materialize 全部分块行再数」，
+       既比 health 贵，又可能与它算出不同的结果。
     """
-    actual: dict[str, int] = {}
-    for r in fetch_rows(store.chunks.search().select(["doc_id"])):
-        did = str(r.get("doc_id") or "")
-        actual[did] = actual.get(did, 0) + 1
+    actual = chunk_counts_by_doc(store)
     fixed = 0
     for r in docs_query(store, ["doc_id", "chunk_count"]):
-        want = actual.get(str(r.get("doc_id") or ""), 0)
+        did = str(r.get("doc_id") or "")
+        want = actual.get(did, 0)
         if int(r.get("chunk_count") or 0) != want:
-            store.documents.update(
-                where=f"doc_id = '{escape_sql(r['doc_id'])}'",
-                values={"chunk_count": want, "updated_at": now_iso()})
+            set_doc_fields(store, did, chunk_count=want, updated_at=now_iso())
             fixed += 1
     return fixed
 
