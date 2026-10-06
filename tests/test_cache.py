@@ -186,3 +186,81 @@ def test_concurrent_readers_do_not_lose_entries():
     for t in ts:
         t.join()
     assert not misses, f"并发读把条目读没了（前 5 个）：{misses[:5]}"
+
+
+# ---- Embedder.embed_one 的结果缓存（查询路径）--------------------------
+# 这一组不是重复测 TTLCache，而是测**站在它上面的那条承诺**：
+# 同一个模型 + 同一段文本不重复调远端，而换个模型必须重算。
+
+
+class _CountingLC:
+    def __init__(self):
+        self.calls: list[int] = []
+        self._lock = threading.Lock()
+
+    def embed_documents(self, texts):
+        with self._lock:
+            self.calls.append(len(texts))
+        return [[0.5] * 4 for _ in texts]
+
+
+def _embedder(model="m1"):
+    from rag.models.embeddings import Embedder
+
+    lc = _CountingLC()
+    return Embedder(lc, 4, model, False), lc
+
+
+def test_embed_one_caches_repeat_and_scopes_by_model():
+    emb, lc = _embedder("modelA")
+    emb.embed_one("逆变器额定电压")
+    emb.embed_one("逆变器额定电压")
+    assert len(lc.calls) == 1, "同文本第二次必须命中缓存，不能再打远端"
+    # 向量随模型变化：换模型后旧缓存必须失效，否则会拿到旧模型的向量
+    emb.model = "modelB"
+    emb.embed_one("逆变器额定电压")
+    assert len(lc.calls) == 2, "换了模型还吃缓存 ⇒ 返回另一个模型空间的向量"
+
+
+def test_embed_one_does_not_merge_inflight_identical_queries():
+    """**记录现状，不是理想行为**：缓存不合并「正在飞」的同 key 请求。
+
+    第 1 条请求卡在 provider 里时，第 2 条同样的文本不会等它的结果，
+    而是**再打一次**（cache stampede）。串行则只 1 次（上一条测试）。
+    这正是审计 §4.2 里被否证的 B6 条目：队列式合批不做，
+    而 in-flight 合并是日后真要收益时的落点。
+
+    所以这条测试**故意**断言「会重复调用」：将来谁实现了 in-flight 合并它会红，
+    那时该做的是「拿真实流量确认收益 + 改断言 + 更新 §4.2 的决定」，
+    而不是顺手把断言改小 —— 那等于偷偷推翻一个有记录的决定。
+
+    为什么不用「8 个线程同时冲」：假 provider 瞬间返回，第 2..8 条其实命中了缓存，
+    测出来的数取决于线程调度 —— 本条第一版就是这样写死的，实测拿不到 8。
+    「卡住第一条」才是对「有没有 in-flight 合并」的确定性判定。
+    """
+    from rag.models.embeddings import Embedder
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    class _BlockingLC:
+        def embed_documents(self, texts):
+            calls.append(len(texts))
+            entered.set()
+            release.wait(timeout=5.0)
+            return [[0.5] * 4 for _ in texts]
+
+    emb = Embedder(_BlockingLC(), 4, "m", False)
+    t1 = threading.Thread(target=emb.embed_one, args=("同一个热点查询",))
+    t1.start()
+    assert entered.wait(timeout=2.0), "第 1 条请求没能进入 provider"
+    t2 = threading.Thread(target=emb.embed_one, args=("同一个热点查询",))
+    t2.start()
+    time.sleep(0.3)          # 足够：命中缓存会立刻返回，没合并则会再进一次
+    release.set()
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+    assert len(calls) == 2, (
+        f"provider 被调了 {len(calls)} 次："
+        "若这是有意的 in-flight 合并，请连同 §4.2 一起更新（并改断言）")
