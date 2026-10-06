@@ -13,10 +13,11 @@ name: ci
 
 on:
   push:
-    # 两条都写：本仓的分支历史上是 master，而 GitHub 新仓库的默认名常是 main。
-    # 只写 main 的后果是「CI 文件存在但从不触发」——那比没有 CI 更坏，
-    # 因为它看起来像有门禁。（第一次推之前就是这样，已修。）
-    branches: [main, master]
+    # 分支统一为 main（历史上叫 master，2026-10-06 改名）。
+    # 这里只留 main：master 分支会在默认分支切换后删掉。
+    # 曾经只写 main 而仓库还是 master，结果是「CI 文件存在但从不触发」——
+    # 那比没有 CI 更危险，因为它看起来像有门禁。
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
