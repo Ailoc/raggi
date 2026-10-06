@@ -15,11 +15,14 @@ Lance 版本 / 5 个数据文件，48 次入库后是 226 个版本、224 个文
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from ..meta import JOB_COLS
 from ..sql import escape_sql, only_cols, scalar_rows
 from ._engine import meta_of as _meta
+
+logger = logging.getLogger("raggi.repos.jobs")
 
 if TYPE_CHECKING:
     from ..tables import LanceStore
@@ -53,7 +56,13 @@ def set_job(store: "LanceStore", job_id: str, **values) -> bool:
             meta.execute(f"UPDATE jobs SET {sets} WHERE job_id=?",
                          (*values.values(), job_id))
             return True
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 不抛是对的（任务状态是观测数据，不该拖垮入库），但**必须留痕**：
+            # 阶段写不进去意味着前端看到的进度从此不再前进，而界面上没有任何
+            # 迹象提示「其实没写成功」。改前这里是无日志的 `return False`，
+            # 于是「任务永远停在 parsing」这类事故完全没有线索可查。
+            logger.warning("jobs 阶段写入失败（SQLite）job=%s stage=%s: %s",
+                           job_id, values.get("stage"), e)
             return False
     payload = {k: v for k, v in values.items() if k in JOB_COLS}
     if not payload:
@@ -62,7 +71,9 @@ def set_job(store: "LanceStore", job_id: str, **values) -> bool:
         store.jobs.update(where=f"job_id = '{escape_sql(job_id)}'",
                           values=payload)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("jobs 阶段写入失败（LanceDB）job=%s stage=%s: %s",
+                       job_id, values.get("stage"), e)
         return False
 
 def get_job(store: "LanceStore", job_id: str,

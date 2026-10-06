@@ -120,7 +120,10 @@ def _mark_doc_failed(store: LanceStore, doc_id: str, error: str) -> None:
         set_doc_fields(store, doc_id, status="failed",
                        error=str(error)[:500], updated_at=_now())
     except Exception as e:  # noqa: BLE001
-        logger.debug("标记文档失败态出错: %s", e)
+        # warning 而不是 debug：这一步失败意味着**文档还显示 ready**，
+        # 而它其实没有可检索内容 —— 用户看到的正是「正常文档打不开」，
+        # 默认日志级别下这件事原本一行痕迹都没有。
+        logger.warning("标记文档失败态出错 doc=%s: %s", doc_id, e)
 
 
 # 进程级 embedding 并发闸：并发**任务**数 × 每个任务内的分片并发

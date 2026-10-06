@@ -21,6 +21,9 @@
 from __future__ import annotations
 
 import datetime
+import logging
+
+logger = logging.getLogger("raggi.sql")
 
 # 默认值缓存：构造 LanceModel 较慢，按维度/表缓存一次
 _CHUNK_DEFAULTS: dict[int, dict] = {}
@@ -215,10 +218,16 @@ def fill_missing(rows: list[dict], cols: set[str], defaults: dict,
 
 
 def table_columns(table) -> set[str]:
-    """取表的列名；失败返回空集（调用方据此跳过补齐）。"""
+    """取表的列名；失败返回空集（调用方据此跳过补齐）。
+
+    「返回空集」是**故意的降级**：`only_cols` 拿到空集会把任何投影都判成
+    未知列并报错，那是响的；而补齐路径（fill_missing）拿到空集只是少补几列。
+    但失败本身必须留痕 —— 否则下一次「列怎么又没补上」无从可查。
+    """
     try:
         return set(table.schema.names)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取表列名失败，按「无列」处理: %s", e)
         return set()
 
 

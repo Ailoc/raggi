@@ -216,7 +216,11 @@ class IngestQueue:
                 return True
         try:
             row = get_job(self.store, job_id, cols=["job_id", "stage"])
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # False = 「没被取消」，于是用户的取消请求被静默丢弃、任务继续跑完。
+            # 这里没法抛出（在阶段边界上），但至少要让排障的人看得见。
+            logger.warning("取消状态查询失败，本轮按『未取消』继续 job=%s: %s",
+                           job_id, e)
             return False
         return bool(row) and str(row.get("stage")) == "cancelling"
 

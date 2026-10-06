@@ -451,7 +451,9 @@ class LanceStore:
                     self.chunks.update(
                         where="fts_stale = true", values={"fts_stale": False})
                 except Exception as e:  # noqa: BLE001
-                    logger.debug("clear fts_stale 失败: %s", e)
+                    # warning：标记清不掉，`/api/health` 就会**永远**显示
+                    # 「有 N 条待重建 FTS」，用户对着一个不会自己好的黄徽章。
+                    logger.warning("清除 fts_stale 标记失败（健康检查会一直显示待重建）: %s", e)
                 logger.info("fts index rebuilt (n=%d)", n)
         except Exception as e:  # noqa: BLE001
             logger.warning("fts index build skipped: %s", e)
@@ -474,8 +476,11 @@ class LanceStore:
                     try:
                         self.chunks.create_index(col, config=BTree())
                     except Exception as e:  # noqa: BLE001
-                        logger.debug("scalar index chunks.%s skipped: %s",
-                                     col, e)
+                        # warning：这几列没索引就等于**全表扫描**。上面那行注释
+                        # 自己就在说「旧代码写在这里会让整轮标量索引静默失败」，
+                        # 而 debug 级在默认日志下等于继续静默。
+                        logger.warning("chunks.%s 索引没能建立，点查将退化为全表扫: %s",
+                                       col, e)
                 # 点查列必须有索引。缺一张就退化成全表扫：实测
                 # documents.doc_id 无索引时点查 5.68ms，建完 BTree 3.88ms
                 # （剩下的固定开销是 Lance 查询侧的，见诊断报告 §2.3——
@@ -495,8 +500,11 @@ class LanceStore:
                     try:
                         self._table(table_name).create_index(col, config=BTree())
                     except Exception as e:  # noqa: BLE001
-                        logger.debug("scalar index %s.%s skipped: %s",
-                                     table_name, col, e)
+                        # 同上：apikeys.key_hash 没索引 ⇒ 每个带密钥的请求都全表扫；
+                        # jobs.started_at 没索引 ⇒ 任务列表每次排序扫描。
+                        logger.warning(
+                            "%s.%s 索引没能建立，相关点查/排序将退化为全表扫: %s",
+                            table_name, col, e)
         except Exception as e:  # noqa: BLE001
             logger.warning("scalar index build skipped: %s", e)
 

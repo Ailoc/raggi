@@ -145,7 +145,11 @@ def stored_file(store: "LanceStore", doc_id: str) -> str | None:
         if rows:
             return rows[0].get("stored_file") or None
     except Exception as e:  # noqa: BLE001
-        logger.debug("读取 stored_file 失败: %s", e)
+        # warning：返回 None 会让重解析报「没有留档原文」，而对象其实还在 ——
+        # 用户看到的是「我的文件不见了」，且默认日志级别下没有任何线索指向
+        # 这其实是一次读失败而不是真的没有。
+        logger.warning("读取 stored_file 失败 doc=%s（会被当成「无留档」）: %s",
+                       doc_id, e)
     return None
 
 def delete_document(store: "LanceStore", doc_id: str, backend=None) -> None:

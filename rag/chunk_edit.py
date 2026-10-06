@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import uuid
 
 from rag.core.errors import EditConflict
@@ -23,6 +24,8 @@ from rag.storage.repos import (
 )
 from rag.storage.sql import scalar
 from rag.storage.tables import LanceStore
+
+logger = logging.getLogger("raggi.chunk_edit")
 
 # 无 doc_id 的手动分块归入的虚拟"便签"文档（DESIGN §8.2）
 # 零引用：add_manual_chunk 现在用 doc_id="" 表示独立分块，不再塞进
@@ -52,8 +55,13 @@ def touch_doc_count(store: LanceStore, doc_id: str) -> None:
             filter=f"doc_id = '{escape_sql(doc_id)}'"))
         set_doc_fields(store, doc_id, chunk_count=n,
                        updated_at=_now())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 不抛是对的（分块已经写成功了，不该因为计数失败回滚用户的内容），
+        # 但 `pass` 让它**彻底无痕**：documents.chunk_count 从此与实际不符，
+        # 列表页与知识库卡片的块数一直虚高，且 /api/health 会永久 degraded，
+        # 而日志里找不到任何一条线索。
+        logger.warning("回写 chunk_count 失败 doc=%s（计数将与实际不符，"
+                       "health 会报 count_mismatch）: %s", doc_id, e)
 
 
 def _next_ordinal(store: LanceStore, doc_id: str) -> int:
@@ -68,8 +76,12 @@ def _next_ordinal(store: LanceStore, doc_id: str) -> int:
                               ascending=False)]).limit(1))
         if rows:
             return int(rows[0]["ordinal"]) + 1
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 回落 0 意味着可能与既有分块撞号（ordinal 是分页与上下文窗口排序的依据）。
+        # 这里刻意不抛：读不出 max 时「加一块」比「加不了」对用户更友好，
+        # 但必须留痕，否则撞号之后没人知道它是从哪儿来的。
+        logger.warning("取 max(ordinal) 失败，回落为 0（可能与既有分块撞号）"
+                       " doc=%s: %s", doc_id, e)
     return 0
 
 

@@ -158,7 +158,10 @@ def materialize_kb_defaults(store: LanceStore, settings) -> int:
                           overlap_ratio=g["overlap_ratio"])
             moved += 1
         except Exception as e:  # noqa: BLE001
-            logger.debug("物化知识库 %s 的方案失败: %s", r.get("kb_id"), e)
+            # warning 而不是 debug：这是启动期的一次性**迁移**，半途而废意味着
+            # 有些知识库的 chunk_size 还停在 0（旧语义「继承」），而两级模型
+            # 已经取消那一层 —— 少了这条日志，没人知道它没迁完。
+            logger.warning("物化知识库 %s 的方案失败: %s", r.get("kb_id"), e)
     if moved:
         logger.info("已把 %d 个知识库的「继承全局」物化为具体方案 "
                     "(%d 字符 / %.1f%%)",
