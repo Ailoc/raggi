@@ -21,13 +21,11 @@ from __future__ import annotations
 import logging
 import time
 
-
 from rag.core.config import RetrieveConfig
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment
 from rag.retrieval.highlight import make_snippet
-from rag.storage.repos import (chunk_prefilter, contexts_for, docs_query,
-                               search_chunks)
+from rag.storage.repos import chunk_prefilter, contexts_for, docs_query, search_chunks
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.retrieve")

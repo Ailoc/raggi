@@ -29,8 +29,8 @@ from .chunks import (
     doc_chunk_index,
     doc_ids_by_attr,
     get_chunk,
-    texts_by_id,
     search_chunks,
+    texts_by_id,
     update_chunk_text,
     upsert_chunks,
 )
