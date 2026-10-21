@@ -86,6 +86,24 @@ def _invalidate_read_cache() -> None:
     _has_keys_cache.clear()
 
 
+def _auth_epoch(store: LanceStore) -> int | None:
+    """跨进程鉴权缓存代际。
+
+    create_key / revoke 会递增 meta_state.auth_epoch；缓存键带上它，
+    其它 worker 下一次请求就能看到吊销/签发，而不是等 5s/10s TTL。
+    读不到就返回 None（调用方跳过缓存、直接查库），不能假装代际是 0——
+    那会让一个旧缓存条目在新代际下继续命中。
+    """
+    meta = _meta(store)
+    if meta is None:
+        return 0
+    try:
+        return meta.state_int("auth_epoch")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取鉴权代际失败，本轮跳过缓存: %s", e)
+        return None
+
+
 def _find_by_hash(store: LanceStore, key_hash: str) -> dict | None:
     meta = _meta(store)
     if meta is not None:
@@ -121,16 +139,19 @@ def verify(store: LanceStore, secret: str) -> dict:
     # （测试里每个用例都是独立 tmp_path）。只按 key_hash 缓存会让
     # A 库签发的密钥在 B 库里也被判为有效——那是鉴权层面的越权。
     key_hash = _hash(secret)
-    ckey = (store.uri, key_hash)
-    row = _verify_cache.get(ckey)
-    if row is not None:
-        row = dict(row)              # 副本：调用方改返回值不能污染缓存
+    epoch = _auth_epoch(store)
+    ckey = (store.uri, key_hash, epoch)
+    # cached() 会单飞：同一个密钥的并发首请求只查一次库。
+    # 查不到也缓存 None（TTL 5s），避免伪造密钥把每次请求都变成一次
+    # 点查——键空间有 512 的上界，缓存负结果不会无界增长。
+    # epoch=None 表示代际读不出来：清掉本地缓存后仍然查库，宁慢勿旧。
+    if epoch is None:
+        _verify_cache.clear()
+    row = _verify_cache.cached(ckey, lambda: _find_by_hash(store, key_hash))
     if row is None:
-        row = _find_by_hash(store, key_hash)
-        if row is None:
-            # 不区分「不存在」与「不匹配」，避免泄露密钥是否存在
-            raise ApiKeyAuthError("密钥无效")
-        _verify_cache.set(ckey, dict(row))
+        # 不区分「不存在」与「不匹配」，避免泄露密钥是否存在
+        raise ApiKeyAuthError("密钥无效")
+    row = dict(row)                  # 副本：调用方改返回值不能污染缓存
 
     # 以下三项**每次都要重新判**（不能只信缓存）：吊销可能发生在别处，
     # 而「过期」本身就是随时间变化的量——缓存只省去查库，不省去判定。
@@ -139,11 +160,16 @@ def verify(store: LanceStore, secret: str) -> dict:
     exp = row.get("expires_at")
     if exp:
         try:
-            if datetime.datetime.fromisoformat(exp) <= \
-                    datetime.datetime.now(datetime.timezone.utc):
-                raise ApiKeyAuthError(f"密钥已于 {exp} 过期")
-        except ValueError:
-            pass  # 过期时间格式异常不阻断（数据损坏时从严见下方说明）
+            expired = datetime.datetime.fromisoformat(exp) <= \
+                datetime.datetime.now(datetime.timezone.utc)
+        except (TypeError, ValueError) as e:
+            # **失败即拒绝**：过期时间损坏时放行，等于一把本应过期的
+            # 长期凭据永久有效。数据损坏（手工改库、迁移写脏）不能
+            # 被翻译成「这张票还能用」。
+            raise ApiKeyAuthError(
+                f"密钥过期时间无效（{exp!r}），已拒绝使用") from e
+        if expired:
+            raise ApiKeyAuthError(f"密钥已于 {exp} 过期")
     return row
 
 
@@ -179,7 +205,10 @@ def has_keys(store: LanceStore) -> bool:
             logger.error("apikeys 计数失败（拒绝猜测『无密钥』以免放行）: %s", e)
             raise ApiKeysUnavailable(f"鉴权配置暂时不可读：{e}") from e
 
-    value = _has_keys_cache.cached(store.uri, _load)
+    epoch = _auth_epoch(store)
+    if epoch is None:
+        _has_keys_cache.clear()
+    value = _has_keys_cache.cached((store.uri, epoch), _load)
     return bool(value)
 
 
@@ -267,6 +296,11 @@ def create_key(store: LanceStore, name: str, *,
     meta = _meta(store)
     if meta is not None:
         meta.upsert("apikeys", [row], "key_id")
+        try:
+            meta.bump_state("auth_epoch")
+        except Exception as e:  # noqa: BLE001
+            # 本进程缓存仍会清；跨进程最多等 TTL，记 warning 便于排障
+            logger.warning("递增鉴权代际失败（跨进程吊销会有延迟）: %s", e)
     else:
         store.apikeys.add([row])
     # 新增密钥改变了「有没有密钥」这个全局判断，必须让 has_keys 缓存失效，
@@ -287,6 +321,10 @@ def revoke(store: LanceStore, key_id: str) -> bool:
             return True
         meta.execute("UPDATE apikeys SET revoked_at=? WHERE key_id=?",
                      (_now(), key_id))
+        try:
+            meta.bump_state("auth_epoch")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("递增鉴权代际失败（跨进程吊销会有延迟）: %s", e)
         _invalidate_read_cache()
         return True
     rows = fetch_rows(store.apikeys.search().where(

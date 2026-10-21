@@ -2,19 +2,30 @@
   "name": "raggi-web",
   "version": "0.2.0",
   "private": true,
-  "description": "Raggi 前端：Svelte 5 + Vite，产物 web/dist 由 FastAPI 静态托管",
+  "description": "Raggi 前端：React 19 + MUI 6 + Vite，产物 web/dist 由 FastAPI 静态托管",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "check": "svelte-check --tsconfig ./tsconfig.json --threshold error",
+    "check": "tsc --noEmit",
     "preview": "vite preview",
-    "clean": "rm -rf web/dist"
+    "clean": "rm -rf web/dist",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@emotion/cache": "^11.14.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^6.5.0",
+    "@mui/material": "^6.5.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^5.1.1",
-    "svelte": "^5.57.1",
-    "svelte-check": "^4.7.6",
+    "@playwright/test": "^1.64.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
     "typescript": "5.6",
     "vite": "^6.4.3"
   }

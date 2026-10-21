@@ -298,17 +298,19 @@ class IngestQueue:
         return row is not None and row.get("stage") not in TERMINAL_STAGES
 
 
-def list_jobs(store, limit: int = 50, kb_id: str = "") -> list[dict]:
-    """最近的任务列表（按开始时间倒序），兼容旧签名（只返回列表）。
+def list_jobs(store, limit: int = 50, kb_id: str = "",
+              offset: int = 0, status: str = "all"
+              ) -> tuple[list[dict], int]:
+    """最近的任务列表（按开始时间倒序）+ 过滤后的总数。
 
-    任务记录是纯观测数据：查询失败不该让接口 500，返回空列表即可。
+    任务记录是纯观测数据：查询失败不该让接口 500，返回空页即可。
     """
     try:
-        rows, _total = jobs_repo.list_jobs(store, limit=limit, kb_id=kb_id)
+        return jobs_repo.list_jobs(
+            store, limit=limit, kb_id=kb_id, offset=offset, status=status)
     except Exception as e:  # noqa: BLE001
         logger.debug("读取任务列表失败: %s", e)
-        return []
-    return rows
+        return [], 0
 
 
 def get_job(store, job_id: str, cols: list[str] | None = None) -> dict | None:

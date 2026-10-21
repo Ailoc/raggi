@@ -253,55 +253,49 @@ def test_compose_binds_target_kb():
     """待入库内容必须绑定目标库。
 
     回归防护：原先提交时才读当前的 curKb——用户选好文件后切换知识库，
-    内容会静默进错库，界面上没有任何异常。
+    内容会静默进错库，界面上没有任何异常。React 版的入库对话框以 kbId
+    为 key：换库即重建，队列与目标一起重置；提交用的是打开时锁定的那个 id。
     """
-    src = (ROOT / "web/src/ui/UploadPanel.svelte").read_text(encoding="utf-8")
-    assert "composeKbId" in src, "未记录待入库的目标库"
-    assert 'fd.append("kb_id", target)' in src or 'fd.append("kb_id", composeKbId)' in src, \
-        "提交未使用绑定的目标库"
-    assert "composeKbId = kbId" in src, "选定文件时未锁定目标库"
-    assert 'id="composeTarget"' in src, "界面未显示入库目标"
+    src = (ROOT / "web/src/views/KbDocs.tsx").read_text(encoding="utf-8")
+    assert 'const target = kbId;' in src, "未记录待入库的目标库"
+    assert 'fd.append("kb_id", target)' in src, "提交未使用锁定的目标库"
+    assert 'key={kbId}' in src, "切换知识库时入库面板未重置"
+    assert '入库到「{kbName(kbId)}」' in src, "界面未显示入库目标"
 
 
 def test_search_context_is_remembered():
-    """顶栏/面包屑点「检索」不该丢掉关键词与参数。
+    """顶栏点「检索」不该丢掉关键词与参数。
 
-    这条守卫原来钉的是 `location.hash = prev`——于是它把"恢复逻辑写在 go()
-    里"当成了契约，而 dock 的「检索」是 `<a href>`，点击不经过 go()：功能对
-    真实路径一直是死的（实测地址栏停在裸 #/search、检索框为空），守卫却一直是
-    绿的。钉字符串存在只能证明代码写过，不能证明用户走得到——现在改成钉
-    "每条 hashchange 都会经过 syncRoute"这个真正的收口点。
+    恢复必须放在读路由（每条 hashchange 的必经之路）：导航项是 `<a href>`，
+    点击不经过 go()。旧守卫钉 `location.hash = prev` 等于把"写在 go() 里"
+    当契约——功能对真实点击路径一直是死的，守卫却一直是绿的。
     """
-    router = (ROOT / "web/src/lib/router.svelte.ts").read_text(encoding="utf-8")
-    assert "lastSearch" in router
-    assert "rememberSearch" in router
-    sync = router[router.index("export function syncRoute"):
-                  router.index("export function rememberSearch")]
-    assert "lastSearch()" in sync, "裸 #/search 未恢复上次检索（或恢复又搬回 go()）"
-    assert 'bare === "/search"' in sync, "恢复分支不在 hashchange 的收口点上"
-    search = (ROOT / "web/src/views/Search.svelte").read_text(encoding="utf-8")
-    assert "rememberSearch(location.hash)" in search
+    router = (ROOT / "web/src/lib/router.ts").read_text(encoding="utf-8")
+    assert "rememberSearch" in router and "lastSearch" in router
+    read_route = router[router.index("export function readRoute"):]
+    assert 'raw === "/search" || raw === "/search?"' in read_route, \
+        "裸 #/search 未恢复上次检索（或恢复又搬回 go()）"
+    assert "location.replace(prev)" in read_route, "恢复必须 replace，否则退不出去"
+    search = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
+    assert "searchUrl(" in search
+    assert "rememberSearch(location.hash)" not in search, \
+        "恢复逻辑散落在视图里：导航链接的点击路径不一定经过它"
 
 
 def test_reparse_entry_exists():
-    """文档必须能「重新解析（换引擎）」。
+    """文档必须能「重新解析（换引擎）」与「重新切分」。
 
-    回归防护：后端 /reparse 一直存在且保留 doc_id/kb_id/created_at，
-    但前端一度没有任何调用——解析失败的文档只能删掉重传。
-    入口从列表页与详情页共用 lib/docops.ts，走异步队列。
+    后端端点一直存在且支持 wait=false；前端提交后必须把 job_id 交给
+    轮询者——否则页面永远停在旧状态，用户只能离开再回来。
     """
-    ops = (ROOT / "web/src/lib/docops.ts").read_text(encoding="utf-8")
-    assert "reparse?wait=false" in ops, "重新解析未走异步队列（应立刻返回 job_id）"
+    ops = (ROOT / "web/src/lib/ops.tsx").read_text(encoding="utf-8")
+    assert "reparse?wait=false" in ops, "重新解析未走异步队列"
     assert '"engine"' in ops, "重新解析未提供换引擎的选择"
     assert "resplit?wait=false" in ops, "重新切分未走异步队列"
-    for name in ("KbDocs.svelte", "DocView.svelte"):
+    for name in ("KbDocs.tsx", "DocView.tsx"):
         view = (ROOT / "web/src/views" / name).read_text(encoding="utf-8")
         assert "reparseDoc" in view and "resplitDoc" in view, f"{name} 缺少入口"
 
-    # 前端发 wait=false，后端就必须真认这个参数。早前 plan.py 的
-    # api_doc_resplit 压根没有 wait 形参：查询参数被静默丢弃，请求一路
-    # 同步阻塞到重切完成，且响应里没有前端轮询所需的 job_id——这个断言
-    # 只看前端字符串，反而把错误契约锁成了「正确」。
     from inspect import signature
 
     from rag.api.plan import api_doc_resplit
@@ -314,17 +308,13 @@ def test_reparse_entry_exists():
 def test_chunk_row_does_not_hijack_enter():
     """行内按钮的 Enter/Space 不能被行的 keydown 吃掉。
 
-    回归防护：tr 没有 tabindex 时，keydown 只可能由行内按钮冒泡触发，
-    而 Enter 的默认行为（点击按钮）又被 preventDefault——键盘用户
-    按 Enter 打不开编辑/删除，只会选中行。
+    React 版的行可聚焦（↑/↓ 换块），但键盘处理必须先判断事件来源；
+    操作区还要 stopPropagation，否则点编辑会顺带把选中项换走。
     """
-    view = (ROOT / "web/src/views/DocView.svelte").read_text(encoding="utf-8")
-    assert 'tabindex="0"' in view, "行不可聚焦，键盘交互无从谈起"
-    # 判断事件来源：来自行内按钮的冒泡必须放行，否则 Enter 的默认
-    # 点击行为被吃掉，键盘用户打不开编辑/删除
+    view = (ROOT / "web/src/views/DocView.tsx").read_text(encoding="utf-8")
+    assert "tabIndex={0}" in view, "行不可聚焦，键盘交互无从谈起"
     assert "e.target !== e.currentTarget" in view, "未判断事件来源"
-    # 行内按钮与勾选框都不该顺带选中整行
-    assert 'closest("button, input' in view, "行内控件的点击会顺带选中行"
+    assert "e.stopPropagation()" in view, "行内控件会冒泡触发行点击"
 
 
 def test_no_lancedb_connection_outside_storage():
@@ -409,90 +399,64 @@ def test_models_exposes_retrieve_defaults():
 
 
 def test_error_states_offer_retry():
-    """错误态要能重试，而不是只给一句话。
-
-    回归防护：后端重启期间打开列表页，用户只能猜是不是要刷新浏览器。
-    """
-    for f in (ROOT / "web/src/views").glob("*.svelte"):
+    """错误态要能重试，而不是只给一句话。"""
+    for f in (ROOT / "web/src/views").glob("*.tsx"):
         body = f.read_text(encoding="utf-8")
-        if 'kind="error"' not in body:
-            continue
-        seg = body.split('kind="error"')[1][:300]
-        assert "action=" in seg, f"{f.name} 的错误态没有重试入口"
+        for m in __import__("re").finditer(r'severity="error"', body):
+            seg = body[m.start(): m.start() + 700]
+            assert "重试" in seg or "重新检测" in seg, \
+                f"{f.name} 的错误态没有重试入口"
 
 
 def test_search_params_layered():
-    """常用的「范围与模式」不该藏在折叠里。
-
-    回归防护：17 个控件全部平铺，第一次使用的人会先被
-    nprobes / k_rrf 这类术语劝退。
-    """
-    view = (ROOT / "web/src/views/Search.svelte").read_text(encoding="utf-8")
-    assert "params-inline" in view, "常用参数未提出折叠"
-    assert "高级参数" in view, "调优参数未收进「高级参数」"
+    """常用的「范围与模式」不该藏在折叠里。"""
+    view = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
+    assert 'p.group === "base"' in view, "常用参数未提出折叠"
+    assert "过滤与高级参数" in view, "调优参数未收进「高级参数」"
 
 
 def test_upload_failures_are_kept():
     """批量上传失败的文件要留在队列里，且不重复成功的那些。"""
-    src = (ROOT / "web/src/ui/UploadPanel.svelte").read_text(encoding="utf-8")
+    src = (ROOT / "web/src/views/KbDocs.tsx").read_text(encoding="utf-8")
     assert "succeeded" in src, "未区分成功/失败项"
-    assert "files.filter((f) => !succeeded.has(f))" in src, "未只移除成功项"
+    assert "!succeeded.has(f)" in src, "未只移除成功项"
+    assert "失败项已保留" in src, "未告知失败项可重试"
 
 
 def test_subpages_have_a_way_back():
-    """子页面都要有"回到上一级"的入口，而且不能只靠浏览器后退。
+    """子页面都要有"回到上一级"的入口，且入口是可点的链接。
 
-    阶段 3 起这个入口是**工作区标签条**（文档 / 分块 / 设置），不再是每个
-    子页各自摆一个 backlink。理由：四个子页各写一份"返回"，文案与位置
-    迟早漂移，而且用户在标签条已经能看到自己在哪的情况下还要多一个
-    指向同一处的链接。
-
-    所以守卫改查"标签条确实覆盖了这些视图、且是可点的链接"：
-      - 每个子页仍要写面包屑（层级由壳层统一渲染）
-      - 承载这些视图的路由必须渲染 WorkspaceTabs
-      - 标签条用 `<a href>`：中键新开、右键复制链接、状态栏预览都要在
+    阶段 3 起入口是工作区标签条（文档 / 分块 / 设置）。用 `<a href>`
+    而不是按钮：中键新开、右键复制链接、状态栏预览都要保留。
     """
-    for name in ("KbDocs.svelte", "KbChunks.svelte", "DocView.svelte", "KbSettings.svelte"):
+    for name in ("KbDocs.tsx", "KbChunks.tsx", "DocView.tsx", "KbSettings.tsx"):
         view = (ROOT / "web/src/views" / name).read_text(encoding="utf-8")
         assert "setCrumbs(" in view, f"{name} 未写入面包屑"
 
-    app = (ROOT / "web/src/App.svelte").read_text(encoding="utf-8")
+    app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     assert "WorkspaceTabs" in app, "工作区标签条未由壳层渲染"
-    # kb 与 doc 两种路由都在标签条之下渲染，四个子页全都覆盖到
     assert 'route.name === "kb" || route.name === "doc"' in app, \
-        "标签条未覆盖文档详情页（进去后就没有回来的地方了）"
+        "标签条未覆盖文档详情页"
 
-    tabs = (ROOT / "web/src/ui" / "WorkspaceTabs.svelte").read_text(encoding="utf-8")
-    assert "href={href(\"kb\", kbId, t.key)}" in tabs, "标签条未生成可分享的链接"
-    assert '<a class="wstab-item"' in tabs, "标签条用了非链接元素，导航语义会丢"
+    tabs = (ROOT / "web/src/ui/WorkspaceTabs.tsx").read_text(encoding="utf-8")
+    assert 'href={href("kb", kbId, t.key)}' in tabs, "标签条未生成可分享的链接"
+    assert 'component="a"' in tabs, "标签条用了非链接元素，导航语义会丢"
 
 
 def test_standalone_chunks_surface():
-    """独立分块必须有独立入口，且过滤下推到服务端。
-
-    回归防护：这个视图在 Svelte 重写时整体丢失——路由注释还在，
-    但没有组件、没有入口，挂在库下的分块在界面上完全不可见。
-    """
-    view = (ROOT / "web/src/views/KbChunks.svelte").read_text(encoding="utf-8")
-    # 两种写法都算下推：字面量拼 URL，或经 URLSearchParams 构造
-    # （阶段 2 把查询串改成 URLSearchParams，行为没变，只是字面量拆开了）
-    assert "only_standalone=true" in view or 'only_standalone: "true"' in view, \
+    """独立分块必须有独立入口，且过滤下推到服务端。"""
+    view = (ROOT / "web/src/views/KbChunks.tsx").read_text(encoding="utf-8")
+    assert "only_standalone: String(only)" in view, \
         "过滤未下推，文档分块一多独立分块会被截断"
     assert "独立分块" in view
-    router = (ROOT / "web/src/lib/router.svelte.ts").read_text(encoding="utf-8")
+    router = (ROOT / "web/src/lib/router.ts").read_text(encoding="utf-8")
     assert '"standalone"' in router, \
         "旧地址 #/kb/{id}/standalone 必须仍被识别（重定向到分块标签的独立块范围）"
-    app = (ROOT / "web/src/App.svelte").read_text(encoding="utf-8")
+    app = (ROOT / "web/src/App.tsx").read_text(encoding="utf-8")
     assert "KbChunks" in app, "未挂载分块视图"
-    # 阶段 3：独立分块不再是单独一页，而是"分块"标签上的一个范围筛选。
-    # 守卫跟着改，但查的仍是同一件事：**这个视图必须到得了**，
-    # 而且范围必须是服务端参数（否则文档分块一多，独立块就被挤出可见范围）。
-    chunks = (ROOT / "web/src/views/KbChunks.svelte").read_text(encoding="utf-8")
-    assert "scope=standalone" in chunks, "分块标签没有切到独立块范围的入口"
-    assert 'only_standalone: String(only)' in chunks \
-        or "only_standalone=true" in chunks, "范围未下推到服务端"
-    settings = (ROOT / "web/src/views/KbSettings.svelte").read_text(encoding="utf-8")
-    assert "scope=standalone" in settings, "设置页缺少进入独立分块的入口"
+    assert "?scope=standalone" in view, "分块标签没有切到独立块范围的入口"
+    settings = (ROOT / "web/src/views/KbSettings.tsx").read_text(encoding="utf-8")
+    assert "?scope=standalone" in settings, "设置页缺少进入独立分块的入口"
 
 
 def _strip_comments(text: str) -> str:
@@ -547,15 +511,7 @@ def test_chunk_content_filter_is_server_side(chunk_client):
 
     这条守的不变量：`q` 过滤发生在**分页之前**、`total` 是过滤后的条数。
     漏任何一处，界面上的命中数就变成"已加载窗口里的命中"——而它读起来
-    像全库答案。
-
-    后端部分原来是**读 `rag/api/chunks.py` 的源码文本**找 `"text ILIKE"` /
-    `"escape_like(needle)"` 这些字面量。那是假绿守卫：本轮把过滤条件下沉到
-    仓储层（`repos/chunks.py:chunk_filters`）之后它立刻红了，而接口行为一点
-    没变。改成发真实请求、断言可观察结果。
-
-    前端部分仍然读源码文本——它断言的是"界面把过滤词发给了服务端、且没有
-    再筛一遍"，这属于接线，没有比源码更可靠的观测点。
+    像全库答案。后端部分发真实请求断言可观察结果；前端断言接线。
     """
     for text in ("苹果 香蕉 葡萄 常见水果列表", "龙脑香 dipterocarp 稀有树种"):
         chunk_client.post("/api/documents/text",
@@ -571,123 +527,103 @@ def test_chunk_content_filter_is_server_side(chunk_client):
     assert hit["total"] == len(hit["items"]) < all_chunks["total"], \
         f"total 不是过滤后的计数（{hit['total']} vs 全库 {all_chunks['total']}）"
 
-    # 通配符必须是字面量：查询 `%` 不该匹配所有块
     wild = chunk_client.get("/api/chunks", params={"q": "%",
                                                    "limit": 100}).json()
     assert all("%" in it["text"] for it in wild["items"]), \
         "查询词里的 % 被当成通配符了（escape_like 没生效）"
 
     view = _strip_comments(
-        (ROOT / "web/src/views/KbChunks.svelte").read_text(encoding="utf-8"))
-    assert 'sp.set("q", lastQuery)' in view, "分块页没把过滤词发给服务端"
-    assert "items.filter(" not in view, "前端仍在已取回的数组里筛第二遍（两处各筛迟早分叉）"
-    # 旧的诚实措辞现在反而是错的：命中数已经是全库口径
-    assert "在已加载的" not in view, "文案还停留在客户端过滤时代的口径"
+        (ROOT / "web/src/views/KbChunks.tsx").read_text(encoding="utf-8"))
+    assert 'sp.set("q", query)' in view, "分块页没把过滤词发给服务端"
+    assert "items.filter((c) => c.text" not in view, \
+        "前端仍在已取回的数组里筛第二遍（两处各筛迟早分叉）"
 
 
 def test_plan_editing_ui():
-    """分块方案要能在界面上改：知识库默认 + 文档级覆盖。
-
-    回归防护：两级方案的后端早已就绪，但 Svelte 界面上没有任何
-    方案入口，用户只能改 config.toml。
-    """
-    kb_set = (ROOT / "web/src/views/KbSettings.svelte").read_text(encoding="utf-8")
+    """分块方案要能在界面上改：知识库默认 + 文档级覆盖。"""
+    kb_set = (ROOT / "web/src/views/KbSettings.tsx").read_text(encoding="utf-8")
     assert "/plan" in kb_set, "知识库设置页没有方案入口"
     assert 'method: "PUT"' in kb_set, "方案未写回"
-    ops = (ROOT / "web/src/lib/docops.ts").read_text(encoding="utf-8")
+    ops = (ROOT / "web/src/lib/ops.tsx").read_text(encoding="utf-8")
     assert "/plan" in ops and 'method: "PUT"' in ops, "文档级方案未写回"
-    doc = (ROOT / "web/src/views/DocView.svelte").read_text(encoding="utf-8")
-    assert "分块方案" in doc and "editDocPlan" in doc, "文档页没有方案覆盖入口"
+    doc = (ROOT / "web/src/views/DocView.tsx").read_text(encoding="utf-8")
+    assert "分块方案" in doc and "editDocPlanDialog" in doc, "文档页没有方案覆盖入口"
     assert "需重切" in doc, "方案变更后未提示需要重新切分"
-    docs = (ROOT / "web/src/views/KbDocs.svelte").read_text(encoding="utf-8")
+    docs = (ROOT / "web/src/views/KbDocs.tsx").read_text(encoding="utf-8")
     assert "documents/plans" in docs, "文档列表未批量读取方案（会产生 N+1）"
     assert "需重切" in docs, "列表未标注「需重切」状态"
 
 
 def test_document_rename_ui():
     """重命名要能在界面上完成，而不是只能删了重传。"""
-    ops = (ROOT / "web/src/lib/docops.ts").read_text(encoding="utf-8")
+    ops = (ROOT / "web/src/lib/ops.tsx").read_text(encoding="utf-8")
     assert "/api/documents/" in ops and 'method: "PUT"' in ops, "未调用 PUT /api/documents/{id}"
     assert "重命名文档" in ops, "缺少重命名对话"
-    for name in ("KbDocs.svelte", "DocView.svelte"):
+    for name in ("KbDocs.tsx", "DocView.tsx"):
         view = (ROOT / "web/src/views" / name).read_text(encoding="utf-8")
         assert "renameDocDialog" in view, f"{name} 缺少重命名入口"
 
 
 def test_form_dialog_is_mounted():
-    """表单对话必须挂载在应用根部，否则 formDialog 永远不显示。"""
-    app = (ROOT / "web/src/App.svelte").read_text(encoding="utf-8")
-    assert "FormDialog" in app, "App 未挂载 FormDialog"
-    form = (ROOT / "web/src/ui/FormDialog.svelte").read_text(encoding="utf-8")
-    assert 'role="dialog"' in form
-    assert "Escape" in form, "未处理 Escape"
+    """对话框渲染器必须挂载在应用根部，否则 formDialog 永远不显示。
+
+    焦点陷阱与 Escape 交给 MUI Dialog（自带 role="dialog" 与键盘处理），
+    不再自己写一份挂在面板上的监听。
+    """
+    main = (ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
+    assert "DialogHost" in main, "入口未挂载 DialogHost"
+    form = (ROOT / "web/src/lib/dialog.tsx").read_text(encoding="utf-8")
+    assert 'from "@mui/material/Dialog"' in form
+    assert "onClose=" in form, "对话框未处理关闭"
 
 
 def test_health_actions_exposed():
     """健康页要能一键重建索引 / 修复计数，而不是只给一坨 JSON。"""
-    settings = (ROOT / "web/src/views/Settings.svelte").read_text(encoding="utf-8")
+    settings = (ROOT / "web/src/views/Settings.tsx").read_text(encoding="utf-8")
     assert "/api/reindex" in settings, "缺少重建索引入口"
     assert "/api/reconcile" in settings, "缺少修复计数入口"
 
 
 def test_streaming_answer_ui():
-    """问答要真的流式：SSE 客户端 + 面板，且引用先于正文。
-
-    回归防护：只有后端 SSE 而前端一次性等结果，等于白做流式；
-    反过来只做面板不解析事件流，界面会一直空转。
-    """
+    """问答要真的流式：SSE 客户端 + 面板，且卸载时断开。"""
     sse = (ROOT / "web/src/lib/sse.ts").read_text(encoding="utf-8")
     assert "getReader()" in sse, "未按流读取响应体"
     assert "AbortController" in sse, "无法中断请求（停止按钮会变成假停止）"
-    # 四个事件都要处理，漏一个界面就会永远转圈
     for ev in ("sources", "delta", "done", "error"):
         assert f'case "{ev}"' in sse, f"未处理 {ev} 事件"
 
-    panel = (ROOT / "web/src/ui/AnswerPanel.svelte").read_text(encoding="utf-8")
+    panel = (ROOT / "web/src/ui/AnswerPanel.tsx").read_text(encoding="utf-8")
     assert "streamPost" in panel, "面板未使用流式请求"
     assert "onSources" in panel, "未接收引用（sources 事件）"
     assert "onDelta" in panel, "未接收增量文本（delta 事件）"
-    assert ".stop()" in panel or "stop()" in panel, "停止按钮未真正断开连接"
-    assert "onDestroy" in panel, "组件卸载时未断开，后端会继续生成"
+    assert "stop()" in panel, "停止按钮未真正断开连接"
+    assert "handleRef.current?.stop()" in panel, "组件卸载时未断开，后端会继续生成"
 
-    search = (ROOT / "web/src/views/Search.svelte").read_text(encoding="utf-8")
+    search = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
     assert "AnswerPanel" in search, "检索页未接入问答面板"
 
 
 def test_job_cancel_entry_points():
-    """取消能力要有入口，且文案如实说明「运行中不会立即停」。
-
-    回归防护：只报「已取消」会让用户以为任务停了，实际还在写库。
-    """
+    """取消能力要有入口，且文案如实说明「运行中不会立即停」。"""
     cancel = (ROOT / "web/src/lib/jobcancel.ts").read_text(encoding="utf-8")
     assert 'method: "DELETE"' in cancel, "未用 DELETE 取消"
     assert "/api/jobs/" in cancel, "取消端点不对"
-    # 文案来自服务端（按 outcome 组织），前端不自己编一套
     assert "r.message" in cancel, "未转述服务端给出的取消说明"
 
-    docs = (ROOT / "web/src/views/KbDocs.svelte").read_text(encoding="utf-8")
+    docs = (ROOT / "web/src/views/KbDocs.tsx").read_text(encoding="utf-8")
     assert "cancelDocJob" in docs, "文档列表缺少取消入口"
     assert "job_id" in docs, "任务映射未保留 job_id（无法取消）"
-
-    upload = (ROOT / "web/src/ui/UploadPanel.svelte").read_text(encoding="utf-8")
-    assert "cancelCurrent" in upload, "入库面板缺少停止入口"
-    assert "停止后" in upload, "未在界面上说明取消的能力边界"
+    assert "停止后" in docs, "未在界面上说明取消的能力边界"
 
 
 def test_batch_operations_use_batch_endpoints():
-    """批量操作必须走批量端点，而不是在客户端循环单条调用。
-
-    回归防护：循环在 200 条时是 200 个请求且中途失败后无法回答
-    「哪些块被停用了」——这正是批量端点要解决的问题。
-    """
-    ops = (ROOT / "web/src/lib/chunkops.ts").read_text(encoding="utf-8")
+    """批量操作必须走批量端点，而不是在客户端循环单条调用。"""
+    ops = (ROOT / "web/src/lib/ops.tsx").read_text(encoding="utf-8")
     assert "batch-enabled" in ops, "批量启停未走批量端点"
     assert "for (const c of chunks)" not in ops, "仍在客户端循环调用单条端点"
+    assert "/api/documents/batch" in ops, "批量删除未走批量端点"
+    assert "skipped" in ops, "未如实回报被跳过的数量"
 
-    batch = (ROOT / "web/src/lib/docbatch.ts").read_text(encoding="utf-8")
-    assert "/api/documents/batch" in batch, "批量删除未走批量端点"
-    assert "skipped" in batch, "未如实回报被跳过的数量"
-
-    docs = (ROOT / "web/src/views/KbDocs.svelte").read_text(encoding="utf-8")
+    docs = (ROOT / "web/src/views/KbDocs.tsx").read_text(encoding="utf-8")
     assert "deleteDocsBatch" in docs, "文档列表未接批量删除"
     assert "pickedCount" in docs, "缺少多选状态的呈现"

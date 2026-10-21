@@ -28,11 +28,16 @@ export function sourceKind(mime: string, filename: string): SourceKind {
   return "download";
 }
 
-/** 原生查看器的跳页地址。页码非法时退回第 1 页，不拼出 `#page=NaN`。 */
+/** 原生查看器的跳页地址。页码非法时退回第 1 页，不拼出 `#page=NaN`。
+ *
+ *  `zoom=page-width`（宽度适应）是 Chrome 内置查看器与 pdf.js 都认的参数。
+ *  这里**不能**用 Adobe 的 `view=FitH`：Chrome 会忽略它，页面按 100% 渲染，
+ *  而 A4 宽于 iframe（≈490px）——用户看到的就是"只显示左半边"。
+ */
 export function pageUrl(url: string, page?: number | null): string {
   const p = page && page > 0 ? Math.floor(page) : 1;
   const base = url.split("#")[0];
-  return `${base}#page=${p}&view=FitH`;
+  return `${base}#page=${p}&zoom=page-width`;
 }
 
 /** 下载链接：加参数让后端带 Content-Disposition。 */

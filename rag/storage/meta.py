@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS kbs (
     description   TEXT NOT NULL DEFAULT '',
     chunk_size    INTEGER NOT NULL DEFAULT 0,
     overlap_ratio REAL NOT NULL DEFAULT 0.0,
+    strategy      TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL DEFAULT '',
     updated_at    TEXT NOT NULL DEFAULT ''
 );
@@ -123,11 +124,40 @@ CREATE TABLE IF NOT EXISTS apikeys (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_key_hash ON apikeys(key_hash);
 
+-- 跨进程共享状态（2026-10-20）。
+-- SQLite 是默认部署下唯一被所有 worker 打开的可写共享点，因此限流桶、
+-- 幂等键与缓存代际都放这里，而不是各进程内存。
+--
+-- rate_buckets：令牌桶。updated 用 **wall clock**（跨进程可比较；
+-- monotonic 只在单进程内有意义）。
+CREATE TABLE IF NOT EXISTS rate_buckets (
+    caller  TEXT PRIMARY KEY,
+    tokens  REAL NOT NULL DEFAULT 0.0,
+    updated REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_rate_updated ON rate_buckets(updated);
+
+-- idempotency：跨进程的「过程幂等」状态机。
+-- state=pending 表示某个请求正在执行；done 带 result（JSON）；
+-- failed 行不会保留（删除后允许真正重试）。pending 超时后可被接管，
+-- 覆盖进程崩溃留下的永久 pending。
+CREATE TABLE IF NOT EXISTS idempotency (
+    path    TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    state   TEXT NOT NULL DEFAULT 'pending',
+    owner   TEXT NOT NULL DEFAULT '',
+    result  TEXT,
+    error   TEXT,
+    created REAL NOT NULL DEFAULT 0.0,
+    updated REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (path, key)
+);
+CREATE INDEX IF NOT EXISTS idx_idem_updated ON idempotency(updated);
+
 -- 这段 DDL 只有「建」没有「删」。它曾预留过 `idempotency` / `outbox` /
--- `jobs.worker` 三处**当时没有调用点**的结构（幂等键最终落在进程内
--- `IdempotencyStore`，跨引擎级联最终靠启动期对账，任务领取从未实现）。
--- 现已从 DDL 删除，但**故意不对存量库 DROP**：启动期删表是数据丢失面，
--- 而它们要么 0 行要么 1 列，留着只难看、不影响读写。新建的库不再有此负担。
+-- `jobs.worker` 三处**当时没有调用点**的结构。`idempotency` 现在有了
+-- 真正的调用点（跨进程幂等），`outbox` / `jobs.worker` 仍不建；
+-- 存量库里若还留着旧表也**故意不 DROP**：启动期删表是数据丢失面。
 """
 
 # 列清单归 schema 所在层：这四份清单**就是上面 DDL 的列序**，
@@ -145,7 +175,7 @@ DOC_COLS = ["doc_id", "title", "source_uri", "mime", "parser_engine",
 JOB_COLS = ["job_id", "doc_id", "kb_id", "stage", "progress", "total",
             "parser_engine", "error", "started_at", "ended_at"]
 KB_COLS = ["kb_id", "name", "description", "chunk_size", "overlap_ratio",
-           "created_at", "updated_at"]
+           "strategy", "created_at", "updated_at"]
 KEY_COLS = ["key_id", "name", "prefix", "key_hash", "scope", "note",
             "created_at", "last_used_at", "expires_at", "revoked_at"]
 
@@ -169,6 +199,16 @@ class MetaStore:
         with self._init_lock:
             conn = self._conn()
             conn.executescript(DDL)
+            # 存量库补列（幂等）：CREATE TABLE IF NOT EXISTS 不会给**已有**的
+            # 表加列，而 repos/kbs.py 的 KB_COLS 已含 strategy——缺列会让
+            # create/update_kb 直接 OperationalError。必须在 _cols 缓存填充
+            # 之前完成（缓存按表名整组记，这里还没有任何读发生）。
+            kbs_cols = {str(r["name"]) for r in
+                        conn.execute("PRAGMA table_info(kbs)")}
+            if "strategy" not in kbs_cols:
+                conn.execute(
+                    "ALTER TABLE kbs ADD COLUMN strategy "
+                    "TEXT NOT NULL DEFAULT ''")
             row = conn.execute(
                 "SELECT value FROM meta_state WHERE key='schema_version'").\
                 fetchone()
@@ -329,6 +369,28 @@ class MetaStore:
             "INSERT INTO meta_state(key, value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, str(value)))
+
+    def bump_state(self, key: str, amount: int = 1) -> int:
+        """原子递增一个 meta_state 计数器，返回新值。
+
+        用于跨进程缓存失效（auth_epoch / write_epoch）：单条 UPSERT 在
+        SQLite 里是原子的，多 worker 并发递增不会丢计数。计数器存在
+        meta_state 而不是新表，是因为它本来就是一个“全局代际”。
+        """
+        step = int(amount)
+        self._conn().execute(
+            "INSERT INTO meta_state(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value = CAST(CAST(meta_state.value AS INTEGER) + ? AS TEXT)",
+            (key, str(step), step))
+        return self.state_int(key, 0)
+
+    def state_int(self, key: str, default: int = 0) -> int:
+        raw = self.get_state(key, str(default))
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
 
     def stats(self) -> dict:
         # 混合值：行数是 int，取不到用 -1，完整性检查与 journal mode 是 str。

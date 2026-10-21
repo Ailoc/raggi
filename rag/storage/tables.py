@@ -186,7 +186,10 @@ class LanceStore:
         self._ensure_cols("kbs", {
             "chunk_size": pa.int64(),
             "overlap_ratio": pa.float64(),
-        }, backfill={"chunk_size": 0, "overlap_ratio": 0.0})
+            # strategy：分块策略（auto/structure/recursive/semantic）。
+            # 空串 = 旧数据，读取时归一为 auto（见 chunk_limits.normalize_strategy）。
+            "strategy": pa.string(),
+        }, backfill={"chunk_size": 0, "overlap_ratio": 0.0, "strategy": ""})
         # jobs：kb_id 用于把任务链回知识库（早于 doc_id 生成即已知）。
         # 缺它时所有入队写路径报 "Append with different schema:
         # missing=[kb_id]" → 500。
@@ -530,8 +533,8 @@ class LanceStore:
 
         这条是「越用越慢」的根治手段之一（诊断报告 §2.6）：
         - 一次入库过去会在 `jobs` 表上留下 ≈5 个版本/文件；
-        - `list_versions()` 实测 ≈0.17ms/版本，而 `/api/health` 与
-          `/api/stats` 都要调它——379 个版本就是 64ms 的纯开销。
+        - `list_versions()` 实测 ≈0.17ms/版本：版本数失控就是纯开销
+          （观测端点曾各付 64ms；随版本管理退役，回收只留在这里）。
 
         只在后台维护线程里跑；`delete_unverified` 保持默认 False
         （未提交的事务不能被删）。清理下界 `OPTIMIZE_KEEP_OLDER_THAN`
@@ -565,25 +568,9 @@ class LanceStore:
             self._last_compact_at = now
         return out
 
-    # ---- 版本管理 ----------------------------------------------------------
-    def table_versions(self, table_name: str = "chunks") -> list[dict]:
-        """列出表的历史版本（回滚用）。"""
-        try:
-            raw = self._table(table_name).list_versions()
-            return [dict(v) if not isinstance(v, dict) else v
-                    for v in raw]
-        except Exception as e:  # noqa: BLE001
-            logger.warning("list_versions() 失败: %s", e)
-            return []
-
-    def restore_version(self, version: int, table_name: str = "chunks") -> None:
-        """把表回滚到指定版本（chunks 表回滚后 documents 表需对账/重放）。"""
-        with self._lock:
-            self._table(table_name).restore(version)
-
     # ---- 容量统计 ----------------------------------------------------------
     def stats(self) -> dict:
-        """容量/索引/版本统计（/api/stats）。
+        """容量/索引统计（/api/stats）。
 
         存储维度按后端给不同指标——本地给磁盘占用，对象存储给对象数，
         两者没有可比性，硬凑成同一组字段只会误导。
@@ -626,7 +613,6 @@ class LanceStore:
             except Exception:  # noqa: BLE001
                 indexes[name] = []
         out["indexes"] = indexes
-        out["versions"] = len(self.table_versions())
         return out
 
     # ---- 后台维护调度 ------------------------------------------------------

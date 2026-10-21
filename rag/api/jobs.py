@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -24,26 +25,32 @@ router = APIRouter(
 
 
 @router.get("/jobs")
-async def api_jobs(request: Request, limit: int = 50,
+async def api_jobs(request: Request, limit: int = 50, offset: int = 0,
+                   status: Literal["all", "active", "failed", "done",
+                                   "cancelled"] = "all",
                    active_only: bool = False) -> JobListOut:
     """最近的任务列表（按开始时间倒序）。
 
-    active_only=true 只返回未结束的任务，用于「正在入库」指示。
+    `status` 在**分页之前**过滤，`total` 是过滤后的行数；`offset` 真正
+    下推到 SQL/Lance。旧实现的 offset 被忽略、active_only 先截断再过滤，
+    会出现「第 2 页等于第 1 页」「活跃任务排在 50 条之后就从界面消失」。
 
-    每行都带 terminal 派生字段（与单个任务端点一致）：前端据此决定
-    「停止」按钮是否可用、以及要不要继续轮询——不该让两个端点对
-    同一个概念给出不同形状。
+    active_only 是兼容旧客户端的别名：等价于 status=active（当 status 仍为
+    all 时）。每行带 terminal 派生字段，与单任务端点保持同一形状。
     """
     ctx = get_ctx(request)
-    items = await asyncio.to_thread(list_jobs, ctx.store, limit)
-    if active_only:
-        items = [j for j in items if j.get("stage") not in TERMINAL_STAGES]
+    if active_only and status == "all":
+        status = "active"
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    items, total = await asyncio.to_thread(
+        list_jobs, ctx.store, limit, "", offset, status)
     out = []
     for j in items:
         row = dict(j)
         row["terminal"] = row.get("stage") in TERMINAL_STAGES
         out.append(row)
-    return {"items": out, "total": len(out),
+    return {"items": out, "total": total,
             "queue": ctx.queue.stats()}
 
 

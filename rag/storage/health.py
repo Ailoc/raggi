@@ -96,13 +96,6 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
         checks_failed.append("embedding_model")
         logger.warning("embed_model 一致性检查失败，健康检查该项未知: %s", e)
 
-    try:
-        versions = len(chunks.list_versions())
-    except Exception as e:  # noqa: BLE001
-        versions = -1
-        checks_failed.append("lancedb_versions")
-        logger.warning("list_versions 失败: %s", e)
-
     # 索引覆盖状态（向量/FTS 是否存在及未索引行数）
     index_state = {}
     for col_name in ("vector", "text_seg"):
@@ -143,6 +136,5 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
         "dim_mismatch": dim_mismatch,
         "embedding_model": embed_model,
         "embedding_model_mismatch": embed_model_mismatch,
-        "lancedb_versions": versions,
         "index_state": index_state,
     }

@@ -78,21 +78,33 @@ export function streamPost(
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    let terminal = false;
 
     for (;;) {
       const { done: fin, value } = await reader.read();
       if (fin) break;
-      buf += decoder.decode(value, { stream: true });
+      // 规范允许 CRLF；服务端目前用 \n，但代理/中间件可能改写
+      buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       // SSE 以空行分隔事件；最后一段可能不完整，留在缓冲区等下一批
       let idx: number;
       while ((idx = buf.indexOf("\n\n")) >= 0) {
         const raw = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
-        handleEvent(raw, handlers);
+        const ev = handleEvent(raw, handlers);
+        if (ev === "done" || ev === "error") terminal = true;
       }
     }
+    buf = (buf + decoder.decode()).replace(/\r\n/g, "\n");
     // 收尾时可能还有一段没跟空行
-    if (buf.trim()) handleEvent(buf, handlers);
+    if (buf.trim()) {
+      const ev = handleEvent(buf, handlers);
+      if (ev === "done" || ev === "error") terminal = true;
+    }
+    // 连接正常关闭却没有终态事件：不能当成成功。界面会一直显示
+    // 「正在生成」或把半截答案当完整答案，必须显式报错。
+    if (!terminal && !stopped && !ctrl.signal.aborted) {
+      handlers.onError?.("连接已中断，回答可能不完整", "可重试一次");
+    }
   })();
 
   // 无论正常结束、报错还是被中断，都不让调用方拿到 rejection：
@@ -110,19 +122,20 @@ export function streamPost(
   };
 }
 
-function handleEvent(raw: string, h: StreamHandlers): void {
+/** 处理一个事件；返回事件名，供调用方判断是否已到终态。 */
+function handleEvent(raw: string, h: StreamHandlers): string | null {
   let event = "message";
   const dataLines: string[] = [];
   for (const line of raw.split("\n")) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
     else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
   }
-  if (!dataLines.length) return;
+  if (!dataLines.length) return null;
   let data: Record<string, unknown>;
   try {
     data = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
   } catch {
-    return;   // 半截 JSON：忽略而不是抛错（下一批会补全）
+    return null;   // 半截 JSON：忽略而不是抛错（下一批会补全）
   }
 
   switch (event) {
@@ -144,4 +157,5 @@ function handleEvent(raw: string, h: StreamHandlers): void {
         String(data.hint ?? ""));
       break;
   }
+  return event;
 }

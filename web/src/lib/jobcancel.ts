@@ -7,7 +7,7 @@
  * 那会让人以为已经停下，实际还在写库。
  */
 import { api } from "./api";
-import { toast } from "../ui/toast.svelte";
+import { toast } from "../ui/toast";
 
 export type CancelOutcome = "cancelled" | "running" | "finished" | "unknown";
 

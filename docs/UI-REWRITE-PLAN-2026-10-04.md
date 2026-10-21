@@ -794,3 +794,1234 @@ error: string                  // 保留上一次的行 + 顶部 inline 重试�
 **验证结果**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **414 passed**（前端守卫 36 条）。桩实例 8133 与 `/tmp/raggi-ui-s8` 已销毁，`data/` 与 8127 上的实例未被触碰。
 
 **仍未覆盖**：Jobs 的分页在真实大量任务下的表现（本机任务数不足）；`aria-busy` 在请求期间的瞬时值只能静态验证（隐藏视口里两次采样都错过了 in-flight 窗口）。
+
+---
+
+## 16. 阶段 8（顶栏化 S0）完成记录（2026-10-06）
+
+方向（用户 2026-10-06 拍板）：**A 精密控制台**基调（无边框卡片靠 elev，但保留边框/焦点环令牌）+ **上下文栏降级为页内** + **壳层先行、视图逐批迁移**。即：全局 5 项导航进顶栏，`<Dock>` 退场，知识库/检索的上下文树变成内容区内的一栏。
+
+**本阶段只加不删**，因此引入后页面观感零变化——地基先铺好，S1 才开始动壳层。
+
+### 16.1 令牌增补（`styles/tokens.css`）
+
+| 新增 | 用途 |
+|---|---|
+| `--border` / `--border-strong` | 容器边界（指向 `--line` 色阶，不另立一套值） |
+| `--border-control` | **控件**边界（输入框/复选框/分段控件外壳），达 WCAG 3:1 |
+| `--hairline` | 1px 分隔，比 border 弱一档（顶栏底边、表头下沿） |
+| `--ring` / `--ring-offset` | 焦点指示 |
+| `--surface-hover` / `--surface-active` | 交互态底色，取代各组件自己写 opacity |
+| `--radius-sm/md/lg/pill` | 圆角阶梯，新组件只写这组 |
+| `--topbar-bg` / `--topbar-blur` / `--subbar-h` | 顶栏毛玻璃与次级条（S1 用） |
+| `--grid-cols` / `--gutter` / `--stack-gap` | 布局网格 |
+
+**三者的分工钉死**：`--elev-*` 抬卡片、`--hairline` 分隔、`--border` 容器边界、`--border-control` 控件边界、`--ring` 焦点。混用的代价是层级变平——这正是"无边框"最容易翻车的地方。
+
+### 16.2 对比度实测（oklch → sRGB → WCAG，含 alpha 合成）
+
+| 组合 | 深色 | 浅色 | 结论 |
+|---|---|---|---|
+| text / bg、text-2 / surface | 16.58 / 8.22 | 15.33 / 6.83 | 达标 |
+| accent、hit、ok/warn/danger 文字 | 6.06–11.93 | 4.34–5.54 | 达标 |
+| ring / surface、ring / bg | 11.39 / 12.39 | 5.40 / 5.17 | 达标（≥3） |
+| **border / surface** | **1.32** | **1.35** | **不达 3:1** |
+| border-strong / surface | 1.92 | 1.93 | 不达 3:1 |
+
+于是有了 `--border-control`：二分求出达标临界后取 **深 `oklch(0.545 0.016 260)` / 浅 `oklch(0.640 0.010 260)`**，对 `bg` / `surface` / `surface-2` 三档分别是 3.87/3.56/3.21 与 3.22/3.36/3.10。**`surface-3` 上只有 2.75，不达标——所以别把输入框放在 surface-3 底上**（那一档只用于 hover/按下的临时态）。
+
+第二次取值时才发现的坑：浅色 0.665 对 `surface` 是 3.05，对 `bg`(0.985) 却只有 2.92——**只测白底会漏掉页面底那一档**。
+
+另：浅色 `--surface-hover` 不能沿用 `--surface-2`（两者只差 0.025 L，hover 等于没反馈），深色同样两档差 0.04 是够的。这是"一套令牌两个主题"最容易偷懒偷错的地方。
+
+### 16.3 布局层（`styles/layout.css`，新建）
+
+12 栏网格 + 具名跨度（`.l-main` / `.l-side` / `.l-half` …）+ `.l-wrap` 限宽 + `.l-cards` + hairline 分隔 + 行高密度档，取代 app.css 里 7 处各自声明的 `grid-template-columns`；断点只留 1100 / 900 两个（曾经的 1024 vs 1100 在 1024–1100px 区间内给出两个答案）。`minmax(0, 1fr)` 而不是 `1fr`：后者以 min-content 为下限，长表格会把整行撑破，横向滚动条会去抢整页滚动。
+
+顶栏毛玻璃在 `prefers-reduced-transparency: reduce` 下退回不透明：顶栏是唯一常驻的导航，它不能是第一个不可读的东西。
+
+### 16.4 守卫
+
+新增 `test_grid_columns_declared_only_in_layout`：**分栏宽度只能由 layout.css 声明**，视图用 `.l-*` 跨度类；`PENDING_GRID_COLS` 待办清单沿用"只减不增"写法（已修好的文件必须立刻移出清单，否则清单会退化成豁免栏）。
+
+**变异验证抓到自己一条假绿**：第一版断言的是 `".l-grid" in css` 这种**存在性**——把定义改名为 `.l-gridX` 后，900px 媒体查询里那条 `.l-grid { --gutter }` 仍然让它变绿，"网格定义没了"被漏掉。改成查**规则体里真的有列声明**（`\.l-grid\s*\{[^}]*grid-template-columns`）后判红。本文件已第三次栽在存在性断言上（`lastSearch()`、`location.replace`、这次）。五例变异最终逐个变红，每例 `try/finally` 还原并校验 sha256。
+
+### 16.5 验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **564 passed**（前端守卫 36 → 37）。
+
+**下一步（S1）**：顶栏外壳——`<Topbar>`（分段控件导航 + 队列摘要 + 主题 + 恢复默认布局）替换 `.shell` 的 dock 三列网格；面包屑条挪进顶栏第二行（保留 `class="crumbbar"`，守卫不用改）；`<ContextRail>` 落地并把 dock 的四条可自救契约平移过去；dock 相关 3 条守卫改写主语。
+
+---
+
+## 17. 阶段 9（顶栏化 S1）完成记录（2026-10-06）
+
+**结果：壳层从「侧栏 + 内容列」换成「顶栏 + 单列内容区」，这是重写以来第一次产生可见变化的一步。**
+
+### 17.1 文件级改动
+
+| 文件 | 处置 |
+|---|---|
+| `App.svelte` | 重写：顶栏两行（主导航行 + 面包屑次级条）、`.shell` 单列、内容区内并排 `<ContextRail>` |
+| `ui/ContextRail.svelte`（新） | 页内上下文栏：库树 / 检索历史，自带拖拽把手 |
+| `lib/rail.svelte.ts`（新） | rail 状态：折叠（不落盘）+ 宽度（落盘且 clamp） |
+| `ui/SectionSwitcher.svelte` | 从竖向列表改成顶栏**分段控件**（仍是 `<a href>`） |
+| `styles/topbar.css`（新） | 顶栏、分段控件、队列 chip、次级面包屑条 |
+| `styles/rail.css`（新，取代 `shell.css`） | 上下文栏在内容区里的位置、树与过滤框、窄屏退场 |
+| `styles/layout.css` | 新增「应用骨架」段（`.shell` / `.main` / `.content-wrap` / `.is-full` 高度链从 app.css 搬来并重写） |
+| `ui/Dock.svelte`、`lib/dock.svelte.ts`、`styles/shell.css` | 删除 |
+| `app.css` | 删掉第 3 节（顶栏）与第 5 节（dock 骨架）——两份事实的结局是改一处忘一处 |
+
+### 17.2 上下文栏落在哪里（一处刻意偏离）
+
+S0 写的是"由视图声明"。实现时改成**由 App 在 `.main` 内渲染**，理由是两个：① 内容是 section-aware 的（要 `route` + `section`），视图各自声明等于把这层判断抄 9 遍；② 折叠开关必须住在外面的容器里，这条契约由壳层持有才守得住。差别只是"谁声明"，可自救的四条契约一条没动。
+
+出现范围钉死为**知识库（非文档详情）与检索**：任务/设置/API 三页的上下文本来就是页面自己的东西（列表、标签、跟随过滤的索引），文档详情是双栏对照，再让出 240px 就没法读了。
+
+### 17.3 守卫：4 条改写，全部保留原事故理由
+
+| 原守卫 | 处置 |
+|---|---|
+| `test_rail_css_and_tokens_removed` | → `test_dead_shell_tokens_stay_removed`。**新组件就叫 `.rail`**，旧禁令的 `.rail` 字面量必须放开；改成禁两代死令牌（`--rail-handle-w`/`--rail-collapsed-w`/`--dock-*`）。它防的"折叠态跨刷新保留"改由 rail 守卫的四条断言承担 |
+| `test_dock_collapse_is_self_recoverable` | → `test_context_rail_collapse_is_self_recoverable`（四条断言原样平移） |
+| `test_dock_persists_only_width` | → `test_rail_persists_only_width` |
+| `test_dock_settings_entries_match_the_page_tabs` | → `test_settings_subpages_have_one_entry_list`：清单对象没了，禁令改成"任何文件都不许再出现第二份子页清单" |
+
+**变异验证 7 例，抓到两条假绿**（都是存在性断言的老毛病，本文件第 4、5 次栽在上面）：
+
+1. `clampWidth` 里本就另有一处 `Math.min`（算 cap），所以"文件里出现过 Math.max/Math.min"在**把 return 里的 Math.min 换成 Math.max 之后照样绿** → 改成按花括号配对抽出 `clampWidth` 体，钉住夹上下界的那一句 return。
+2. `aria-controls` 只查属性存在性时，指向一个不存在的 id 也能通过 → 改成钉 `aria-controls="rail"`。
+
+其余五例（开关搬进上下文栏、折叠态写 localStorage、持久化的键改成非 width、旧 dock 令牌回潮、设置子页第二份清单）逐个判红；每例 `try/finally` 还原并校验 sha256。
+
+### 17.4 浏览器实测（隔离实例 8134，数据在 `/tmp/raggi-ui-s1`，已销毁）
+
+22 项全绿（结构化与行为，视口 1440×900）：
+
+| 检查 | 结果 |
+|---|---|
+| 顶栏导航 5 项、均为 `<a href>`、当前项 `aria-current` | ✔ |
+| **顶栏与内容区同一中轴**（中心差 0.0px） | ✔ |
+| 知识库页有上下文栏 + 库过滤框 | ✔ |
+| 折叠往返：栏消失 → 开关仍在 → `aria-expanded` 翻转 → 再点回来 | ✔ |
+| 任务 / 设置 / API / 文档详情四页**无**上下文栏，检索页**有** | ✔ |
+| 切到任务页后顶栏高亮跟着走 | ✔ |
+| 刷新后回到展开（折叠态不落盘） | ✔ |
+| console 无非预期错误（404/503 属本机无真实文档与 embedding） | ✔ |
+
+**未做像素级复核**：这一轮仍是 DOM 与几何量测，没有视觉截图。配色层级、毛玻璃观感、浅色主题下的顶栏表现要等一次真机目视。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **564 passed**。
+
+**下一步（S2）**：原语组件 `ui/primitives/`——`PageHeader` / `Section` / `DataTable` / `Tabs` / `Toolbar` / `EmptyState`，并迁移 KbList、KbDocs、KbChunks 三个视图；第 5 张表收编进 `DataTable`，`.listmore` 只剩一份。
+
+---
+
+## 18. 阶段 10（原语组件 S2）完成记录（2026-10-06）
+
+### 18.1 新增
+
+| 组件 | 吃掉的是什么 |
+|---|---|
+| `ui/primitives/PageHeader.svelte` | 九个页头各自的尺寸与结构；标题 20px → **17px** |
+| `ui/primitives/DataTable.svelte` | 三种表格容器组合、两份逐字重复的多选逻辑、四份「再加载」块 |
+| `ui/primitives/Toolbar.svelte` | 过滤框 + 命中提示 + 刷新提示（`.toolbar` / `.chunkfilter` 两份） |
+| `ui/primitives/SkeletonRows.svelte` | 4 份骨架屏 CSS，且**动画都不是同一个**（全局 shimmer、本地各写 pulse） |
+| `lib/table.ts` | `Col` / `PagerView` 类型（放 lib 是因为视图也要用它声明列） |
+
+DataTable **刻意不收**空态与错误态：它们的文案每一页都不同（"这个库还是空的" vs "没有匹配的文档"），塞进来只会变成一堆 props 分支。调用方继续用 `<StateBlock>`。
+
+迁移视图：KbList（页头 + `.l-cards` + 骨架）、KbDocs（页头 + 工具条 + 表格）、KbChunks（同上）。
+
+### 18.2 守卫：扫描范围跟着代码走
+
+控件与表格搬进 `ui/` 之后，`test_views_use_native_controls`、`test_labels_are_bound_to_controls`、`test_tables_have_action_column_header` 三条**只扫 `views/`** 就静默失效了——把控件移出 views 就能绕过检查，那是漏洞不是解法（本文 §2 早就写过这句）。新增 `markup_files()`：views/ + ui/（含 primitives）。
+
+**扩范围当天就抓到三个真实缺口**：`UploadPanel` 的标题、正文、网页地址三个控件**只有 placeholder**（`placeholder` 不算可访问名，输入后即消失）。其中正文与地址是"一直都存在，只是没人扫到"的那类。
+
+### 18.3 两条守卫改写（又是因为钉了实现位置）
+
+| 守卫 | 处置 |
+|---|---|
+| `test_pagination_block_is_shared_and_really_appends` | 分页块现在由 DataTable 内置，视图不再出现 `<ListMore`。改成"要么用共享组件、要么把 `pager` + `onmore` 交给 DataTable"，并**追加**对 DataTable 内部的断言（`<ListMore`、`loaded={pager.loaded}`、`pager?.more`）——不变量没有变弱，只是换了实现点 |
+| `test_doc_viewer.py::test_pagination_uses_api_total_not_item_count` | 同上：KbDocs 不再写 `pager.more`，补查 DataTable |
+| `test_empty_state_cannot_swallow_the_filter_bar` | 锚点从 `class="chunkfilter"` 换成 `<Toolbar`（过滤框现在由原语渲染） |
+
+### 18.4 变异验证 5 例：先有两例是**我自己写错的变异**
+
+1. 把 `<Toolbar` 改成 `<ToolbarX`——新串里仍然包含 `<Toolbar`，断言照样命中，变异等于没做。
+2. 把"再写一份分页块"写进 CSS 注释——`strip_code_comments` 把它剥掉了。
+
+两例都修成真变异后（`<XToolbar`、模板里真的插入 `class="listmore"`）逐个判红。这也说明**文本型守卫必须验证它会失败**，否则它可能只是永远为真（本文件第三次记这一条）。另外三例（DataTable 不再用共享分页块、已加载数不走 pager、ui/ 里控件丢 aria-label）一次判红。
+
+### 18.5 浏览器实测（隔离实例 8135，数据在 `/tmp`，已销毁）
+
+本机 embedding 不可达，所以这一轮用 **Playwright 的网络层注入**（拦截 `/api/documents` `/api/chunks` `/api/jobs` 与库详情，返回合成数据）——不需要真实向量化，也不碰 `data/` 与任何 key。18 项全绿：
+
+| 检查 | 结果 |
+|---|---|
+| 库列表 PageHeader + 标题 17px + `.l-cards` | ✔ |
+| 文档表格 3 行 / 表头 8 列（含选择列与操作列） | ✔ |
+| 操作列表头有 `sr-only` 文本 | ✔ |
+| 全选选中 3 行 → 批量条出现 → 取消全选归零 | ✔ |
+| 分页块显隐与口径：不足一页不显示；`已显示 3 / 10 篇 再加载 7 篇` | ✔ |
+| 分块表格 2 行、`is-disabled` / `is-edited` 行类生效、无选择列 | ✔ |
+| console 无非预期错误 | ✔ |
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **564 passed**。
+
+**仍未做**：Jobs 与 KeysPanel 的表格还没收编（S4）；有真实 embedding 时的"轮询期间焦点不丢"这一条本轮没复测（注入数据是静态的，没有轮询）。
+
+**下一步（S3）**：DocView 与 Search 的双栏在原语上统一——`DocView` 的分块表接 `DataTable`（它是定高 windowing，要连 `virtual.ts` 一起量）、`Search` 的命中列表与参数区走同一套 `Toolbar`/`Section`。
+
+---
+
+## 19. 阶段 11（共享多选 + DocView 迁移，S3a）完成记录（2026-10-06）
+
+### 19.1 共享多选：状态与半选态各一份
+
+`lib/selection.svelte.ts` 的 `Picks`（SvelteSet + `all/some/count` 三档口径 + `setAll/toggle/clear`），`lib/actions.ts` 的 `indeterminate` action。
+
+起因是 S2 只收了一半：`DataTable` 收了多选逻辑，但 `DocView` 那张表是**定高窗口化渲染**的（`ROW_H=34` + 上下占位行），套不进全量渲染的表格原语——于是两份又变回两份。渲染方式没法统一，**状态语义必须统一**，这就是 `Picks` 存在的理由。
+
+`indeterminate` 收进 actions 是因为：HTML 里没有这个属性，只能脚本设置，所以每个"全选"处都会自己长出一个 `bind:this` + `$effect`。`lib/actions.ts` 本来就是"浏览器副作用的唯一落脚点"，这层归属是顺理成章的。
+
+### 19.2 DocView 迁移
+
+页头（含可点的方案徽标与任务状态）→ `PageHeader`；为此给 `PageHeader` 加了 `meta` snippet 槽——那两个东西一个是按钮、一个是 `role="status"`，用字符串 prop 传不进去，硬塞就会变成一堆 props 分支。
+
+骨架屏 → `SkeletonRows`；`.chunkbar` → `Toolbar`（批量按钮走 children 槽，"新增分块"用布局层的 `.l-end` 推到行尾）。
+
+### 19.3 一处刻意偏离
+
+**DocView 的分块表没有接 `DataTable`**。它是 windowing 渲染：`virtual.ts` 的 `windowOf()` 以"每行恰好 34px"为前提算区间，而 `DataTable` 是全量 `{#each}`。换过去等于把 520 块全渲成 `<tr>`，正是当初做窗口化要避免的事。结论：表格**容器**可以有两种渲染方式，多选**语义**只能有一种——所以抽状态，不强行统一渲染。
+
+### 19.4 新守卫与变异
+
+新增 `test_row_selection_lives_in_one_place`：禁 `selAllBox` / `toggleAll` / `.indeterminate =`，禁视图自己 `new SvelteSet`，并要求 `Picks` 的五个方法与 `indeterminate` action 存在、且两处渲染都用上 `use:indeterminate`。
+
+**五例变异里又有两例是"锚点过松"**：
+
+1. 查 `some(` —— 文件里另一处 `keys.some((k) => …)` 照样命中，把方法改成 `someX` 也绿；
+2. 查 `export function indeterminate` —— `indeterminateX` 是它的**超串**，改名也绿。
+
+改成带完整签名的锚点后逐个判红。这是本仓库第 N 次栽在子串匹配上，规律已经很清楚：**断言里凡是"某个名字出现过"，都要问一句"它的超串或别处用法会不会蒙过去"**。
+
+### 19.5 实测（隔离实例 8136，数据在 `/tmp`，已销毁）
+
+网络层注入文档/分块/方案（embedding 不可达，不碰 `data/` 与任何 key）。11 项全绿：
+
+| 检查 | 结果 |
+|---|---|
+| 页头标题、方案徽标落在 meta 槽 | ✔ |
+| 双栏 SplitView 两栏、工具条用 Toolbar | ✔ |
+| 分块表 3 行（窗口化渲染正常） | ✔ |
+| 未选中时批量按钮禁用 → 全选 3 行后解禁 | ✔ |
+| **半选态**：取消一行后表头 `indeterminate === true` | ✔ |
+| 过滤后只剩 1 行 | ✔ |
+| console 无非预期错误 | ✔ |
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **565 passed**（前端守卫 38 条，新增 1 条）。
+
+**下一步（S3b）**：`Search` —— 参数区与命中列表走 `Section`/`Toolbar` 原语，命中卡片的"在文档中打开"深链保持；`.qbar` 因为是焦点守卫白名单里的选择器（`test_focus_outline_not_removed`），要连白名单一起处理，不能悄悄改名。
+
+---
+
+## 20. 阶段 12（Search 迁移，S3b）完成记录（2026-10-06）
+
+### 20.1 做了什么
+
+页头 → `PageHeader`；骨架屏 → `SkeletonRows`（结果卡比表格行高，给 76px）。就这两处。
+
+### 20.2 三处刻意不做
+
+1. **`.qbar` 不动**。它是 `test_focus_outline_not_removed` 白名单里的选择器（该守卫要求白名单里的选择器必须真的还在源码里），改了得连白名单一起改——可以改，但不是一个"顺手"的事，且它的视觉已经在顶栏化之后重新排过版。
+2. **参数面板不抽象**。12 个参数控件各自有不同的选项集与文案，而它们共同的价值在**暂存契约**（`draft` / `dirty` / `commit`）而不是外观。抽一个 `ParamField` 只能省几行标签，却会把"改参数不重跑"这条契约埋进组件里——收益低、风险高。
+3. **`.searchsplit` 不并入 `SplitView`**。它俩对高度的要求不同：DocView 的双栏靠 `App` 的 `is-full` 把剩余高度沿 flex 链交下来，两栏各自滚；Search 的结果流是**整页滚动**的。要统一就得让 App 按路由决定"这一页要不要接管高度"，那是壳层的事，归 S4。
+
+### 20.3 实测（隔离实例 8137，数据在 `/tmp`，已销毁）
+
+11 项全绿。最有价值的一组是**参数暂存契约的端到端复验**（用网络请求计数，而不是看界面）：
+
+| 动作 | `POST /api/search` 次数 | 界面 |
+|---|---|---|
+| 打开 `#/search?q=猫` | 1 | 2 张结果卡，各带 `?chunk=` 深链 |
+| 把「返回条数」改成 20 | **+0** | 出现横幅「已修改 1 项参数（返回条数），下面的结果还是上一次检索的」 |
+| 点「应用并重查」 | **+1** | URL 变成 `…&top_k=20` |
+
+即"改参数既不偷偷重跑、也不偷偷不跑，而是把不一致摊开并给出口"——这条契约现在有机器可查的证据。
+
+**一个测量教训**：Playwright 的 `fill()` 只保证派发 `input` 事件，而这些控件监听的是 `onchange`。第一版脚本因此横幅不出现，差点被读成"暂存契约坏了"；补一句 `dispatch_event("change")` 才是真实用户行为。判断"功能没生效"之前先确认事件有没有送到。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **565 passed**。
+
+**下一步（S4）**：Jobs / Settings / 库设置 / ApiDoc 四个视图迁移，并把 Jobs 与 KeysPanel 的表格收编进 `DataTable`（第 5、6 张表）；顺带处理"哪些路由需要 `is-full` 高度链"这个壳层问题（Search 与 DocView 的高度策略要在一处说清）。
+
+---
+
+## 21. 阶段 13（S4a：Jobs / KeysPanel / 高度链）完成记录（2026-10-06）
+
+### 21.1 `Tabs` 原语
+
+Jobs 的任务筛选（`<button>`）与设置页的子页（`<a href>`）是两份外观相似、语义分裂的标签条——一份能中键新开、一份不能。`primitives/Tabs.svelte` 按"有没有 href"决定渲染成哪种：**能跳走的必须是链接，只是切换视图的才是按钮**。当前项用边框下沿 + `--accent` 表达，不用背景块——背景块会和顶栏分段控件撞成两个同级控件，读不出"这是页面内的第二层"。
+
+### 21.2 Jobs（第 5 张表）与 KeysPanel（第 6 张表）收编
+
+Jobs 迁到 `PageHeader` + `Tabs` + `DataTable` + `SkeletonRows`，8 列全量渲染（无多选）；筛选后的 `shown` 是权威列表，分页块随 `pager` 交给 DataTable。KeysPanel 的密钥表原先是"只有 `.table-scroll`、没有 `.table-wrap`"的**第三种容器组合**——横向滚动与阴影边界和别处都不一样，收编后消失。三个面板同时迁到新原语 `Section`。
+
+### 21.3 高度链在一处说清
+
+`lib/nav.ts` 新增 `FULL_HEIGHT_ROUTES`（目前只有 `doc`）：哪些路由"外层不滚、把剩余高度交给内容"只有这一份声明。此前它散在 App 的模板里，加一个双栏页就要记得在壳层再补一次，漏一次的表现是"两栏都滚、外层也滚"。守卫 `test_full_height_routes_declared_once` 钉两件事：App 必须用共享表、模板里不得再出现 `class:is-full={route.name`。**变异 2 例判红**（散回模板、共享表被删）——其中一例特意验证了超串陷阱：把常量改名成 `FULL_HEIGHT_ROUTES_X` 是守不住的，`X` 版本仍包含原名。
+
+### 21.4 svelte-check 抓到一个 snippet 作用域的窄化失效
+
+`KeysPanel` 里 `{#if list && list.items.length > 0}` 之内、snippet 之外读 `list.items` 会被判"可能为 null"——**snippet 是独立作用域，外层的类型窄化传不进去**。用 `{@const keys = list.items}` 在 if 块内绑定一次解决。这是运行时毫无问题的纯类型问题，svelte-check 在这一类上仍然值得依赖。
+
+### 21.5 实测（隔离实例 8138，数据在 `/tmp`，已销毁）
+
+13 项全绿：Jobs 页头/4 项筛选标签（确认是按钮而非链接）/2 行表格/8 列表头/停止按钮/切筛选后行数变化往返；密钥页 3 个 Section 面板、2 行密钥表、7 列表头、只有有效密钥有吊销按钮；console 无非预期错误。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 pytest **566 passed**（前端守卫 39 条，新增 1 条）。
+
+**剩余（S4b）**：Settings 的 5 个面板与路由 tabs、KbSettings 的 4 个面板、ApiDoc；`Settings` 的 tabs 改用 `Tabs` 原语后要确认守卫（dock 设置子项清单那条已改成扫描 `#/settings/` 字面量）不红。
+
+---
+
+## 22. 阶段 14（S4b：Settings / 库设置 / ApiDoc）完成记录（2026-10-06）
+
+### 22.1 迁移明细
+
+| 视图 | 迁移内容 |
+|---|---|
+| `KbSettings` | 页头 + 4 个面板（基本信息/分块方案/内容概览/危险操作）→ `Section`，骨架 → `SkeletonRows` |
+| `Settings` | 页头 + 路由 tabs → `Tabs` 原语（href 型），骨架 → `SkeletonRows`；**5 个面板未迁**（见 22.3） |
+| `ApiDoc` | 页头 → `PageHeader`（它没有骨架与错误态） |
+
+`Section` 补了两个能力：`danger` 变体（危险操作区的警示边）与 `desc` 双形态——纯文本直接给字符串，带 `<code>`/链接的（密钥面板）走 `descSlot` snippet。**不要**为了统一把富文本说明塞进字符串再 `{@html}` 渲染，那是本仓明确禁掉的口子。
+
+### 22.2 两个反复出现的坑，这次都有实测记录
+
+1. **snippet 是独立作用域，外层的类型窄化传不进去**。`KbSettings` 的 `{:else if kb && plan}` 之内、snippet 之外读 `kb`/`plan` 没问题，进了 snippet 就报"possibly null"（svelte-check 报了 9 处）。`{@const kbx = kb}` 在分支内提取一次非空引用解决。`KeysPanel` 在 S4a 已经撞过一次——**这是第二次**，以后凡是在 snippet 里读"外层 if 窄化过的可空值"，直接先 `{@const}`。
+2. **守卫的豁免边界要跟着架构走**。`test_settings_subpages_have_one_entry_list` 原本扫"任何文件出现 ≥2 个 `#/settings/` 字面量"；`Settings` 的 tabs 迁到 `Tabs` 原语后，href 成了字面量数组——它自己就是清单本体，守卫改为**豁免 `Settings.svelte`、禁其余文件**。豁免一个文件不是放松守卫，是把"清单可以在哪"这件事写进机器可查的形态。
+
+### 22.3 刻意未做
+
+`Settings` 的 5 个面板（模型卡片、本机凭据等）**没有**迁到 `Section`。它们是本次重写里唯一还留着 `.panel` 手写结构的视图。理由：那五个面板的 head/body/foot 结构各不相同（有的没有 head、foot 里混着统计行），迁移是纯机械工作但触碰面大，而它们的行为（脏值跟踪、测试按钮、健康检查）在阶段 6 刚验证过。留作独立的一小步，不与任何行为改动混在一起。
+
+### 22.4 验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **566 passed**。九个视图的迁移至此全部完成（KbList / KbDocs / KbChunks / DocView / Search / Jobs / Settings / KbSettings / ApiDoc），表格原语收编 6 张表中的 5 张（DocView 的窗口化表格刻意保留）。
+
+**剩余（S5）**：清理 `app.css` 里被原语取代的段落（`.page-head`、`table.docs` 之外的表格手写样式）、`--amber` 过渡别名退役、DESIGN.md §11 的视图表同步。
+
+---
+
+## 23. 阶段 15（S5 收尾：别名退役）完成记录（2026-10-07）
+
+### 23.1 `--amber` 退役
+
+全仓 grep 归零。app.css 36 处、组件 13 处（AnswerPanel 9、Jobs 2、KbDocs 2）、tokens.css 别名块 4 行、main.ts 注释 1 处。
+
+替换不是机械映射——**13 处里挑出了 7 处命中语义改用 `--hit`**：
+
+| 位置 | 语义 | 用哪个 |
+|---|---|---|
+| `.ctx.is-hit` / `.fulltext mark`（检索上下文与整篇高亮） | 命中 | `--hit` / `--hit-soft` |
+| `AnswerPanel` 的 `[n]` 引用角标、角标序号、引用正文左条、引用内 `<mark>` | 命中 | `--hit` / `--hit-soft`（hover 用 `--hit-fg`） |
+| 流式光标、`.cite.active` 激活卡、进度条、批量条、链接 hover、开关、按钮、dropzone | 主操作/活动 | `--accent*` |
+
+这正是 S0 拆 `--accent/--hit` 的初衷兑现：**"被匹配到的内容"不能和"可以点的东西"同色**。等价映射（全 → accent）只改了其余 6 处观感为零的部分；命中那 7 处是观感变化，但方向就是当初拆分时定下的。
+
+app.css 的深浅两套 `--amber` 定义块一并删除；tokens.css 保留 `--green/--yellow/--red/--shadow-pop` 别名（组件仍按旧名引用状态色），并注明"等 app.css 退役时一起删"。
+
+### 23.2 新守卫与一次"变异落在注释里"
+
+新增 `test_legacy_amber_aliases_stay_retired`：CSS（剥注释后）与全部 svelte/ts 里不得出现 `--amber`。**第一次变异仍然绿**——我把 `--amber` 加在了 `/* 8. 知识库卡片 */` 的注释里，被 `strip_css_comments` 剥掉了，变异等于没做；改成写进规则体（`.kbcard { color: var(--amber); }`）后判红。本仓库已经第三次踩"变异必须落在守卫真正扫的位置"。
+
+### 23.3 顺带清理
+
+`.kbcards` 网格（KbList 已改用 layout.css 的 `.l-cards`）从 app.css 删除，含 640px 媒体查询里的那处——顺带把该查询里的引用改成 `.l-cards`，否则窄屏单列会失效。
+
+### 23.4 验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **566 passed**（前端守卫 40 条，新增 1 条）。DESIGN.md §11.1 补"原语组件与样式层"一段，视图表现实与代码一致。
+
+### 23.5 重写至此的整体状态
+
+- 壳层：顶栏（主导航行 + 面包屑次级条）+ 单列内容区 + 页内上下文栏（知识库/检索两处）
+- 原语：6 个组件吃掉了 6 张表中的 5 张、全部页头/骨架/工具条/标签条，多选与半选各一份
+- 令牌：oklch 语义层（accent/hit 分离、elev 刻度、ring、border-control 达 WCAG 3:1）
+- 守卫：40 条，每条新守卫都做过变异验证；历史上"存在性断言"与"注释误伤"两类坑各有多次实测记录
+
+**明确遗留**（都有记录，不是隐藏债）：`Settings` 五个面板未迁 `Section`；`app.css` 仍有组件样式待随未来的重构逐块退役；**配色层级与浅色主题至今没有像素级复核**——本轮所有验证都是 DOM/几何/网络层面的，观感需要一次真机目视。
+
+---
+
+## 24. 阶段 16（遗留清零）完成记录（2026-10-07）
+
+### 24.1 Settings 五个面板迁 `Section`
+
+`Section` 又扩了两个能力：`children` 可选（"保存"面板只有 head+foot，硬塞空 body 会多一条空白带）、`titleSlot`（健康页标题内嵌"正常/需关注"徽标）。加上此前的 `descSlot` 与 `danger`，五种真实形态都有了去处，没有用 props 分支硬凑。
+
+**snippet 窄化的坑第 3、4 次撞上，且多了一层**：`models` 与 `health` 两个分支的 snippet 都读外层 `if` 窄化过的可空值，`{@const}` 提取解决——但第一版把 `{@const m = models}` 插在**分支末尾**，而 `Section` 在它**之前**渲染：类型检查全绿，运行时却是 TDZ（"Cannot access before initialization"）。`{@const}` 必须放在分支**开头**。svelte-check 对这类时序错误依旧无声。
+
+### 24.2 app.css 孤儿类扫描
+
+157 个类中扫出 10 个"孤儿"，人工甄别后**只有 3 个是真死代码**（`.crumbbar-actions`、`.chunkfilter`、`.state-error`），已删。其余 7 个是文本扫描的两类误报，恰好各占一半：
+
+- `skip-link` / `sprite` 定义在 app.css、使用在 **index.html**（静态骨架）；
+- `verb-get/patch/post/put/delete` 是 ApiDoc 里 **`class="verb verb-{method}"` 动态拼接**，源码里永远 grep 不到完整类名。
+
+给未来做同类清理的人：孤儿扫描必须把 `index.html` 计入使用方，且动态类名要按前缀甄别，否则删的就是活代码。
+
+### 24.3 像素级复核（12 张深浅截图）
+
+环境里恰好有 Chromium + playwright，把"真机目视"做成了可重复的截图流程：隔离实例 + 网络层注入数据，深浅两套主题 × 6 个页面。**观感结论**：顶栏毛玻璃与分段控件、无边框卡片的 elev 层级、表格密度、命中高亮与主操作的颜色分离（黄 vs 蓝）——深浅两套都成立，S0 担心的"浅色散架"没有发生。
+
+**截图本身踩了四个坑**，每一个都会让人把工具问题误判成产品 bug：
+
+1. `add_init_script` 在同一 page 上**累积**且后注册的先执行——两个主题的注入互相覆盖，light 全截成了 dark。每个主题要开新 page；
+2. Playwright 的 **route 是 page 级的**——新建 page 后数据注入全部丢失，页面打的是真后端（Ollama 不可达 → 检索页永远失败态）；
+3. `full_page` 截图 + `backdrop-filter` 在 Chromium 下有绘制伪影，顶栏下方会多出黑色色块——**视口截图完全正常**，对照实验（禁用 blur 后整页重截）确认是截图工具的问题，不是产品问题；
+4. **改了源码没重新构建就跑诊断**——`recent` 修复后的三次诊断全跑在旧产物上，得出"修复无效"的假结论。DESIGN §11.3 记过三次的坑，第 N 次应验。
+
+### 24.4 复核抓出并修掉一个真实缺陷
+
+深链直接进检索页时，上下文栏的「回到上次检索」**永远不出现**。根因：`lastSearch()` 读 sessionStorage，而 sessionStorage 不是响应式依赖——`rememberSearch` 在 effect 里才写入，那时 `route.name` 早已定下，依赖它的 derived 不会重算。此前从"检索页跳走再回来"的场景会掩盖它（`route.name` 变了会重算），所以潜伏至今。
+
+修法是把会话内最近检索升级为 `router.svelte.ts` 里的 `$state`（`rememberSearch` 写内存 + storage，`lastSearch()` 优先读内存、刷新后回退读 storage），rail 的 derived 恢复纯函数形态。三种到达路径实测：深链 ✔ / 刷新 ✔ / 站内往返 ✔。
+
+### 24.5 最终验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **567 passed**（前端守卫 40 条）。
+
+**重写全部完成**：S0 令牌与布局层 → S1 顶栏外壳 → S2 原语组件 → S3 共享多选 + DocView/Search → S4 四视图收尾 → S5 别名退役 → 遗留清零。九个视图、6 张表中的 5 张、40 条守卫、12 张深浅截图复核。
+
+---
+
+## 25. 阶段 17（交互直觉优化）完成记录（2026-10-07）
+
+用户反馈"操作逻辑不符合直觉、很凌乱"。方法：5 张页面截图 + 代码证据的可用性审查，产出 11 个具体问题分四类（A 信息冗余 / B 操作重量失衡 / C 编辑与保存分离 / D 职责与概念），用户确认痛点为 A+B+D，范围三级全做。
+
+### 25.1 改动明细
+
+| 类 | 改动 |
+|---|---|
+| A1 | 工作区标签条**去掉库名**——库名已在面包屑与页头标题出现，一屏三次的信息只会更乱 |
+| A2 | 库总览（`#/`）**不渲染上下文栏**——右侧卡片网格本身就是库列表，左边再放一棵树是同一屏两份清单。rail 的出现范围收窄为 `route.name === "kb" \|\| "search"` |
+| A3 | 顶栏队列 chip **只在有活跃任务时出现**——空闲时它只是一枚与分段导航重复的"任务" |
+| B4 | 文档行操作 **6 图标 → 2 内联 + ⋯ 菜单**：内联「打开文档」「删除」，覆盖方案/重命名/重读原文/重新切分进 `RowMenu` |
+| B5 | 文档详情页头 **6 按钮 → 1 + ⋯ 菜单**：页内最高频的动作在右栏，页头只留「重新切分」（改完方案后最常用），重命名/移动/方案/重读原文/删除进菜单 |
+| B6 | "分块方案"三入口随菜单化收敛为两处（库设置面板 + 菜单项），且名称统一 |
+| C7 | 模型设置**保存吸底条常显**——三张编辑卡片与保存曾在同屏两端，改完字段往下滚找保存是最常见的迷路；未脏时按钮禁用，脏时"有未保存的改动"出现在按钮旁 |
+| D8 | 任务页头只留"刷新"；**自动刷新开关移到筛选行尾**（与"它影响这张表的刷新节奏"空间对应）；删除与顶栏 chip 重复的队列统计 |
+| D9 | 检索参数**默认收起**为一张"检索参数"卡（常用 + 高级同一张），summary 上带未应用计数；第一屏留给"输入 → 检索 → 结果"主路径。阶段 5 的暂存契约不受影响 |
+| D10 | "重新解析"改名**"重读原文（换引擎）"**——它与"重新切分"并排时用户分不清谁是谁 |
+
+### 25.2 新原语 `RowMenu`
+
+- **fixed 定位**而非 absolute：宿主在 `.table-scroll`（overflow-x: auto）里，absolute 弹层会被滚动容器裁掉；fixed 以视口为参照，打开时读一次触发按钮位置，**滚动即收起**（错位比消失更糟）。
+- **不用 `role="menu"`**：它附带一整套键盘契约（方向键移动、输入即检索），维护不起；"点击展开的动作列表"用原生按钮组 + `aria-haspopup/aria-expanded` 反而诚实。菜单项是调用方 snippet 渲染的原生 `<button>/<a>`，外观由原语 `.menu :global(button)` 统一。
+- 新图标 `i-more`（三点）：精灵与 `icons.ts` 两处同步（本仓规矩）。
+
+### 25.3 截图复核补充的两条工具教训
+
+1. 复核脚本**漏注册一个 route**（`/api/search`），页面打了真后端（embedding 不可达 → 503），截图上表现为几条无法解释的灰块——追了一个循环才发现是脚本自己少给数据。**截图上出现"无法解释的元素"时，先核对注入清单**。
+2. 上轮已记过的"改了源码没重建"在第 N 次应验：诊断跑在旧产物上得出"修复无效"的假结论。判断改动没生效之前，先核对页面实际加载的产物。
+
+### 25.4 验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **567 passed**。截图复核（浅色）：总览页无 rail、工作区行内 2 按钮 + 打开的菜单、检索第一屏只剩查询框与收起的参数行、任务页头只剩刷新、rail 的「回到上次检索」在深链首屏出现。
+
+---
+
+## 26. 阶段 18（取消侧边栏）完成记录（2026-10-07）
+
+用户指令：知识库页面的侧边栏取消，按合理操作逻辑深度修改交互。
+
+### 26.1 上下文栏的终章
+
+上下文栏至此经历三代：常驻导航 dock（阶段 1）→ 页内上下文栏 rail（阶段 9）→ **彻底删除**（本阶段）。三代都在回答"用户在这一栏要做什么"，而答案始终不成立：总览页它和卡片网格重复、工作区页它和文档列表重复（树里的文档展开与权威列表是两份状态）、检索页只剩一条捷径——一条捷径不值得常驻一栏。
+
+删除的东西：`ui/ContextRail.svelte`、`ui/ObjectTree.svelte`（库树只被 rail 使用）、`lib/rail.svelte.ts`、`styles/rail.css`、`--rail-w` 令牌。留下的：检索页查询区下方一条「回到上次检索」（`lastSearch()` 的 `$state` 化在阶段 16 已就位，内化后依然响应式）。
+
+**切库怎么办**：顶栏"知识库"→ 总览页选库；当前库由面包屑承担。单机单用户场景下，"在文档页中途切到另一个库"不是主路径——为它常驻一栏是本末倒置。
+
+### 26.2 顺带的纵深修改
+
+- **KbDocs 的 statline 并入页头动作行**：`0 文档 · 0 分块 · 更新于 …` 变成一行小字，页面纵向从四段（页头/统计/工具条/表头）减为两段。"分块方案"徽标从统计行移除——库设置面板与文档行内方案列都有它，第三处只是重复。
+- 工作区表格恢复**全宽**：删除 rail 后不再有 240px 的让位，5 列数据的呼吸感明显改善。
+
+### 26.3 守卫：对象消失时，不变量换形态保留
+
+rail 的两条守卫（折叠可自救、只持久化宽度）**随对象一起删除**，但它们守护的东西换了形态继续存在——新增 `test_shell_is_single_column`：壳层不得再出现 `with-rail` / `ContextRail` / `rail-toggle`，样式层不得残留 `.with-rail` / `#rail`；`--rail-w` 进死令牌清单（`test_dead_shell_tokens_stay_removed`，清单注释更新为三代）。变异验证：壳层加回 `with-rail` 判红。前端守卫 40 → 39 条。
+
+### 26.4 验证
+
+`svelte-check` 0/0、`npm run build` 通过、全量 pytest **566 passed**。截图复核：工作区全宽表格、标签条只剩三个视图名、页头统计并入动作行。
+
+---
+
+## 27. 阶段 19（检索页重设计）完成记录（2026-10-07）
+
+用户反馈检索页"不美观、不好用、设计有问题"。审查（截图+DOM）确认四个问题：
+页头占据第一屏、RRF 分数裸奔（0.8100 无意义且吓人）、结果条一行塞五件事
+（含开发者向的"分数口径 RRF"）、自动选中第一条后 reveal 把整页滚到检视器
+高亮处——搜索框直接滚出视口。
+ + overflow-y auto；滚动修复见下。
+
+### 滚动修复（reveal）
+
+根因：scrollIntoView 滚动所有可滚祖先——检视器滚到高亮时整页一起被
+滚走，搜索框出视口。reveal 重写为只滚最近的可滚祖先（getBoundingClientRect
+差值 + scroll-margin-top 保留），ApiDoc/DocView 行为不变。
+
+### 守卫与验证
+
+三条守卫随展示形态改写（评分展示移除→钉降级可见；结果条不再显示范围→
+禁令"元信息不得读暂存值"；Search 双栏进 PENDING_GRID_COLS）。全量
+566 passed，svelte-check 0/0。截图（视口）确认：查询条常驻、popover
+覆盖展开、卡片无分数、检视器 sticky。
+），无需折叠）、锚点跳转（点击即选中，jump/flash/reveal 链路整体退役）。
+守卫改写：过滤与 URL 同源断言随新形态更新；首组展开守卫随对象删除。
+验证：svelte-check 0/0、全量 566 passed。
+
+### API 页 bug 修复（同日追加）
+
+用户报告"极大页面 bug"。截图 + DOM 实测抓到三处：
+
+1. **高度链断裂（内容不可达）**：`main.is-full` 是 `overflow: hidden`，但中间层
+   `.route-col` 没有任何规则——content-wrap 受约束(799px)，route-col 由内容决定
+   (1711px)，下游全部溢出且无滚动容器：**错误约定表与示例后半段永远看不到，
+   页面也不能滚**。S1 引入 route-col 时就断了，此前所有实测都没测"底部可达"。
+   修复：`.main.is-full .route-col { flex:1; min-height:0; display:flex; flex-direction:column }`。
+   新增守卫 `test_full_height_chain_has_no_gap`（钉链上每层都有 flex:1 + min-height:0），
+   变异（删规则）判红。这个修复同时救回 DocView 同样存在的不可达问题。
+2. **概览 kv-grid 崩坏**：app.css 的 4 列 `auto-fit 250px` 布局在 ≈560px 的详情栏里
+   挤成两行、长值折行破碎。改为窄栏纵向卡片（键小字在上、值左对齐在下），
+   并覆盖 app.css 遗留的 `text-align: end` 与下边框。
+3. **列表项多余圆点**：`.apinav ul` 没清 `list-style`，每个端点前多一个 disc。
+
+验证：`npm run build` 通过、全量 **566 passed**。DOM 实测：route-col 799/799、
+两栏 pane-body 各自可滚（1662/750、1072/738）、右栏滚到底可见完整错误约定表。
+
+## 28. API 页按参考稿重设计（2026-10-08）
+
+用户给出参考截图（Readme·Mintlify 类文档站）：三栏（导航 / 正文 / 示例卡片）、
+请求行卡片（方法 + 路径 + 一键操作）、**参数逐项列表而非表格**、右栏 curl 与响应卡片。
+按此重写 `views/ApiDoc.svelte`：
+
+| 区域 | 改动 |
+|---|---|
+| 布局 | 弃用 `SplitView` 双栏（详情栏仅 ≈560px），改三栏 224 / 1fr / 336，列宽定义在 `layout.css` 的 `.l-apidoc`（守卫要求：视图不得声明列宽） |
+| 左栏 | 导航项从"只显示路径"改为 `METHOD 徽标 + 接口名`（title 保留完整路径；过滤仍同时匹配两者） |
+| 中栏 | 面包屑 + 大标题（剥尾句号）+ 胶囊「复制 curl」+ **请求行卡**（方法 + 路径 + 实心「复制路径」）；参数按位置分组（路径/查询/表单/请求体）成**逐项列表**，必填为红徽标；响应字段同形态 |
+| 右栏 | sticky 卡片：curl / 请求体 / `200 响应示例`（绿徽标）；概览态给 Base URL 与「快速开始」 |
+| 窄屏 | <1180 单列，正文优先（main → nav → side）；三个区块 `flex: none`——否则 flex 默认 shrink 会把它们压成薄片（实测导航只剩 68px）；导航限高 46vh 且内部滚 |
+
+两处按守卫/架构调整而非照抄参考稿：
+
+1. **「Try it」不做**：本项目没有请求执行沙箱，且原计划明确否决过交互式调试面。
+   对应位置放「复制路径」，标题旁放「复制 curl」——都是复制语义，不伪装能力。
+2. `quickEp` 用 `path.endsWith("/kbs")` 定位而不是完整字面量——完整路径会踩
+   `test_frontend_uses_a_single_api_prefix`（前端字面量只许写 /api）。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **566 passed**。
+浏览器实测（隔离实例 8156，浅色/深色/窄屏三态）：三栏几何正确、参数列表渲染、
+右栏卡片与徽标正常、窄屏单列且外层单滚动（scrollHeight 1823 / clientHeight 799）、
+导航限高 414px 生效。
+
+## 29. API 页深度优化（滚动条 / 搜索框 / 卡片精修，2026-10-08）
+
+用户反馈：两侧滚动条要默认隐藏；顶部搜索框与整体布局再深化。
+
+| 项 | 做法 |
+|---|---|
+| **滚动条** | 两侧栏与代码卡：thumb **透明但保留槽位**、悬停浮现。不用 `display:none`——那会让滚动条出现/隐去时推挤内容，hover 时跳一下。WebKit 用 `::-webkit-scrollbar-thumb`（2px 透明边 + `background-clip: padding-box` 得 4px 细圆条），Firefox 用 `scrollbar-width/scrollbar-color`。注意 `background` 简写会重置 `background-clip`，hover 规则里必须重申 |
+| **搜索框** | 加放大镜（聚焦时随 accent 亮起）、30px 窄栏密度、默认不画边框用 `--surface-2` 底、hover 到 `--surface-3`（它是临时态档）、聚焦浮出底色与 `--accent-line` 边线（可见焦点环由全局规则保留，未动 outline）；占位文案改「搜索接口…」 |
+| **命中计数** | 只在过滤时显示（未过滤时 51/51 无信息量）；守卫要求的 `{shownCount} / {total}` 表达式原样保留 |
+| **卡片头** | 去掉 surface-2 灰条，改 `border-bottom: 1px solid var(--hairline)`——与顶栏/表头共用同一种分隔语言：hairline 只做分隔，不做容器 |
+| **代码卡限高** | `max-height: 420px` 自带滚动：长响应示例（整份 Markdown 报告）不再把右栏拉成一条，卡片列表恒定可扫 |
+| **排印** | h1 `text-wrap: balance`、正文 `text-wrap: pretty`（渐进增强） |
+| **导航密度** | 项高 28px、组间距 16px 收紧 |
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **566 passed**。浏览器实测：
+`scrollbar-color` 默认全透明、hover 后变为 `--line-strong`；滚动条不占位（gutter 0）；
+pre 限高 420px 生效；浅色/深色/过滤态三张截图复核。
+
+## 30. API 页滚动归属与搜索动效（参照智谱文档，2026-10-08）
+
+用户要求：搜索框动效优化；**右侧滚动条要移到页面最右侧**；参照 docs.bigmodel.cn。
+
+### 30.1 滚动归属：容器级 → 页面级（核心）
+
+智谱那类文档站是"窗口滚动 + 侧栏 sticky"。我们此前是 `main.is-full`（外层不滚）
++ `.apidoc` 容器内滚——滚动条停在三栏容器右缘，距窗口右还有 main 的 24px padding
+与限宽居中两道偏移。改法：
+
+- `lib/nav.ts`：`FULL_HEIGHT_ROUTES` 移除 `apidoc`（只留 `doc`）。API 页退出
+  is-full，跟随 `main.main` 滚动，**滚动条落在窗口最右缘**（main 是全宽元素）。
+- ApiDoc：`.apidoc` 去掉 `flex/min-height/overflow`（不再自带滚动容器）。
+- `layout.css` 的 `.main` 补一组细滚动条样式（全站统一）：10px 槽、圆底、
+  `--line-strong` 同色、3px 透明边裁出 4px 细条、hover 变 `--text-3`。
+  页面滚动条**不隐藏**——它是"我在哪"的指示器，与两侧栏（hover 才现）不同。
+
+### 30.2 grid item 的 sticky top 陷阱（实测记录）
+
+给 `.ad-nav/.ad-side` 设 `top: var(--u6)` 后，**静止状态下侧栏比中栏低 24px**
+（实测 nav=101 / main=77），与正文错位一整行；滚动时也停在 101。
+grid item 的 sticky 会被 `top` 从静止位置直接下推，而不是只在滚动时生效。
+改成 `top: 0` 后：静止 77=77 对齐、滚动全程稳定在 77（距顶栏 24px，正是
+main padding 给出的呼吸），正文正常滚过——sticky 行为完全符合预期。
+
+采样（视口 1440×500，scrollTop 0/100/200/248）：nav 恒 77、ad-main 77→-171。
+
+### 30.3 搜索框动效
+
+全部是低成本过渡（颜色/阴影/透明度），**刻意不做位移**——搜索框常驻，
+动位置会让旁边 51 项导航跟着抖：
+
+- 聚焦：底色浮起 + `--accent-line` 边线 + `0 0 0 3px var(--accent-soft)` 光环
+- 放大镜：聚焦变 accent 并 `scale: 1.12`（scale 用独立属性，不覆盖定位的 translate）
+- placeholder：聚焦时淡到 0.4，让输入内容更突出
+- `prefers-reduced-motion` 下全部归零
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **566 passed**。
+截图复核：滚动中段两侧栏常驻、滚动条细条位于窗口最右、搜索框聚焦光环与
+图标变色生效。
+
+### 30.4 搜索框聚焦态的显示缺陷（2026-10-08 追加）
+
+用户反馈"左上方搜索框点击后有显示问题"。实测（截图放大）复现：聚焦时
+**框的左上缺一角**，且外圈有三层不同 alpha 的蓝叠色。
+
+根因是两条叠加：
+
+1. **裁剪**：`.ad-nav` 是 `overflow: auto` 的滚动容器，而搜索框紧贴它
+   的上沿与左沿（实测 gapTop=0 / gapLeft=0，只有右侧有 8px 余量）。
+   外扩的 `outline`（2px + offset 1px）与 `box-shadow` 光环（3px）
+   在上边与左边被裁掉——缺口就是这么来的。
+2. **叠色**：`outline(--focus)` + `border(--accent-line)` + `box-shadow(--accent-soft)`
+   三层不同色相的半透明蓝叠在一起，观感偏青绿。
+
+修复：焦点视觉**全部内缩**——`outline-offset: -2px`（2px 环画进框内，
+不溢出、不被裁、键盘可达性不变），去掉外发光 box-shadow，保留
+边框变色、底色浮起、图标变色与 placeholder 淡出。守卫不受影响
+（它只禁无等效替代的 `outline: none`，我们反而显式重申了 outline）。
+
+复验：浅色/深色裁剪截图各一张，环完整、无缺口；全量 **566 passed**。
+
+## 31. 版本管理整体退役（2026-10-08）
+
+用户决定：本项目不需要回滚能力，删除版本管理功能。**范围界定**——删「用户可见
+的能力面」，保留「内部成本控制机制」：
+
+| 删除 | 保留 |
+|---|---|
+| `GET /api/versions`、`POST /api/rollback` 端点与 `VersionsOut` / `RollbackOut` / `RollbackReq` | `compact_tables()` 与 `_version_count()`：后台自动回收旧版本（LanceDB 每写一次必留版本，不回收会越用越慢），与展示面无关 |
+| `store.table_versions()` / `store.restore_version()` | `/api/reindex`、`/api/reconcile`：误操作的修复路径（重放/重建） |
+| `stats()` 的 `versions` 字段、`health` 的 `lancedb_versions`（顺带省掉 health 里一次 `list_versions()` 的实测调用） | 容量统计面板（doc/chunk/job 计数、目录占用、磁盘剩余、已建索引） |
+| `DataPanel` 的「版本与回滚」整段（含手输表名确认、对账入口） | 存储 tab 本身，改名「存储」（key `data` 不变，书签不受影响） |
+| `apidoc.ts` 的两条端点条目 + stats/health 的版本字段说明 | — |
+| `test_versions_and_rollback`、`test_data_and_versions_page_is_reachable_and_guarded` | 两条新守卫（见下） |
+
+**新增守卫**（"删掉"与"藏起来"的区别就在于有没有反向断言）：
+
+1. `test_api_new.py::test_version_management_endpoints_are_removed`：路由表里不得
+   出现 `*/versions`、`*/rollback`。
+2. `test_frontend_wiring.py::test_storage_panel_is_reachable_and_version_management_stays_removed`：
+   存储面板可达 + 三态，且全前端（views/ui/lib）不得再出现两个端点的调用、
+   `system.py` 不得再出现两个路由装饰器。
+
+**DESIGN.md 更新**：选型对比表与 LanceDB 能力表的「版本/回滚 → 秒级回滚」承诺
+改为「底层版本仅服务后台 compaction」；架构图、端点表（51→49）、§7 的
+`#/settings/data` 页面描述同步。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **566 passed**（删 2 加 2）。
+运行时实测（TestClient + 浏览器）：两个端点 404/405 且无任何 handler 命中；
+`stats` / `health` 无版本字段；设置 tabs 为「模型/密钥/健康/存储」；存储页
+无回滚残留；API 页端点数 49、搜 "version" 命中 0/49。
+
+## 32. 文档详情页（DocView）bug 修复（2026-10-08）
+
+用户报告"知识库文档显示页面存在 bug"。实测复现（注入 210 块长文档）抓到三类：
+
+### 32.1 行高失配——最后几块永远滚不到（严重）
+
+`windowOf` 的数学以 `ROW_H = 34px` 为前提，但 `table.docs td` 的上下 padding(8px)
+把真实行高撑到 **45px**。后果实测：总滚动高 7046（应 7180）、滚动位置与内容错位、
+**滚到底时最后一块 ordinal 停在 199 且不可见**。
+
+修复不是把常量改对，而是**实测行高**（`let rowH = $state(ROW_H)` + effect 量第一行），
+与 viewportH 同一条教训：尺寸只要由 CSS 决定，JS 就不能写死。CSS 侧同时收紧
+`tbody tr td { padding-block: 0 }` 让视觉密度回到设计的 34px（双保险，但保证
+正确性的是实测值）。修复后：`scrollH 7177≈7180`、滚到底第 209 块可见。
+
+### 32.2 窗口化列表带入场动画——滚动时每行反复播放
+
+`.chunk-row` 上挂着 `in:fly`：滚动时每行被创建/销毁，动画随之反复触发
+（实测滚动后 60ms 行还带着 `translateY(3.67px)` 与 `opacity 0.39`）。
+入场动画只对"新增内容"有意义（DataTable 的追加），对"滚进来的行"没有。
+移除后滚动各行 `transform: none / opacity: 1`。
+
+### 32.3 连带发现
+
+- **过滤计数语义**：客户端过滤却拿 `pager.total`（全库）作分母，"3 / 210" 会让人
+  以为全库只匹配 3 块（实际是没加载到）。改为过滤时 `shown / chunks`（匹配/已加载）。
+- **计数被挤成竖排**：模板换行 + flex 压缩把 pane-head 的计数折成逐字竖排
+  （截图复核抓到）；计数加 `flex:none + nowrap`，提示改为可省略。
+- **Toolbar 在窄容器里被压扁**（原语级）：无 `flex-wrap`，DocView 右栏（≈480px）
+  里输入框缩成一小截、命中提示折两行、批量按钮挤成一团。改 `flex-wrap: wrap` +
+  `.filter { min-width: 160px }` + 提示 `nowrap`——宽容器行为不变，三个调用方同受益。
+
+### 32.4 一条我自己的违规（被守卫当场抓到）
+
+行高测量第一版写了 `scrollEl?.querySelector(".chunk-row")`，被
+`test_dom_side_effects_live_in_one_place` 判红——项目纪律：**视图里不得有 DOM 查询**
+（按类名搜元素会在改名/包一层后静默拿到 null）。改用已有的 `rowEls` 行引用表。
+
+### 32.5 守卫
+
+`test_chunk_table_is_virtualized` 强化：钉"把实测行高传给 windowOf"
+（`windowOf(scrollTop, viewportH, shown.length, rowH)`）与"`<tr class="chunk-row">`
+标签上不得出现 `in:fly`"（只看标签本身，注释不受影响）。两例变异（回退三参调用、
+回加 in:fly）逐个判红，每例 try/finally 还原并校验 sha256。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **566 passed**。
+浏览器实测：计数（200/210 → 再加载 → 210/210）、滚到底 209 可见、
+滚动无动画、工具栏折行整齐、过滤计数口径正确。
+
+## 33. PDF 原文"只显示一半"修复（2026-10-08）
+
+用户截图：文档详情的左栏 PDF 只显示页面的左半。
+
+**根因**：`pageUrl()` 拼的是 Adobe 的开放参数 `#page=N&view=FitH`——**Chrome 内置
+查看器会忽略 `view=FitH`**，页面按 100% 渲染；而 A4 宽 793px 远超 iframe（≈490px），
+于是右侧被裁，只剩左半边。
+
+**修复**：改用 `#page=N&zoom=page-width`（宽度适应）——Chrome 内置查看器与
+pdf.js 都认这个参数，Safari 忽略时退化为默认缩放（与修复前行为一致，不更差）。
+`zoom=page-width` 还能自适应侧栏打开等任何可用宽度变化。
+
+**验证**（无头 Chrome 可渲染 PDF 查看器，实测有效）：用 pymupdf 生成一张带
+"SECOND HALF OF THE PAGE" 标记行的 A4 PDF 放进静态目录，注入文档数据后
+在文档页截图——修复前该行不可见，修复后整行可见、iframe src 为
+`...#page=1&zoom=page-width`。
+
+**守卫**：`test_source_uses_native_pdf_viewer` 增加两条断言（必须含
+`zoom=page-width`、不得出现 `&view=FitH`）。变异（把代码里拼接处换回
+`view=FitH`）判红、`try/finally` 还原校验 sha256。
+
+**两个过程记录**：
+1. 否定断言第一版写的是裸词 `"FitH" not in src`——被我**自己注释里**说明历史时
+   提到的 `view=FitH` 误伤成红灯。改成只匹配拼接形式 `&view=FitH`（注释里
+   提到裸名不受影响）。否定式断言同样要防注释，这是本仓库第 N 次记这条。
+2. 变异第一版替换的是 `zoom=page-width` 的**第一次出现**（在注释里），
+   代码没变、守卫自然仍绿——替换式变异必须打在代码的拼接形式上。
+
+## 34. 文档显示页重新设计：PDF"只能显示一半"（2026-10-08）
+
+用户第二次反馈同一症状并明确要求重设计。这次先做 DOM 实测，拿到硬数据：
+
+### 34.1 根因（实测数据）
+
+```
+视口 900 → 60vh = 540
+iframe 实际高     = 540   （被 .pdf 的 min-height: 60vh 强制）
+容器 .srcscroll   = 508 可见 / 578 内容 → 溢出 70px
+iframe 可见高度    = 492   （540 中有 48px 被裁在容器外）
+```
+
+`.pdf { height:100%; min-height:60vh }` 在受限高度里让 **iframe 比容器还高**：
+容器被撑出第二层滚动条、iframe 底部被裁在容器之外——用户面对**两层滚动**
+（iframe 内滚 PDF + 容器滚 iframe），滚一层永远看不到下半页。
+页面本身高 ~998px（fit-width），可见 492px ≈ 一半——这就是"只能显示一半"。
+
+（上一轮怀疑的"横向被裁"是误判：fragment 实证显示 iframe 内 fit-width 一直是
+生效的，页面白色区始终填满框宽。）
+
+### 34.2 重新设计
+
+| 项 | 做法 |
+|---|---|
+| iframe 尺寸 | JS 在容器内取 **A4 内接矩形**（`min(可用高, 可用宽/0.707)`）：iframe 永远完整落在容器里（单层滚动、零裁切），且因比例为 A4，**fit-width 的整页恰好铺满**——整页可见比例从 ~49% 提到 **100%** |
+| 头部瘦身 | 方案徽标从 PageHeader 的 meta 行并入操作行（省 ~40px 全给原文） |
+| 逃生口 | 原文栏新增「全屏」（`requestFullscreen`，ResizeObserver 自动重算内接矩形，全屏下仍是整页可见）与「新窗口」；下载保留 |
+| 图标 | 精灵新增 `expand` / `external`（沿用既有 24×24 / stroke 1.8 风格） |
+| 容器 | `srcscroll` padding u4→u2；`pdfwrap` 居中 |
+
+### 34.3 验证（DOM 几何 + 像素）
+
+- 修复后：`srcScroll == srcClient（无溢出）`、iframe **522px 全部可见**
+- iframe 尺寸 369×522 = A4 比例 ✔（页面 x=208 居中）
+- **像素验证**：页面 92% 高度处（"BOTTOM OF PAGE 1" 所在行）在 iframe 内检出
+  104 个深色像素——**整页从头到尾都在框内**（修复前该区域根本不在可视区）
+
+### 34.4 守卫
+
+新增 `test_pdf_frame_fits_container_without_double_scroll`：不得出现
+`min-height: 60vh`、必须有 A4 比例常量与内接矩形计算、iframe 尺寸必须由
+该计算下发。两例变异（加回 min-height、尺寸回到 CSS 100%）逐个判红。
+
+**验证**：`svelte-check` 0/0、`npm run build` 通过、全量 **567 passed**。
+
+## 31. 分块体系重构（L0→L2 全量，2026-10-08）
+
+用户审查结论成立：解析层产出结构（标题/表格/代码），分块层却全部按纯字符流处理；
+可调维度只有 chunk_size/overlap_ratio 两个数字，没有文档类型概念。本轮全量实现：
+
+### 31.1 切分器重写（`rag/ingest/splitter.py`）
+
+四档策略共享一套段规划与偏移纪律：`auto`（有标题走结构感知）/`structure`（标题分节，
+标题与本节正文同块）/`recursive`（纯字符，中英句末分隔符齐备——旧实现英文句末
+缺失）/`semantic`（句子向量断点，相似度低于**下四分位**处切，embedding 不可用
+降级 structure）。三条硬约束：偏移闭合（每块都是原文连续子串）、页边界不是切分
+边界（跨页块归起点页，跳页用块起点）、原子保护（表格/代码围栏整体成块，超长才
+按行切且**不复制表头**——复制会造出非连续区间破坏偏移闭合）。
+
+调试中抓到并修掉的三个自身缺陷：
+1. **合并阈值**：固定 64 在 size=64 时把 RCT+overlap 的正常块（60/64）全判成
+   碎块链式并回一整块（1089 字符 → 1 块）。改为 `min(64, size/2)`。
+2. **标题小块**：与前一节隔着被 RCT 丢掉的段尾空白，"并入前块"轮次够不着；
+   且并给前块会让标题归到上一节——两轮合并 + 标题块只允许并给**后块**
+   （"## 参数表" 与它的表格合成一块，heading_path 正确）。
+3. **原子宽容上限**：2×size 内的表格/代码整体成块（半张表是坏块，略超限的
+   完整表是好块），再长才按行切。
+
+### 31.2 检索增强（数据已有、只是没用）
+
+- **embedding 输入注入上下文头**：`文档标题 > heading_path + 原文`——存库的
+  `text` 保持纯净（偏移闭合），上下文只进检索通道；
+- **FTS 分词同步**：`text_seg` 对同样的上下文输入分词，标题词可被全文检索召回。
+
+### 31.3 策略字段全链路贯通
+
+`SplitConfig.strategy` → kbs 表新增 `strategy` 列（LanceDB `_ensure_cols` 与
+SQLite DDL + **存量库幂等 ALTER** 双迁移）→ `plan.py` 五处（global/kb/doc/
+resolve/snapshot）→ `KBCreate/KBUpdate/PlanUpdate` 请求体 → `SplitOut/
+PlanOwnOut/SnapshotOut` 响应 → 前端 `types.ts` 的 `CHUNK_STRATEGIES` 单一来源
+（下拉与徽标共用）→ 库设置（下拉 + **场景预设**：技术手册/FAQ/代码表格/长文，
+一键填三值可微调）→ 文档覆盖对话框（策略下拉）→ DocView 徽标显示策略名、
+"需重切"判定纳入策略比对。
+
+### 31.4 验证与教训
+
+- 全量 **567 passed**（新增切分器行为断言散布在 test_parsing_layer）；
+  `svelte-check` 0/0、build 通过；像素/几何级自测（偏移闭合、表格原子、
+  碎块归零、语义降级、兼容入口）全部通过。
+- **7 个回归的根因与修法**：meta 双引擎（SQLite DDL + 幂等 ALTER 补列）、
+  KnowledgeBase LanceModel 与 KB_COLS 一致性（schema 补字段）、mypy
+  （fallback 字面量混入 str 键后 dict 推断变宽，显式注解 `dict[str, Any]`）、
+  perf 块数（合并阈值缺陷，见 31.1-1）、页码测试（语义更新：跨页块归起点页，
+  短文档整篇一块是正确行为——旧行为的"页码正确"实为碎片块）。
+- **教训**：合并阈值这类与调用方参数耦合的常量，必须作为参数由调用方折算，
+  不能做成全局常量——"看似正确的 64"在 size=64 的场景下是全量误伤。
+
+## 32. 文档页：原文改为按需展开（2026-10-09）
+
+用户要求：默认不展示左侧原始文档，直接展示分块列表；原文由按钮按需展开。
+
+### 32.1 形态与状态
+
+| 项 | 做法 |
+|---|---|
+| 默认 | **单栏**（`.chunkpane`）：分块表占满整宽。原文面板是**按需对照物**——常驻左半屏把内容列压到 ≈480px，而这一页的主内容是分块（编辑/启停/批量/新增） |
+| 开关位置 | 分块面板表头右侧：折叠态「显示原文」/「收起原文」；**选中块后文案变成「对照原文（第 N 块）」**——一枚按钮承担两种意图（看原文 / 看这一块落在原文哪里），省一格宽度也让"选中"有了可见的下一步 |
+| 状态 | URL `?src=1`（与 `?chunk` 同一套口径，可分享/刷新/后退）。折叠时**删掉**参数而不是写 `src=0`（否则分享出去带假开关）。`App.svelte` 的 `{#key}` 不含 query → 切开关不重建视图、不重拉数据 |
+| 深链 | 带 `?chunk=` 时**自动展开**：检索页「在文档中打开」的意图就是看这一块落在原文哪里，折叠等于逼用户再点一次 |
+| 快捷键 | `V` 切换。**挂在 window 而非分块行上**——切换会重建行、焦点丢失，行级实现只能生效一次（实测：第一次有效、第二次失联） |
+| 懒加载 | 文本类文档的全文要单独 GET 签名链接，`load()` 只在 `showSrc` 时抓；展开那一刻若还没正文则补抓 |
+| 滚动位置 | 切换走 `{#if}` 分支会销毁 `.chunkscroll`，用 `srcScrollMemo` 记/复实行高一致的偏移（实测 500 → 500 保住，右侧列表与左侧原文同步在第 8 块附近） |
+
+### 32.2 分块行本身的信息优化
+
+- 内容从"单行 160 字截断"改为**两行 clamp**（`-webkit-line-clamp: 2`）：折叠态内容列有 ≈900px，
+  一行截断等于"每块只看得见开头一句"，而判断切分质量恰恰要看它讲完没有。
+  **必须 clamp 而不是不限高**：不限高会让行高随内容变化，虚拟化的定高前提当场失效。
+- 新增**元信息行**：`标题层级 · token 数 · 字符区间`（`offset_valid` 时才给区间）——
+  折叠态没有原文可对照，判断切分质量靠这三样。
+- `ROW_H` 34 → 62（2 行正文 + 1 行元信息）；真实行高仍由 ResizeObserver 实测覆盖。
+- 单栏覆盖 `.chunktext{max-width:none}`（双栏时代的收缩技巧在单栏会留几百像素空白），
+  状态列按内容收窄且 `nowrap`（折行会撑破定高）。
+- `.chunkscroll` 滚动条默认隐形、悬停浮现（与 API 页同一手法：thumb 透明但保留槽位）。
+
+### 32.3 守卫与验证
+
+新增 `test_source_panel_is_opt_in`：钉住"默认折叠"这个产品决策（初值只认 `src=1`）、
+深链自动展开、URL 同步、`load()` 的条件抓取、滚动位置记忆。三个变异（初值改常驻、
+去掉深链展开、去掉条件抓取）全部判红，源码哈希校验已还原。
+
+浏览器实测（隔离实例 8160，17 块文档）：默认单栏 15–17 行、内容列 982/1392 铺满、
+按钮文案随选中变化、V 往返三次正常、`?src=1` 直开双栏、深链 `?chunk=` 自动展开且选中 1 行、
+窄屏 900px 单栏正常（展开时两栏 447/389）、浅色与深色都成立。
+`svelte-check` 0/0、build 通过、全量 **567 passed**。
+
+**途中被守卫逮到的两处**：`document.querySelector("dialog[open]")` 同时违反
+`test_no_innerhtml_dom_queries` 与 `test_dom_side_effects_live_in_one_place`，
+而且**本来就搜不到**——本项目的对话框是 `role="dialog"` 的自定义面板而非原生 `<dialog>`。
+改为从事件目标 `closest('[role="dialog"]')` 判定（事件目标不是全局查询）。
+
+## 33. 进程管理脚本（2026-10-09）
+
+用户反馈：项目启动会占多个进程与端口，要一套 start/stop/restart。
+
+### 33.1 根因：一个实例其实是 6 个进程
+
+`rag.server serve` 的 `--processes` 默认 `auto` = min(cpu, 4)，uvicorn 以 spawn 拉起
+worker，外加 multiprocessing 的 resource_tracker。实测 `ps --ppid` 确认：主进程 + 4 个
+`spawn_main` + 1 个 tracker。脚本默认 `--processes 1`（调试友好），需要吞吐时
+`RAGGI_PROCESSES=auto`。
+
+### 33.2 三个脚本 + 一个共享库
+
+`start.sh` / `stop.sh` / `restart.sh` + `scripts/_common.sh`（只放共用函数，不直接执行）。
+全部可用环境变量覆盖：`RAGGI_HOST/PORT/DATA/PROCESSES`、`RAGGI_SKIP_BUILD`、
+`RAGGI_PID_FILE`、`RAGGI_LOG_DIR`、`RAGGI_HEALTH_TIMEOUT`。
+
+| 能力 | 做法 |
+|---|---|
+| 幂等 | PID 文件 + 端口双重判定；**且核对端口是否就是本次请求的端口** |
+| 端口冲突 | 按端口查占用者：是自己人→提示清理；是 Raggi 但配置不同→建议 `stop.sh --all`；**是别人的服务→直接拒绝启动，绝不误杀** |
+| 停止 | SIGTERM **整组** → 等 15s → SIGKILL；PGID 从 `ps` 取并与自身进程组比对（防自杀） |
+| 孤儿 worker | 主进程死了但 spawn worker 还占端口 → 按 **cwd == 项目根** 判定归属后清理 |
+| 构建 | `web/dist` 不入库：缺失或**比源码旧**就自动 `npm run build`（mtime 比对） |
+| 日志 | `logs/raggi.log`，超 5MB 轮转保留 3 份 |
+| 健康检查 | 轮询 `/api/kbs` 至多 60s，失败自动回滚 + 打印日志末尾 30 行 |
+| 残留提示 | 启动时列出本机其它 Raggi 实例（不自动杀，`--all` 才清） |
+
+### 33.3 调试中踩到的四件事（都写进了注释）
+
+1. **漏认 `rag serve` 启动方式**：早先只匹配 `python3 -m rag.server serve`，而用户
+   实际用 CLI 的 `rag serve`——`stop.sh` 于是报告"没有实例"而端口还被占着。
+   现在两种写法都认。
+2. **归属判据不能用命令行参数**：CLI 方式通常不带 `--data`（读 config.toml 的相对
+   `data_dir`），参数里根本没有数据目录。改用 **cwd 指向项目根**。
+3. **`kill -- -PID` 会自杀**：PID 的 PGID 可能就是调用脚本的 shell 所在进程组
+   （实例不是 setsid 起的），一刀切下去连命令本身都终止（实测 `exit 143`）。
+   现在先取 PGID、与自身比对，组不可用才退到单进程并拒绝目标是自己。
+4. **幂等闸必须核对端口**：`RAGGI_PORT=8157 ./start.sh` 时若只查 PID 文件，
+   会 falsely 报"已在运行 8157"，而服务实际还在 8156——用户以为换成功了。
+
+### 33.4 验证（全部实测）
+
+`stop` 清理 → `start` 冷启动就绪 → 重复 `start` 幂等（同一 PID、单进程、子进程 0）→
+`restart` 换 PID 且 HTTP 200 → 端口被非 Raggi（`http.server`）占用时 start 拒绝且
+**对方进程仍存活** → 请求端口与运行端口不一致时明确报错并指向 restart。
+
+## 34. 前端整体换装 + 命令面板 / 队列浮层（第四代，2026-10-09）
+
+用户要求：全面改写前端 UI、修改交互方案、更易用、不参考当前界面。
+
+### 34.1 视觉基调（第四代配色）
+
+| 项 | 第三代 | 第四代 | 理由 |
+|---|---|---|---|
+| 中性色 | 冷蓝灰 hue 260 / chroma 0.012 | **近乎无彩深灰** chroma ≤ 0.007，明度整体 -0.02 | 有彩中性会让青绿主色显灰；工具界面的"安静"来自中性没有自己的颜色 |
+| accent | 亮蓝 220 | **青绿 185** | 与命中黄（95）拉开近 90°，同行出现一眼分清 |
+| focus | 青蓝 175 | **紫罗兰 305** | 与 accent/hit 各占一端，三者互不蹭色 |
+| 顶栏 | 半透明 + blur | **实心** | 毛玻璃让内容从顶栏下透出，而顶栏是导航所在，最不该让位给背景 |
+| 圆角 | 5/8/12 | **4/6/10** | 更方一点，密度感与"信息优先"的定位一致 |
+
+### 34.2 新交互一：命令面板（⌘K / Ctrl+K）
+
+"穿过多层列表找一篇文档"的替代路径（总览进库 → 进文档列表 = 两次加载两次点击）。
+面板把全部跳转目标摊平成一张可搜索列表：检索入口置顶、去往（导航/库/文档）、操作
+（新建库/刷新）。键盘 ↑↓ + Enter，Esc/点外部关闭。
+
+- 状态在 `lib/palette.svelte.ts`（模块级，与 dialog/toast 同一模式：入口分布在顶栏
+  按钮、window 快捷键、面板本体三处，没有共同组件祖先）。
+- **不常驻**（不是侧栏）：项目里常驻导航栏试过三代都删了（见
+  `test_shell_is_single_column`），面板是瞬态的，只有想跳转时存在。
+- 刻意不做：切换主题/重建索引这类"改状态"的操作（设置页的职责，放这里就是第二份
+  事实来源）；模糊拼写匹配（"输错了却出现看似相关的项"是新的迷惑源）。
+- 文档列表懒加载（`limit=200`，够用就停），空查询时不列文档。
+
+### 34.3 新交互二：队列浮层
+
+顶栏芯片点击**就地展开**进度浮层（阶段 + 进度条 + 停止 + 查看全部），而不是直接跳
+`#/jobs`——用户在等的时候多半还在看别处。
+
+配套修了一个真实缺口：**空闲期轮询是 25s 一次**，而入库恰恰发生在"之前什么也没跑"
+的时刻——不 poke 的话"点了上传、顶栏没动静"要持续 25 秒，足够让人重复提交第二遍。
+新增 `pokeQueue()`，在文件上传（`UploadPanel`）与重新解析/重新切分（`docops`）的
+提交点调用。
+
+浮层定位用 `position: fixed` 对齐顶栏内容右缘：相对芯片右对齐会盖住它右边的主题
+按钮（实测截图里按钮被压住一半）。
+
+### 34.4 交互三：文档页去掉库级标签条
+
+"文档 / 分块 / 设置"是**库级**的三个同级视图，出现在文档详情页里会让人以为
+"点分块 = 在这篇文档里切视图"。现在只在库级页显示；文档页的返回路径是面包屑
+（知识库 / 库名 / 文档名）。
+
+### 34.5 验证
+
+- `svelte-check` 0/0、`npm run build` 通过、全量 **568 passed**（新增守卫后 569）。
+- 浏览器实测：⌘K 打开 → 输入"设备"→ 2 条结果 → ↓+Enter 跳转到库文档页 → 面板
+  自关；浅色/深色/窄屏三态截图复核；面板焦点环（紫）、主色（青绿）、命中黄三色分离。
+- 队列浮层：环境里任务 4 秒就跑完（embedding 快），**用 Playwright 拦截 `/api/jobs`
+  注入假活跃任务**验证渲染——芯片"队列 2"、浮层两项（向量化 + 进度条 / 切分文本）、
+  停止按钮 2 个、点击外部关闭，全部符合预期。
+- 新增守卫 `test_command_palette_wiring`（⌘K 必须抢在修饰键放行前、面板开着时壳层
+  快捷键让位、提交后 poke 队列、跳转走 href/queryString 不手拼 URL），三个变异
+  （顺序调换 / 去掉两处 poke）全部判红。
+
+### 34.6 未做（诚实记录）
+
+- **不做常驻侧栏**：三代试错已有结论，本次用瞬态面板替代。
+- 各视图的深水区（检索参数面板、上传面板的交互形态）本轮未重构——它们已经过
+  阶段 2/3 的专门打磨，本轮只做视觉适配。
+
+## 35. 文档列表与分块页改为页码分页（每页 20，2026-10-09）
+
+用户要求：知识库下的文档列表与分块页要分页展示，每页 20 条。
+
+### 35.1 形态：追加 → 页码
+
+原来是「再加载 200」的追加模式（`Pager` + `ListMore`）。改成页码分页的理由是
+场景本身：文档/分块页属于**"要找某一篇/某一块"**的浏览——页码能一眼看出总量与
+位置、能直接跳末页、刷新后停在原页；而追加模式越滚越长，**末页反而最难到达**。
+DocView（虚拟化长列表，要对照原文）与 Jobs（按到达顺序看）保持追加不变。
+
+### 35.2 实现
+
+| 件 | 说明 |
+|---|---|
+| `lib/loadstate.svelte.ts` 新增 `Paginator` | `page/total` 为 `$state`（同 Pager 的教训）；`go(n)` 越界夹住；**`settle(total)` 把页码夹回**——过滤把 12 页筛成 1 页时停在旧页会得到空列表，看起来像"筛不出东西" |
+| 新原语 `ui/primitives/Pagination.svelte` | 页码窗口算法唯一实现（当前页 ±1 + 首尾 + 省略号，阈值 >=2）；`aria-current="page"`；请求期间禁用；**页数 > 7 时出现跳页输入**（22 页的列表没有它只能一页页点） |
+| `DataTable` 支持两种模式 | `pager`（追加）/ `paginator`（页码）二选一，都内置 |
+| KbDocs / KbChunks | 每页 20；`load(page)` 先 `pager.go(page)` 再取数；`settle` 后若页码被夹回则**自动重取一次**（只发生一次） |
+
+### 35.3 调试中抓到的真 bug（游标没跟上）
+
+第一版 `onpage={(n) => load(n)}` 只把 n 用于请求，**没更新 `pager.page`**——实测表现：
+点第 2 页，数据确实是第 21–32 篇，但分页条仍写"第 1 / 2 页"、高亮停在 1，而且
+**2.5 秒后的轮询（重取当前页）把用户弹回第 1 页**。修法：`load()` 开头 `pager.go(page)`，
+让"翻页"这个动作同时更新游标与数据。
+
+### 35.4 守卫更新（形态变更，精神保留）
+
+`test_pagination_block_is_shared_and_really_appends` → 改名
+`test_pagination_blocks_share_one_implementation`：
+
+- **不变量不变**：分页块不得复制（`class="listmore"` / `class="paginator"` 都禁）；
+  追加模式三条（`aria-busy` / `Math.min` 公式 / `disabled`）；DocView 的 append 必须真。
+- **新增**：页码模式三条（`aria-current` / busy 禁用 / `pageItems` 唯一）；
+  分页视图必须传 `paginator={pager}` + `onpage=`，且不得残留 `load(true)`；
+  `Paginator.page/total` 必须 `$state`、`settle` 必须夹回。
+- 变异验证：删除 onpage、删除 `disabled={busy}`、删除 settle 夹回、视图手写
+  `class="paginator"` —— 四个注入全部判红。
+
+### 35.5 验证（浏览器实测）
+
+造 32 篇文档 / 424 块后实测：第 1 页 `共 32 篇 · 第 1 / 2 页（1–20）`；翻到第 2 页
+`（21–32）` 且**跨过一次轮询（4s）仍停在第 2 页**；分块页 22 页时窗口为
+`1 2 … 22`、跳到第 11 页窗口变 `1 … 10 11 12 … 22`、末页"下一页"禁用且只剩 4 行、
+越界输入 999 夹到末页；过滤"变频器"→ `共 212 块 · 第 1 / 11 页`（回第 1 页 +
+命中口径），清空后回到 `共 424 块 · 第 1 / 22 页`。
+
+`svelte-check` 0/0、build 通过、全量 **569 passed**。测试数据（27 篇：分页数据 14 + 浮层验证 13）已清理，设备手册回到 5 篇文档 +
+1 个独立分块（用户原有数据；截图里出现的"18 文档"是含测试数据的中间值）。
+
+## 36. 分块面板改为高度自适应（2026-10-09）
+
+用户报告：分块页面只有一条数据，列表却是固定长度（下方大片空白）。
+
+### 36.1 定位
+
+实测两个"分块页面"的容器高度：
+
+| 页面 | 数据 | 容器 | 内容 | 结论 |
+|---|---|---|---|---|
+| **文档详情页**（`DocView` 折叠态） | 1 块 | `.chunkpane` **657px** | 表格 **99px** | ✘ 455px 空白 |
+| 库分块页（`KbChunks`） | 6 块 | `.table-wrap` 305px | 随内容 | ✔ 本就是文档流 |
+
+根因在 `DocView` 的 `.chunkpane { flex: 1 }`——面板永远占满剩余高度，
+与"有几个分块"无关。用户分不清那 455px 是"还没加载出来"还是"就这些"。
+
+### 36.2 修法
+
+```css
+.chunkpane {
+  flex: 0 1 auto;      /* 不主动长高、可收缩、基准取内容 */
+  max-height: 100%;    /* 内容超出时才截断，滚动交回 .chunkscroll */
+}
+```
+
+`max-height` 这一半是必须的：窗口化虚拟滚动依赖 `.chunkscroll` 的
+clientHeight 作为窗口高度，"撑满"必须由 max-height 兜住，而不是让内容
+把面板顶破（顶破的话外层是一个页面级滚动条，虚拟化的 overscan 全部失效）。
+
+### 36.3 验证（DOM 实测）
+
+| 场景 | 修前 | 修后 |
+|---|---|---|
+| 1 块 | pane 657 / 表格 99（455px 空白） | **pane 201 / 表格 99**（贴合内容） |
+| 14 块 | —— | pane 657（撑满）+ scroll 554/905 内部滚动，滚到底 14 行全渲染、末行 ordinal=13 |
+
+新增守卫 `test_chunk_pane_shrinks_to_content`（钉 `flex: 0 1 auto` 与
+`max-height: 100%` 两条都在），变异（改回 `flex: 1`）判红。
+
+`svelte-check` 0/0、build 通过、全量 **569 passed**（唯一一次红是构建产物
+新旧检查，变异测试改过文件后未 rebuild——重建即绿）。测试文档已清理。
+
+## 37. Material（MUI 主题）移植 · 第五代配色（2026-10-10）
+
+用户要求"使用 Material UI 全面重构界面"。**先做了一个必须说的技术核查**：
+MUI（@mui/material）是 **React-only** 组件库，本项目前端是 Svelte 5，不能直接引入；
+可选的替代路径有三条（React 重写 / Google 官方 `@material/web` Web Components /
+社区 `m3-svelte`），各自代价见提交说明。
+
+本次落地的是**第四条路：把 MUI 默认主题的设计 token 精确移植到现有 token 层**
+（无论最终是否引入组件库，Material 的 token 体系都是底座；而 93 处 token 引用点
+意味着这一步就能全站换装，且 43 条行为守卫一条不动）。
+
+### 37.1 移植对照表
+
+| 维度 | 上一代（青绿/无彩灰） | 本代（MUI 默认主题） |
+|---|---|---|
+| 主色 | 青绿 hue 185 | **#1976d2 / #90caf9**（primary light/dark） |
+| 中性 | 近无彩深灰 oklch | **#ffffff + 87/60/38% 黑**（light）、**#121212/#1e1e1e + 100/70/50% 白**（dark） |
+| 分隔线 | oklch 实色 | **12% 黑 / 12% 白**（MUI divider） |
+| 状态色 | 自选 | MUI success/warning/error 六值 |
+| 交互态 | 换一档 surface | **半透明遮罩**（action.hover 4% / selected 8% / 12%） |
+| 圆角 | 4/6/10 | **全站 4px**（shape.borderRadius） |
+| 阴影 | 自建 4 档 | **MUI shadow 1/2/8/24**（三层叠加结构） |
+| 字体 | system-ui | **Roboto 优先**（不外链 Google Fonts） |
+| 遮罩 | 55% | **50%**（Backdrop） |
+
+### 37.2 组件级对齐
+
+- **按钮**：uppercase + 0.02857em 字距 + 500 字重 + 250ms `cubic-bezier(0.4,0,0.2,1)`；
+  `.btn` → outlined（inherit）变体，`.btn-primary`/`.btn-danger` → contained +
+  elevation 2（hover 抬到 3）；禁用态按 MUI 的 disabledBackground。
+- **输入框**：outlined 三道状态（默认 1px / hover 正文色 / focus 主色 + 可见环）；
+  底色保留纸面色（项目有灰底上的输入框）。
+- **开关**：MUI 比例 —— **34×14 轨道 + 20px 溢出拇指**（带 elevation）。
+- **表格**：表头与纸面同色（去掉灰条）、行 hover 走遮罩、divider 12%。
+- **卡片/面板**：outlined 变体（1px 线 + 无阴影）—— 一屏 3~5 张卡全带阴影会"像贴了一墙便利贴"。
+- **对话框**：去边框、elevation 24、24px 内边距、标题 17px/500、动作右对齐。
+
+### 37.3 验证
+
+`svelte-check` 0/0、build 通过、全量 **570 passed**（43 条前端守卫一条未动、全绿）。
+浏览器实测：浅/深两态的首页、文档列表、文档详情、表单对话框截图复核；
+按钮计算样式实测 `rgb(25,118,210)`（= #1976d2）+ `border-radius: 4px` +
+MUI 三层阴影，与 MUI 默认主题逐位一致。
+
+### 37.4 未做（需要决策）
+
+真正的 `@mui/material` 组件**只存在于 React**。若要走那条路，需要：
+1. 前端整体重写为 React（9 视图 / 15 原语 / 路由 / 状态层）；
+2. 43 条前端守卫（Python 静态断言 .svelte/.ts）全部重写为 React 版本；
+3. 工期以周计，功能风险由"重写"承担（现有 570 个测试里的前端契约部分会失效）。
+在此之前，本次的 token 移植已经让界面在**观感与规范层面**与 MUI 一致。
+
+## 38. 前端迁移到 React + MUI（阶段 1，2026-10-10）
+
+用户要求"迁移到 react"（为了使用真正的 `@mui/material` 组件）。
+
+### 38.1 迁移策略
+
+- **原地迁移**：`web/` 下的渲染层从 Svelte 5 换成 React 19 + MUI 6；
+  后端 API、URL 结构、深链语义一律不变（迁移只换渲染层）。
+- **构建**：`vite.config.ts` 换 `@vitejs/plugin-react`；工程仍在**仓库根**
+  （`package.json` + `root: "web"`），产物仍是 `web/dist`。
+- **复用面**：纯 TS 模块直接复用，不重写——`types.ts` / `api.ts` / `jobs.ts` /
+  `format.ts` / `searchParams` / `source.ts` / `sse.ts` / `virtual.ts` / `table.ts`。
+  这些是过去几轮实测打磨出来的（幂等键、401 人话、偏移闭合），重写等于把它们
+  的事故重新踩一遍。
+- **旧 Svelte 源码保留**（迁移参考 + 回退），不参与构建；收尾时删除。
+
+### 38.2 MUI 版本选择（实测教训）
+
+初次装到 **MUI v9**，类型检查一次性报出 20+ 处 API 不匹配（`Stack` 不接受
+`direction/alignItems/spacing`、`TextField` 没有 `InputProps`）。v9 太新，
+不适合生产。**降到 v6.5**（长期支持、React 19 兼容、API 与我写的调用一致），
+错误立刻降到 3 个（全是未使用 import）。**教训：组件库要选 LTS 线，不要用最新
+大版本当小白鼠。**
+
+### 38.3 本阶段交付
+
+| 件 | 内容 |
+|---|---|
+| 主题 | `theme.ts`：`createTheme` 只覆盖三件事（中文字体回退、禁用字色、Paper 分层色），其余全吃 MUI 默认——**默认值就是设计规范** |
+| 路由 | `lib/router.ts`：hash 路由，模式表与旧版逐字一致（含 `kb/:id` 与 `standalone` 的 legacy 重写） |
+| 状态 | `lib/store.ts`：模块级 store + `useSyncExternalStore`（kbs 带去重与世代号、busy、theme、crumbs、队列轮询含 poke） |
+| 壳层 | `App.tsx`：MUI AppBar（品牌 + Tabs 导航 + 命令面板 + 队列 chip + 主题）+ 面包屑条 + 主滚动区 |
+| 视图 | **KbList**（卡片网格 + 新建对话）、**KbDocs**（Table + TablePagination + 入库/重命名/删除对话） |
+| 交互 | 命令面板（⌘K）、Snackbar toast |
+| 其余路由 | `Placeholder`：如实说明"迁移中"，不画假界面 |
+
+### 38.4 调试中抓到的问题
+
+1. **路由 tab 取错段**：`parts[1]` 拿到的是 kbId——实测表现为"打开文档页却渲染出
+   库设置"。应为 `parts[2]`。
+2. **迁移检测不能只看 `main.tsx`**：旧入口 `main.ts` 迁移期不删，导致守卫继续
+   "绿"（假绿）。改为以 `package.json` 声明 MUI 为硬证据 → 43 条守卫如实 skip。
+3. **面包屑取不到库名**：`kbName()` 读的是列表快照，挂载时列表还没到 →
+   依赖 `kbsLoaded` 重算。
+4. **manualChunks 拆 react/mui 造成循环 chunk**：MUI 内部 import React → 合并为
+   单一 vendor 块。
+
+### 38.5 验证
+
+`tsc --noEmit` 0 错误、`vite build` 通过（703 模块，产物 index 237KB +
+vendor 338KB，gzip 176KB）、全量 **527 passed + 43 skipped**（后端未动）。
+浏览器实测：首页 3 张卡片、文档页 5 行 + MUI TablePagination、命令面板 8 项、
+文档深链跳转、面包屑、浅/深两态截图；控制台无错误、无 4xx 资源。
+
+### 38.6 未完成（必须继续的阶段）
+
+以下视图仍是占位页：**DocView（分块工作台，最复杂）**、**KbChunks**、
+**KbSettings**、**Search（检索 + 问答）**、**Jobs**、**Settings（模型/密钥/健康/存储）**、
+**ApiDoc（接口文档站）**。以及：43 条前端守卫的 React 版重写、旧 Svelte 源码删除。
+
+这些不变量（is-full 高度链、分页唯一实现、原文按需展开、异步操作必须有人等）
+每一条都有真实事故背景，收尾时必须逐条翻译到 .tsx 上，不能随迁移丢失。
+
+## 39. React + MUI 迁移收尾（阶段 2，2026-10-20）
+
+用户要求"MUI 重构全部执行完成"。阶段 1（§38）只迁了壳层、KbList、KbDocs；本轮补齐其余全部，并清掉旧栈。
+
+### 39.1 补齐的视图与能力
+
+| 件 | 内容 |
+|---|---|
+| `Settings.tsx` | 模型 / 密钥 / 健康 / 存储四个子页；模型三卡片独立测试、维度变更二次确认、脏快照；健康页区分「查到问题」与「无法确认」；存储接 `/stats` |
+| `ui/KeysPanel.tsx` | 密钥列表 / 签发（明文只显示一次）/ 吊销 + 本机凭据 |
+| `ui/DataPanel.tsx` | 容量、目录占用、磁盘剩余、已建索引 |
+| `ApiDoc.tsx` | 三栏文档站；过滤词与选中端点进 URL；左栏渲染过滤后的端点；行内标记用 React 节点解析，**全仓零 `dangerouslySetInnerHTML`**；复制失败选中文本并经 live region 播报 |
+| `ui/WorkspaceTabs.tsx` | 文档 / 分块 / 设置三个链接标签，壳层在 kb 与 doc 路由下渲染 |
+| `KbDocs.tsx`（重写） | 方案列与「需重切」、活跃任务阶段 + 停止、多选批量删除、行菜单（方案 / 重命名 / 重解析 / 重切）、入库对话框三页签（多文件 / 文本 / URL）、失败项保留、任务结束后的最终刷新 |
+| `KbSettings.tsx`（重写） | 分节脏快照、`isCustomPlan` 后端口径、64–8192 / 0–50 校验、恢复默认后回填生效值、只重取本面板、独立分块入口 |
+| `DocView.tsx`（重写） | 服务端分页的 MUI Table（每页 20，替代会撑满高度的 DataGrid）、原文按需展开、深链块按 ordinal 精确定位、A4 内接矩形 PDF、文本原文兜底与高亮、↑/↓ 换块、重解析/重切盯到终态 |
+| 共享层 | `lib/selection.ts`（usePicks 单份多选）、`lib/dom.ts`（选区兜底）、`ops.tsx` 增加批量删除、`router.ts` 增加上次检索恢复、`jobcancel.ts` 复用 |
+| 清理 | 删除全部 `.svelte` / `.svelte.ts` / 旧样式 / `svelte.config.js`；卸载 svelte、svelte-check、@sveltejs/vite-plugin-svelte 与不再使用的 @mui/x-data-grid |
+
+### 39.2 测试
+
+- `test_frontend_wiring.py` 整体重写为 React 版，**51 条**，不再 skip；其余前端契约（architecture / apidoc / doc_viewer / search_api / xss_defense）逐条翻译。
+- 全量 **578 passed, 1 deselected**（迁移前 527 passed + 43 skipped；跳过全部激活）。
+- 4 条关键守卫做了变异验证（每例 `try/finally` 还原 + sha256 校验）：上次检索恢复改回 `location.hash = prev`、方案校验放宽成 0、空态不再区分过滤词、注入 `dangerouslySetInnerHTML` —— 全部判红。
+
+### 39.3 浏览器实测（本机 531×553 视口）
+
+- 首页、文档列表、全库分块、文档工作台（折叠与 `?src=1` 展开）、库设置、设置四个子页、任务页、检索页、API 文档页均可加载；控制台 0 错误、0 4xx 资源。
+- 验证到的交互：工作区标签链接、面包屑、`?src=1` 写入 URL、深链 `?chunk=` 自动展开并定位、裸 `#/search` 恢复上次查询（sessionStorage）、API 文档过滤 `kbs` 后 URL 变成 `?q=kbs` 且左栏 7/49、选中端点写 `?ep=`、浅色主题底色 `#fafafa`。
+- 视口只有 531px，仍无法对桌面三栏/双栏做像素级复核；布局按 MUI 断点（`xs/sm/lg/xl`）声明，窄屏下文档表在容器内横向滚动、API 文档单列堆叠（左导航限高 42vh 内部滚动）。
+- **实测抓到一个 React 专有缺陷**：StrictMode 挂载→卸载→再挂载时，第一次队列轮询的 promise 在 stop 之后才 resolve，`.finally(queueSchedule)` 不看世代就会排出一条孤儿链（两条轮询同时打 `/api/jobs`）。已用世代号收口，并加 `test_queue_polling_is_generation_guarded`。
+
+### 39.4 刻意偏离
+
+1. **DocView 不再做虚拟化长列表**：改为服务端分页每页 20。原来虚拟化的前提是"一次取全文档并在前端滚动"，而服务端本就支持 offset；分页让面板随内容收缩、DOM 行数有界，也避免了 `flex: 1` 撑出的一屏空白。
+2. **移除 @mui/x-data-grid**：只有 DocView 用过；它的默认高度策略与"面板随内容收缩"冲突，换成 MUI Table 后依赖与样式面都更小。
+3. **不再自写焦点陷阱/分栏原语**：MUI Dialog 自带焦点与 Escape；双栏退化为 DocView 内一处 grid 声明（原文可折叠，不是常驻 `SplitView`）。
+4. **无自定义 CSS 层**：theme + `sx` 承担全部样式；`.sr-only`、满高链、滚动条写进 `CssBaseline`。
+
+### 39.5 未验证
+
+- 破坏性操作（删除库/文档/分块、回滚）与真实文件上传未在浏览器里实际执行（会改数据）；相关请求层与确认流程由静态守卫 + 后端测试覆盖。
+- 真实上传时解析引擎进入 `FormData` 的端到端路径仍依赖一个可用文件与 embedding 服务；本轮只验证了表单值受控与请求构造。
+- 桌面宽度的三栏 API 文档与双栏文档工作台未做像素级复核（in-app 视口限制）。

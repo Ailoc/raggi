@@ -9,11 +9,11 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from ..chunk_limits import clamp_ratio, clamp_size
+from ..chunk_limits import clamp_ratio, clamp_size, normalize_strategy
 from ..sql import escape_sql, now_iso, only_cols, scalar, scalar_rows
 from ._engine import meta_of as _meta
 from .chunks import chunk_counts_by_doc, delete_kb_chunks
-from .documents import delete_document, docs_query, set_doc_fields
+from .documents import delete_documents, docs_query, set_doc_fields
 
 if TYPE_CHECKING:
     # LanceStore 在本模块只出现在注解里（文件顶部有 `from __future__ import
@@ -29,7 +29,7 @@ logger = logging.getLogger("raggi.repos.kbs")
 # 只取知识库行需要的列：`meta` 不在里面（kbs 表没有 meta，但曾经列表查询
 # 是「整行取回」，加列时形状会静默变化）。显式列名 = 契约。
 KB_COLS = ["kb_id", "name", "description", "chunk_size", "overlap_ratio",
-           "created_at", "updated_at"]
+           "strategy", "created_at", "updated_at"]
 
 def _kb_allow(store: LanceStore) -> set[str]:
     """kbs 的合法投影列。用代码声明的列清单，而不是实时探测 schema：
@@ -48,6 +48,7 @@ def _row(kb: dict, doc_count: int = 0,
         # 分块方案：custom=False 表示继承全局
         "chunk_size": size,
         "overlap_ratio": float(kb.get("overlap_ratio") or 0.0),
+        "strategy": normalize_strategy(kb.get("strategy")),
         "created_at": kb.get("created_at", ""),
         "updated_at": kb.get("updated_at", ""),
     }
@@ -111,12 +112,17 @@ def create_kb(store: LanceStore, name: str,
               description: str = "",
               chunk_size: int = 0,
               overlap_ratio: float = 0.0,
+              strategy: str = "",
               default_size: int = 512,
-              default_ratio: float = 0.0) -> dict:
+              default_ratio: float = 0.0,
+              default_strategy: str = "auto") -> dict:
     kb_id = str(uuid.uuid4())
     now = now_iso()
     size = clamp_size(chunk_size)
     ratio = clamp_ratio(overlap_ratio)
+    # 与 size/ratio 同一惯例：调用方没给就物化系统默认，不留"空 = 继承"
+    strat = (normalize_strategy(strategy) if str(strategy or "").strip()
+             else normalize_strategy(default_strategy))
     if size <= 0:
         # 两级模型：知识库始终持有具体值。未指定时用系统默认**物化**，
         # 不留「chunk_size=0 表示继承」这种需要运行时解释的状态。
@@ -124,7 +130,7 @@ def create_kb(store: LanceStore, name: str,
         if ratio <= 0:
             ratio = clamp_ratio(default_ratio)
     row = {"kb_id": kb_id, "name": name, "description": description,
-           "chunk_size": size, "overlap_ratio": ratio,
+           "chunk_size": size, "overlap_ratio": ratio, "strategy": strat,
            "created_at": now, "updated_at": now}
     mdb = _meta(store)
     if mdb is not None:
@@ -134,13 +140,15 @@ def create_kb(store: LanceStore, name: str,
     return _row({"kb_id": kb_id, "name": name,
                  "description": description,
                  "chunk_size": size, "overlap_ratio": ratio,
+                 "strategy": strat,
                  "created_at": now, "updated_at": now})
 
 def update_kb(store: LanceStore, kb_id: str, *,
               name: str | None = None,
               description: str | None = None,
               chunk_size: int | None = None,
-              overlap_ratio: float | None = None) -> dict | None:
+              overlap_ratio: float | None = None,
+              strategy: str | None = None) -> dict | None:
     row = get_kb(store, kb_id)
     if row is None:
         return None
@@ -156,6 +164,8 @@ def update_kb(store: LanceStore, kb_id: str, *,
         values["chunk_size"] = clamp_size(chunk_size)
     if overlap_ratio is not None:
         values["overlap_ratio"] = clamp_ratio(overlap_ratio)
+    if strategy is not None:
+        values["strategy"] = normalize_strategy(strategy)
     mdb = _meta(store)
     if mdb is not None:
         sets = ", ".join(f"{k}=?" for k in values)
@@ -210,24 +220,35 @@ def set_kb_fields(store: LanceStore, kb_id: str, **values) -> None:
     store.kbs.update(where=f"kb_id = '{escape_sql(kb_id)}'", values=values)
 
 def delete_kb(store: LanceStore, kb_id: str, backend=None) -> bool:
-    """删除知识库并级联删除其文档、分块与留档原文。"""
+    """删除知识库并级联删除其文档、分块与留档原文。
+
+    实现要点：
+    - **一次批量删除文档**，不再逐篇 `delete_document`：后者每篇各取一次
+      写锁、各查一次 SQLite，删 50 篇就是 50 次锁往返与 50 次点查；
+    - **整个级联过程持写锁**：列文档 → 删文档/分块 → 删库行必须是一个
+      临界区，否则并发的入库流水线可能在「列完文档」之后把新文档写进
+      这个即将删除的库，留下永远查不到的悬空 kb_id；
+    - 归档文件由 `delete_documents` 在元数据删除之后清理（见该函数）。
+    """
     row = get_kb(store, kb_id)
     if row is None:
         return False
-    # 走 doc_ids_in_kb（它会分派到当前真源）。以前这里自己拼一次 Lance 查询：
-    # 元数据搬到 SQLite 之后就查不到行，库删了但文档行留在原地成孤儿，
-    # 而孤儿文档仍会被 /api/documents 列出来。
-    for did in doc_ids_in_kb(store, kb_id):
-        delete_document(store, did, backend=backend)
-    # 收尾：清掉该库的独立分块（doc_id=""）。
-    # 它们不属于任何文档，上面的 delete_document 覆盖不到；漏删会留下
-    # 挂在已删除 kb_id 下的数据，且仍会被 kb_id 检索下推命中。
-    delete_kb_chunks(store, kb_id)
-    mdb = _meta(store)
-    if mdb is not None:
-        mdb.execute("DELETE FROM kbs WHERE kb_id=?", (kb_id,))
-    else:
-        store.kbs.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
+    with store.write_lock():
+        # 走 doc_ids_in_kb（它会分派到当前真源）。以前这里自己拼一次
+        # Lance 查询：元数据搬到 SQLite 之后就查不到行，库删了但文档行
+        # 留在原地成孤儿，而孤儿文档仍会被 /api/documents 列出来。
+        ids = doc_ids_in_kb(store, kb_id)
+        if ids:
+            delete_documents(store, ids, backend=backend)
+        # 清掉该库的独立分块（doc_id=""）。它们不属于任何文档，上面的
+        # 批量删除覆盖不到；漏删会留下挂在已删除 kb_id 下的数据，
+        # 且仍会被 kb_id 检索下推命中。
+        delete_kb_chunks(store, kb_id)
+        mdb = _meta(store)
+        if mdb is not None:
+            mdb.execute("DELETE FROM kbs WHERE kb_id=?", (kb_id,))
+        else:
+            store.kbs.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
     return True
 
 def doc_ids_in_kb(store: LanceStore, kb_id: str) -> list[str]:

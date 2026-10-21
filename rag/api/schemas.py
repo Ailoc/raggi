@@ -1,9 +1,22 @@
 """请求/响应模型：全部端点类型化（替代原 body: dict）。"""
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
+
+# 所有外部可见的标识符/文本长度上界。它们不是业务规则，而是**资源边界**：
+# 没有上界时一个构造请求就能把内存、SQL 语句长度或队列循环推到不可控。
+_ID = Annotated[str, StringConstraints(max_length=128)]
+_TEXT = Annotated[str, StringConstraints(max_length=100_000)]
+_DOC_TEXT_MAX = 20 * 1024 * 1024
+_LIST_OF_IDS = list[_ID]
 
 
 class SearchFilters(BaseModel):
@@ -12,12 +25,21 @@ class SearchFilters(BaseModel):
     kb_id / doc_ids / origin 作用在 chunks 表（下推到 SQL）；
     mime / parser_engine 在 documents 表，会先解析成 doc_id 集合再下推。
     """
-    kb_id: Optional[str] = None
-    doc_ids: Optional[list[str]] = None
+    kb_id: Optional[_ID] = None
+    # 上限 500 与批量删除/批量启停一致：更大的集合应分页，而不是
+    # 拼成一条几万项的 SQL IN。
+    doc_ids: Optional[_LIST_OF_IDS] = Field(default=None, max_length=500)
     origin: Optional[Literal["parsed", "manual"]] = None
-    mime: Optional[Union[str, list[str]]] = None
-    parser_engine: Optional[Union[str, list[str]]] = None
+    mime: Optional[Union[_ID, list[_ID]]] = None
+    parser_engine: Optional[Union[_ID, list[_ID]]] = None
     include_disabled: bool = False
+
+    @field_validator("mime", "parser_engine")
+    @classmethod
+    def _bounded_filter_values(cls, value):
+        if isinstance(value, list) and len(value) > 50:
+            raise ValueError("过滤值列表最多 50 项")
+        return value
 
 
 class SearchReq(BaseModel):
@@ -84,18 +106,21 @@ class SearchReq(BaseModel):
 
 
 class TextIngestReq(BaseModel):
-    text: str
-    title: str = "untitled"
-    kb_id: Optional[str] = None
+    # 正文上限与 pipeline 的 MAX_DOC_CHARS 一致（20MB 字符）
+    text: str = Field(min_length=0, max_length=_DOC_TEXT_MAX)
+    title: str = Field(default="untitled", max_length=500)
+    kb_id: Optional[_ID] = None
 
 
 class BatchIngestReq(BaseModel):
-    items: list[TextIngestReq] = Field(default_factory=list)
+    # 单次批量最多 64 条：更多应分批调用；队列本身只有 32 个待处理位，
+    # 更大的列表只会让服务端在拒绝与循环之间空转。
+    items: list[TextIngestReq] = Field(default_factory=list, max_length=64)
 
 
 class UrlIngestReq(BaseModel):
-    url: str
-    kb_id: Optional[str] = None
+    url: str = Field(min_length=1, max_length=4096)
+    kb_id: Optional[_ID] = None
 
 
 class DocUpdateReq(BaseModel):
@@ -112,8 +137,8 @@ class DocUpdateReq(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    title: Optional[str] = None
-    kb_id: Optional[str] = Field(
+    title: Optional[str] = Field(default=None, max_length=500)
+    kb_id: Optional[_ID] = Field(
         default=None,
         description="目标知识库；空串表示移出到未分组，不传表示不改动")
 
@@ -124,44 +149,48 @@ class DocDeleteBatchReq(BaseModel):
     为什么不是 `DELETE /api/documents/{id}` 循环：批量场景下逐条请求
     既慢又没有原子性（删到一半失败时用户无从判断删了哪些）。
     """
-    doc_ids: list[str] = Field(min_length=1)
+    doc_ids: list[_ID] = Field(min_length=1, max_length=500)
 
 
 class ReparseReq(BaseModel):
-    engine: Optional[str] = None
+    engine: Optional[str] = Field(default=None, max_length=32)
 
 
 class KBCreateReq(BaseModel):
-    name: str
-    description: str = ""
-    chunk_size: Optional[int] = None      # None/0 = 继承全局
-    overlap_ratio: Optional[float] = None
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=4000)
+    chunk_size: Optional[int] = Field(default=None, ge=0, le=100_000)
+    overlap_ratio: Optional[float] = Field(default=None, ge=0, le=100)
+    strategy: Optional[str] = Field(default=None, max_length=32)
 
 
 class KBUpdateReq(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    chunk_size: Optional[int] = None      # None = 不改；0 = 恢复继承
-    overlap_ratio: Optional[float] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    chunk_size: Optional[int] = Field(default=None, ge=0, le=100_000)
+    overlap_ratio: Optional[float] = Field(default=None, ge=0, le=100)
+    strategy: Optional[str] = Field(default=None, max_length=32)
 
 
 class PlanUpdateReq(BaseModel):
     """分块方案写入（知识库 / 文档共用）。
 
-    chunk_size 为 None 或 0 表示恢复继承上一级。
+    知识库方案：None/0 = 物化系统默认；文档方案：None/0 = 清除覆盖、继承知识库。
+    strategy 非法值一律归一为 auto。
     """
-    chunk_size: Optional[int] = None
-    overlap_ratio: Optional[float] = None
+    chunk_size: Optional[int] = Field(default=None, ge=0, le=100_000)
+    overlap_ratio: Optional[float] = Field(default=None, ge=0, le=100)
+    strategy: Optional[str] = Field(default=None, max_length=32)
 
 
 class ChunkAddReq(BaseModel):
-    text: str
-    doc_id: Optional[str] = None
-    kb_id: Optional[str] = None
+    text: _TEXT = Field(min_length=1)
+    doc_id: Optional[_ID] = None
+    kb_id: Optional[_ID] = None
 
 
 class ChunkEditReq(BaseModel):
-    text: str
+    text: _TEXT = Field(min_length=1)
     force: bool = False
     # 乐观并发：提交你读到的那一版 updated_at。若这期间别人改过，
     # 服务端返回 409 而不是静默覆盖。不传则沿用「最后写入者胜」，
@@ -179,38 +208,38 @@ class ChunkBatchEnabledReq(BaseModel):
     前端原先在客户端循环调用单条端点：200 次请求、无原子性，
     中途失败会让「哪些块被停用了」变得无法回答。
     """
-    chunk_ids: list[str] = Field(min_length=1)
+    chunk_ids: list[_ID] = Field(min_length=1, max_length=500)
     enabled: bool
 
 
 class ChunkEditItem(BaseModel):
-    chunk_id: str
-    text: str
+    chunk_id: _ID
+    text: _TEXT = Field(min_length=1)
     force: bool = False
-    updated_at: Optional[str] = None
+    updated_at: Optional[str] = Field(default=None, max_length=64)
 
 
 class ChunkBatchEditReq(BaseModel):
-    edits: list[ChunkEditItem] = Field(default_factory=list)
+    edits: list[ChunkEditItem] = Field(default_factory=list, max_length=200)
 
 
 class AnswerReq(BaseModel):
-    q: str
+    q: str = Field(min_length=1, max_length=2000)
     # 上限必须与 SearchReq.top_k 对齐：这里会一次性把命中块的**全文**
     # 全部拉进内存拼提示词，没有上限就能用构造请求打出数百 MB。
     top_k: Optional[int] = Field(default=None, ge=1, le=50)
     mode: Optional[str] = None
-    filters: dict = {}
-    window: Optional[int] = None
-    kb_id: Optional[str] = None    # 按知识库问答（原先缺失）
+    filters: dict = Field(default_factory=dict)
+    window: Optional[int] = Field(default=None, ge=0, le=10)
+    kb_id: Optional[_ID] = None    # 按知识库问答（原先缺失）
 
 
 class EmbedReq(BaseModel):
-    texts: list[str] = Field(default_factory=list)
+    texts: list[str] = Field(default_factory=list, max_length=1000)
 
 
 class ModelsTestReq(BaseModel):
-    kind: str = "all"
+    kind: Literal["all", "embedding", "llm", "rerank"] = "all"
 
 
 class ModelsUpdateReq(BaseModel):
@@ -225,12 +254,7 @@ class ApiKeyCreateReq(BaseModel):
     scope 缺省为最保守的 read——「签发即最小权限」，需要写能力时
     应由用户显式选择，而不是默默给全权限。
     """
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     scope: Literal["read", "write"] = "read"
-    expires_in_days: Optional[int] = None   # null = 永不过期
-    note: Optional[str] = None
-
-
-class RollbackReq(BaseModel):
-    version: int
-    table: str = "chunks"
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    note: Optional[str] = Field(default=None, max_length=1000)

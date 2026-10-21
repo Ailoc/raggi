@@ -181,8 +181,13 @@ def test_no_dead_tables_in_meta_ddl():
     meta_src = (ROOT / "rag" / "storage" / "meta.py").read_text(
         encoding="utf-8")
     meta_code = re.sub(r'DDL = """.*?"""', "", meta_src, flags=re.S)
-    others = [meta_code] + [str(f) for f in (ROOT / "rag").rglob("*.py")
-                            if "storage/meta.py" not in str(f)]
+    # 必须读**内容**而不是文件路径。旧实现收集的是 str(f)，于是守卫实际
+    # 在搜“文件名里有没有表名”——documents/jobs/kbs 靠文件名碰巧通过，
+    # 而任何没有同名文件的新表都会被误判成死 schema。
+    others = [meta_code] + [
+        f.read_text(encoding="utf-8") for f in (ROOT / "rag").rglob("*.py")
+        if "storage/meta.py" not in str(f)
+    ]
     corpus = "\n".join(others)
     dead = [t for t in sorted(tables)
             if not re.search(rf"\b{t}\b", corpus)]

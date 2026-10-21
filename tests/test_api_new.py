@@ -1,5 +1,5 @@
 """新端点回归测试：search GET/report、batch、embed、answer 开关、
-versions/rollback、stats、chunk 详情/批量编辑、documents 过滤、reparse。
+stats、chunk 详情/批量编辑、documents 过滤、reparse。
 """
 from __future__ import annotations
 
@@ -172,22 +172,22 @@ def test_answer_enabled(tmp_path):
         assert body["citations"][0]["chunk_id"] == "c0"
 
 
-def test_versions_and_rollback(tmp_path):
-    """GET /api/versions 与 POST /api/rollback。"""
+def test_version_management_endpoints_are_removed(tmp_path):
+    """版本管理（/versions、/rollback）已整体退役，路由不得回潮。
+
+    2026-10-08 决定：单机场景不需要用户级表版本回滚，误操作的修复路径是
+    重放/重建（/reindex、/reconcile）。LanceDB 底层版本仍由后台 compaction
+    回收（成本控制），不再是对外能力。这条钉住"删掉"而不是"藏起来"。
+    """
     with tempfile.TemporaryDirectory() as d:
         store = LanceStore.for_data_dir(Path(d), 4)
-        _seed(store)
         s = Settings()
         s.data_dir = Path(d)
-        c = TestClient(create_app(Ctx(s, store, _FakeRegistry())))
-        r = c.get("/api/versions")
-        assert r.status_code == 200
-        versions = r.json()["versions"]
-        assert versions, "应有版本"
-        v0 = versions[0]["version"]
-        r2 = c.post("/api/rollback", json={"version": v0})
-        assert r2.status_code == 200
-        assert r2.json()["rolled_back_to"] == v0
+        app = create_app(Ctx(s, store, _FakeRegistry()))
+        paths = [getattr(r, "path", "") for r in app.routes]
+        bad = sorted(p for p in paths
+                     if p.endswith("/versions") or p.endswith("/rollback"))
+        assert not bad, f"版本管理端点已移除，不得回潮: {bad}"
 
 
 def test_stats(tmp_path):
@@ -391,3 +391,12 @@ def test_dim_mismatch_detection(tmp_path):
         h2 = health(store, 4, "stub")
         assert h2["dim_mismatch"] is False
         assert h2["status"] == "ok"
+
+
+def test_models_exposes_features_for_ui_gating(tmp_path):
+    """前端需要知道 features.answer 才能禁用问答入口，而不是等 503。"""
+    c = _client(tmp_path)
+    body = c.get("/api/models").json()
+    assert body["features"]["answer"] is False
+    c.app.state.ctx.settings.features.answer = True
+    assert c.get("/api/models").json()["features"]["answer"] is True

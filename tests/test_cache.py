@@ -222,21 +222,15 @@ def test_embed_one_caches_repeat_and_scopes_by_model():
     assert len(lc.calls) == 2, "换了模型还吃缓存 ⇒ 返回另一个模型空间的向量"
 
 
-def test_embed_one_does_not_merge_inflight_identical_queries():
-    """**记录现状，不是理想行为**：缓存不合并「正在飞」的同 key 请求。
+def test_embed_one_merges_inflight_identical_queries():
+    """同 key 的并发请求只打一次 provider（in-flight 合并）。
 
-    第 1 条请求卡在 provider 里时，第 2 条同样的文本不会等它的结果，
-    而是**再打一次**（cache stampede）。串行则只 1 次（上一条测试）。
-    这正是审计 §4.2 里被否证的 B6 条目：队列式合批不做，
-    而 in-flight 合并是日后真要收益时的落点。
+    2026-10-20 审计收尾把 ARCH-AUDIT §4.2 里「先不做、只留落点」的
+    in-flight 合并落地了：TTLCache 现在提供单飞 `get_or_load`，等待者
+    共享第一条请求的结果。它没有队列式合批的等待窗口，也不改变返回内容。
 
-    所以这条测试**故意**断言「会重复调用」：将来谁实现了 in-flight 合并它会红，
-    那时该做的是「拿真实流量确认收益 + 改断言 + 更新 §4.2 的决定」，
-    而不是顺手把断言改小 —— 那等于偷偷推翻一个有记录的决定。
-
-    为什么不用「8 个线程同时冲」：假 provider 瞬间返回，第 2..8 条其实命中了缓存，
-    测出来的数取决于线程调度 —— 本条第一版就是这样写死的，实测拿不到 8。
-    「卡住第一条」才是对「有没有 in-flight 合并」的确定性判定。
+    判定方式：第 1 条卡在 provider 里时，第 2 条同文本必须等待并复用它，
+    而不是再打一次。用「卡住第一条」而不是 8 线程齐发，避免调度噪声。
     """
     from rag.models.embeddings import Embedder
 
@@ -261,6 +255,5 @@ def test_embed_one_does_not_merge_inflight_identical_queries():
     release.set()
     t1.join(timeout=5.0)
     t2.join(timeout=5.0)
-    assert len(calls) == 2, (
-        f"provider 被调了 {len(calls)} 次："
-        "若这是有意的 in-flight 合并，请连同 §4.2 一起更新（并改断言）")
+    assert len(calls) == 1, (
+        f"provider 被调了 {len(calls)} 次：in-flight 合并退化了")

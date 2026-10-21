@@ -215,8 +215,8 @@ def test_xss_payload_survives_as_data_not_markup(tmp_path):
 # ---- 前端架构守卫：{@html} 不得回归 ------------------------------------
 
 
-def _svelte_files() -> list[Path]:
-    return sorted(SRC.rglob("*.svelte"))
+def _component_files() -> list[Path]:
+    return sorted(SRC.rglob("*.tsx"))
 
 
 def _strip_comments(text: str) -> str:
@@ -250,58 +250,48 @@ _HTML_EXPR = re.compile(r"\{@html\s")
 
 
 def test_no_raw_html_injection_of_server_data():
-    """渲染**服务端数据**的地方不得使用 {@html}。
+    """渲染**服务端数据**的地方不得使用 dangerouslySetInnerHTML。
 
-    ApiDoc 的 renderInline 渲染的是仓内静态清单，且内部先整体转义，
-    属于可控例外；除此之外任何 {@html} 都要能指出具体文件。
+    迁移到 React 后这条更简单：全仓组件都不允许原始 HTML 注入。
+    API 文档的行内标记改由 React 节点解析（见 ApiDoc 的 inline()）。
     """
     offenders: list[str] = []
-    for p in _svelte_files():
+    for p in _component_files():
         text = _strip_comments(p.read_text(encoding="utf-8"))
-        for i, line in enumerate(text.splitlines(), 1):
-            if not _HTML_EXPR.search(line):
-                continue
-            # 唯一允许的例外：ApiDoc 的静态清单渲染
-            if p.name == "ApiDoc.svelte":
-                continue
-            offenders.append(f"{p.relative_to(ROOT)}:{i}: {line.strip()}")
+        if "dangerouslySetInnerHTML" in text:
+            offenders.append(str(p.relative_to(ROOT)))
     assert not offenders, (
-        "服务端数据不得用 {@html} 注入（XSS 面）：\n" + "\n".join(offenders))
+        "服务端数据不得用原始 HTML 注入（XSS 面）：\n" + "\n".join(offenders))
 
 
 def test_snippet_component_uses_no_raw_html():
-    """Snippet 组件自身不得含 {@html}。"""
-    text = _strip_comments((SRC / "ui" / "Snippet.svelte")
-                           .read_text(encoding="utf-8"))
-    assert not _HTML_EXPR.search(text), "Snippet 组件仍使用 {@html}"
+    """检索片段渲染不得含原始 HTML 注入。"""
+    for rel in ("views/Search.tsx", "ui/AnswerPanel.tsx"):
+        text = _strip_comments((SRC / rel).read_text(encoding="utf-8"))
+        assert "dangerouslySetInnerHTML" not in text, f"{rel} 仍允许原始 HTML"
+        assert "innerHTML" not in text, f"{rel} 仍在拼 innerHTML"
 
 
 def test_snippet_component_renders_mark_natively():
     """高亮必须是原生 <mark> 标签，而不是拼 HTML 字符串。"""
-    text = _strip_comments((SRC / "ui" / "Snippet.svelte")
+    text = _strip_comments((SRC / "views" / "Search.tsx")
                            .read_text(encoding="utf-8"))
-    assert "<mark>" in text, "Snippet 组件未渲染 <mark>"
+    assert "<mark" in text, "检索片段未渲染 <mark>"
+    assert "snippet.marks" in text, "未使用结构化高亮区间"
 
 
 def test_no_component_escapes_snippet_manually():
     """前端不得再手工 escape snippet（后端已不做，重复会双重转义）。"""
-    # escapeHtml 之类的手工转义函数若被用在 snippet 上会双重转义
-    for rel in ("views/Search.svelte", "ui/AnswerPanel.svelte"):
+    for rel in ("views/Search.tsx", "ui/AnswerPanel.tsx"):
         text = _strip_comments((SRC / rel).read_text(encoding="utf-8"))
         assert "escapeHtml" not in text, f"{rel} 仍在手工转义 snippet"
 
 
-def test_apidoc_html_helper_is_self_contained():
-    """保留的例外必须自证安全：整体转义先于任何标签插入。"""
-    text = _strip_comments((SRC / "views" / "ApiDoc.svelte")
+def test_apidoc_inline_markup_is_safe_by_construction():
+    """API 文档的行内标记用 React 节点解析，不做 HTML 注入。"""
+    text = _strip_comments((SRC / "views" / "ApiDoc.tsx")
                            .read_text(encoding="utf-8"))
-    idx_esc = text.find("function esc(")
-    idx_render = text.find("function renderInline(")
-    assert idx_esc >= 0 and idx_render > idx_esc, \
-        "renderInline 必须定义在 esc 之后"
-    body = text[idx_render:idx_render + 400]
-    assert body.count("esc(") >= 1, "renderInline 未调用 esc"
-    # esc 本身必须覆盖全部四个危险字符
-    esc_body = text[idx_esc:idx_esc + 200]
-    for ch in ("&", "<", ">", '"'):
-        assert ch in esc_body, f"esc 未覆盖 {ch}"
+    assert "function inline(" in text, "缺少行内标记解析器"
+    assert "dangerouslySetInnerHTML" not in text, "又回到 HTML 注入"
+    assert "<strong" in text and 'component="code"' in text, \
+        "行内标记没有渲染成 React 节点"

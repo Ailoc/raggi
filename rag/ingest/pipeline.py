@@ -20,7 +20,7 @@ from pathlib import Path
 
 from rag.core.config import ParserConfig, Settings, SplitConfig
 from rag.ingest.queue import JobCancelled
-from rag.ingest.splitter import split_text
+from rag.ingest.splitter import split_document
 from rag.models.http import ScaledSemaphore
 from rag.models.registry import ModelRegistry
 from rag.parsing.loaders import load_text, load_url
@@ -199,50 +199,75 @@ def _embed_concurrently(embedder, texts: list[str], cfg) -> list[list[float]]:
     return [v for rs in results for v in rs]
 
 
+def _page_of(spans, pos: int):
+    """块起点落在哪个解析 span → 页码（跨页块归起点所在的页）。
+
+    页码用于跳转与展示，起点页是用户最可能想跳到的位置；块跨越
+    两页时不必逐页标注（旧实现为保证页归属而逐页硬切，页末一句
+    被砍成两半、overlap 也跨不过去——这次重构取消了那个约束）。
+    """
+    if not spans:
+        return None
+    last = spans[0]
+    for sp in spans:
+        if sp.start <= pos < sp.end:
+            return sp.page
+        if pos >= sp.end:
+            last = sp
+    return last.page
+
+
+def _contextual(title: str, heading_path: str, text: str) -> str:
+    """向量化/FTS 输入 = 文档标题 > 章节面包屑 + 原文。
+
+    上下文头**只进检索通道**（embedding 与分词），不进存储的 `text`——
+    text 必须保持"原文切片"（偏移闭合、高亮、编辑都依赖这一点）。
+    heading_path 此前只用于展示：数据早就在库里，注入成本近零，
+    而这是"这一块讲什么"最直接的信号。
+    """
+    head = " > ".join(p for p in (title, heading_path) if p)
+    return f"{head}\n{text}" if head else text
+
+
 def _build_chunk_rows(parsed, doc_id: str, embed_model: str,
                       split_cfg: SplitConfig,
-                      kb_id: str = "") -> list[dict]:
-    """切分 + 偏移计算。
+                      kb_id: str = "",
+                      strategy: str = "auto",
+                      embed_fn=None) -> list[dict]:
+    """切分 + 偏移/页码映射。
 
-    相对偏移与 heading_path 由 splitter 附加（RCT 原样保留内容，
-    偏移闭合）；此处换算为相对全文纯文本的绝对偏移并 clamp 到
-    span 边界。
+    与旧实现的三点差别（都来自切分器重构）：
+    - 在**全文**上切分，页边界不再是切分边界（跨页段落完整，
+      overlap 也能跨页）；page 按块起点映射；
+    - 结构感知/原子保护/碎块合并由 splitter 负责，这里只做映射；
+    - heading_path 由 splitter 在全文范围计算。
     """
     chunk_rows: list[dict] = []
-    ordinal = 0
-    for src in parsed.spans:
-        page = src.page
-        sub = split_text(src.content, split_cfg.chunk_size,
-                         split_cfg.chunk_overlap)
-        for cd in sub:
-            rel = int(cd.metadata.get("char_start", -1))
-            offset_valid = rel >= 0
-            if rel < 0:
-                rel = 0
-            start = src.start + rel
-            end = min(start + len(cd.page_content), src.end)
-            chunk_rows.append({
-                "chunk_id": str(uuid.uuid4()),
-                "doc_id": doc_id,
-                "ordinal": ordinal,
-                "kb_id": kb_id,
-                "text": cd.page_content,
-                "text_seg": "",  # 批量分词在外部填充
-                "heading_path": cd.metadata.get("heading_path", ""),
-                "page": page,
-                "char_start": start,
-                "char_end": end,
-                "token_count": max(1, len(cd.page_content) // 4),
-                "origin": "parsed",
-                "edited": False,
-                "original_text": None,
-                "offset_valid": offset_valid,
-                "embed_model": embed_model,
-                "vector": [],
-                "created_at": _now(),
-                "updated_at": _now(),
-            })
-            ordinal += 1
+    spans = split_document(parsed.text, split_cfg.chunk_size,
+                           split_cfg.chunk_overlap, strategy=strategy,
+                           embed_fn=embed_fn)
+    for ordinal, sp in enumerate(spans):
+        chunk_rows.append({
+            "chunk_id": str(uuid.uuid4()),
+            "doc_id": doc_id,
+            "ordinal": ordinal,
+            "kb_id": kb_id,
+            "text": sp.text,
+            "text_seg": "",  # 批量分词在外部填充
+            "heading_path": sp.heading_path,
+            "page": _page_of(parsed.spans, sp.start),
+            "char_start": sp.start,
+            "char_end": sp.end,
+            "token_count": max(1, len(sp.text) // 4),
+            "origin": "parsed",
+            "edited": False,
+            "original_text": None,
+            "offset_valid": sp.offset_valid,
+            "embed_model": embed_model,
+            "vector": [],
+            "created_at": _now(),
+            "updated_at": _now(),
+        })
     return chunk_rows
 
 
@@ -267,7 +292,8 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
     if plan:
         split_cfg = SplitConfig(
             chunk_size=plan["chunk_size"],
-            chunk_overlap=plan["overlap_chars"])
+            chunk_overlap=plan["overlap_chars"],
+            strategy=plan.get("strategy", "auto"))
     # 归一化（用于 char 偏移/页码映射）
     parsed = normalize(documents)
     full_text = parsed.text[:MAX_DOC_CHARS]
@@ -297,13 +323,22 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
     # doc_id 至此确定，立刻回写任务行：异步调用方靠它找到产出的文档
     _set_job_doc(store, job_id, doc_id)
     _set_stage(store, job_id, "split")
+    # semantic 策略要在切分阶段用向量找断点；其余策略不付这份开销
+    embed_fn = None
+    if split_cfg.strategy == "semantic":
+        def embed_fn(ts):   # noqa: E731 —— 闭包捕获 embedder/registry
+            return _embed_concurrently(embedder, ts,
+                                       registry.bundle.embed_cfg)
     chunk_rows = _build_chunk_rows(parsed, doc_id, embed_model, split_cfg,
-                                   kb_id)
-    texts = [r["text"] for r in chunk_rows]
-    for r, seg in zip(chunk_rows, segment_batch(texts)):
+                                   kb_id, strategy=split_cfg.strategy,
+                                   embed_fn=embed_fn)
+    # 检索增强：向量输入与 FTS 分词都带"标题 > 面包屑"上下文头
+    ctx_texts = [_contextual(title, r["heading_path"], r["text"])
+                 for r in chunk_rows]
+    for r, seg in zip(chunk_rows, segment_batch(ctx_texts)):
         r["text_seg"] = seg
     _set_stage(store, job_id, "embed", total=len(chunk_rows))
-    vectors = _embed_concurrently(embedder, texts,
+    vectors = _embed_concurrently(embedder, ctx_texts,
                                   registry.bundle.embed_cfg)
 
     # 阶段边界 ②：向量化完成、写库之前。这里是最值得检查的位置——
@@ -329,6 +364,16 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
                         "status": "duplicate", "engine": engine,
                         "chunk_count": int(existing[0]["chunk_count"]
                                             or 0)}
+
+        # 新入库若带着一个已被删除的 kb_id，必须在这里挡住：
+        # 删除知识库与入库流水线并发时，「列文档」可能发生在写入之前，
+        # 不校验就会写出一个 kb_id 指向空库的文档——列表里看不见、
+        # 按库检索也命中不了，却真实占着存储。
+        if not explicit_doc and kb_id:
+            from rag.storage.repos.kbs import get_kb
+
+            if get_kb(store, kb_id) is None:
+                raise ValueError("目标知识库不存在或已被删除")
 
         # 重解析保留旧文档的归属与留档；新入库由 kb_id 与原文留档构成。
         # kb_id / stored_file 是真实列，meta 只承载嵌套的 chunking 结构。

@@ -127,7 +127,8 @@ def test_stream_emits_sources_then_deltas_then_done(env):
     sources = next(d for e, d in events if e == "sources")["citations"]
     assert sources, "sources 事件应带非空引用表"
     assert sources[0]["index"] == 1
-    assert {"chunk_id", "doc_id", "title", "score"} <= set(sources[0])
+    assert {"chunk_id", "kb_id", "doc_id", "title", "score"} <= set(sources[0])
+    assert "kb_id" in sources[0], "跨库检索时前端需要 kb_id 才能生成正确深链"
 
     done = next(d for e, d in events if e == "done")
     assert done["mode"]
@@ -167,7 +168,11 @@ def test_stream_handles_empty_retrieval(env):
         json={"q": "库里完全没有这个词zzz", "top_k": 5,
               "mode": "fts"}).text)
     names = [e for e, _ in events]
-    assert names[0] == "delta", "空结果应先给出说明"
+    # 事件契约是 sources → delta* → done；空结果也不能反过来。
+    # 旧测试把“delta 在前”当成正确行为，等于把实现 bug 固化成了契约。
+    assert names[0] == "sources", "空结果也应先发空的 sources"
+    empty = next(d for e, d in events if e == "sources")["citations"]
+    assert empty == []
     assert "未检索到" in next(d for e, d in events if e == "delta")["text"]
     assert names[-1] == "done"
 

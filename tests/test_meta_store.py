@@ -267,6 +267,64 @@ def test_delete_kb_leaves_no_orphan_documents(tmp_path):
     assert store.chunks.count_rows() == 0, "删库后仍有分块（可被检索命中）"
 
 
+def test_single_delete_finds_archived_file_in_the_truth_engine(tmp_path):
+    """单篇删除必须能从**当前元数据引擎**读到 stored_file。
+
+    回归防护：`stored_file()` 曾直接读 `store.documents`（Lance 旧表），
+    默认 SQLite 真源下永远返回 None —— 单篇删除因此漏删归档文件，
+    而重解析会误报「没有留档原文」，两处都不报错。
+    """
+    from rag.storage.repos.documents import stored_file
+
+    client, store, meta = _env(tmp_path, with_meta=True)
+    r = client.post(
+        "/api/documents",
+        files={"file": ("archive.txt", b"archived original content", "text/plain")})
+    assert r.status_code == 200, r.text
+    doc_id = r.json()["doc_id"]
+    name = stored_file(store, doc_id)
+    assert name, "默认 SQLite 真源下读不到 stored_file（又读回 Lance 旧表了）"
+    path = tmp_path / "files" / name
+    assert path.exists(), f"上传后归档文件不存在: {path}"
+
+    assert client.delete(f"/api/documents/{doc_id}").status_code == 200
+    assert meta.query_one("SELECT doc_id FROM documents WHERE doc_id=?",
+                          (doc_id,)) is None
+    assert not path.exists(), "文档行已删除，归档文件却留成了孤儿"
+
+
+def test_delete_removes_metadata_before_archive(tmp_path):
+    """删除顺序：先删元数据/分块，最后删归档文件。
+
+    反过来（先删文件）在删除中途失败时会留下「文档还在、原文没了」，
+    而且重解析也救不回来；先删行则最多留下可回收的孤立文件。
+    这里在 delete_blob 被调用的瞬间检查文档行是否已不存在。
+    """
+    client, store, meta = _env(tmp_path, with_meta=True)
+    r = client.post(
+        "/api/documents",
+        files={"file": ("order.txt", b"delete order check", "text/plain")})
+    assert r.status_code == 200, r.text
+    doc_id = r.json()["doc_id"]
+
+    backend = client.app.state.ctx.backend
+    original_delete = backend.delete_blob
+    seen: list[bool] = []
+
+    def checked_delete(name):
+        seen.append(meta.query_one(
+            "SELECT doc_id FROM documents WHERE doc_id=?", (doc_id,)) is not None)
+        return original_delete(name)
+
+    backend.delete_blob = checked_delete
+    try:
+        assert client.delete(f"/api/documents/{doc_id}").status_code == 200
+    finally:
+        backend.delete_blob = original_delete
+    assert seen == [False], (
+        "delete_blob 被调用时文档行仍然存在——删除顺序退回了「先删文件」")
+
+
 def test_search_titles_and_filters_follow_the_source(tmp_path):
     """检索结果的标题与 mime 过滤读的是当前真源，不是旧表。"""
     client, store, meta = _env(tmp_path, with_meta=True)
@@ -513,3 +571,139 @@ def test_reconcile_fixes_the_engine_that_holds_the_truth(tmp_path):
     h = c.get("/api/health").json()
     assert h["count_mismatch"] == [], (
         f"修复后 health 仍报不一致：{h['count_mismatch']}")
+
+
+# ---- 跨进程共享状态基础 -------------------------------------------------
+
+def test_shared_state_tables_and_epoch_are_visible_across_connections(tmp_path):
+    """新增的 rate_buckets / idempotency 表与 meta_state 计数器跨连接可见。
+
+    这是限流、幂等、缓存失效三项的前置：如果两个 MetaStore 连接看不到
+    同一份状态，后面三项都会退化成"每进程一份"。
+    """
+    path = tmp_path / "shared.db"
+    a = MetaStore(path)
+    b = MetaStore(path)
+    for table in ("rate_buckets", "idempotency"):
+        assert a.count(table) == 0, f"{table} 表未创建"
+        assert b.count(table) == 0
+    assert a.bump_state("auth_epoch") == 1
+    assert b.bump_state("auth_epoch") == 2
+    assert a.state_int("auth_epoch") == 2, "第二连接的递增对第一连接不可见"
+    # 重复打开/建表必须幂等，且不重置计数器
+    c = MetaStore(path)
+    assert c.state_int("auth_epoch") == 2
+
+
+def test_bump_state_is_atomic_across_connections(tmp_path):
+    """并发递增不能丢计数（单条 UPSERT + IMMEDIATE 事务）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "shared.db"
+    stores = [MetaStore(path) for _ in range(4)]
+
+    def worker(meta):
+        for _ in range(25):
+            meta.bump_state("write_epoch")
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(worker, stores))
+    assert stores[0].state_int("write_epoch") == 100
+
+
+def test_write_epoch_changes_health_cache_key(tmp_path):
+    """跨进程健康缓存：成功写会递增 write_epoch，健康缓存键必须跟着变。"""
+    from types import SimpleNamespace
+
+    from rag.api.system import _health_key
+    from rag.storage.meta import MetaStore
+
+    meta = MetaStore(tmp_path / "epoch.db")
+    cfg = SimpleNamespace(dim=4, model="stub")
+    ctx = SimpleNamespace(
+        store=SimpleNamespace(uri="store-x"),
+        registry=SimpleNamespace(bundle=SimpleNamespace(embed_cfg=cfg)),
+        meta=meta)
+    before = _health_key(ctx)
+    meta.bump_state("write_epoch")
+    after = _health_key(ctx)
+    assert before != after, "写代际变化后健康缓存键没有变"
+    assert after[-1] == 1
+
+
+def test_successful_api_write_bumps_shared_epoch(tmp_path):
+    client, store, meta = _env(tmp_path, with_meta=True)
+    assert meta.state_int("write_epoch") == 0
+    assert client.post("/api/kbs", json={"name": "epoch"}).status_code == 200
+    assert meta.state_int("write_epoch") == 1
+    # 读请求不该递增
+    client.get("/api/kbs")
+    assert meta.state_int("write_epoch") == 1
+
+
+def test_kb_plan_reads_the_truth_engine(tmp_path):
+    """自定义分块方案必须从 SQLite 真源读回，而不是 Lance 旧表。
+
+    回归防护：`plan.kb_plan()` 曾直接 `store.kbs.search()`；默认发动机
+    是 SQLite 时，新建知识库在旧表里没有行 → 自定义方案被静默当成
+    系统默认，直到入库后块大小不对才暴露。
+    """
+    from rag.storage import plan as chunking
+
+    client, store, meta = _env(tmp_path, with_meta=True)
+    kb = client.post("/api/kbs", json={"name": "方案真源"}).json()
+    r = client.put(f"/api/kbs/{kb['kb_id']}/plan", json={
+        "chunk_size": 1024, "overlap_ratio": 20, "strategy": "structure"})
+    assert r.status_code == 200, r.text
+    plan = client.get(f"/api/kbs/{kb['kb_id']}/plan").json()
+    assert plan["own"]["chunk_size"] == 1024
+    assert plan["own"]["overlap_ratio"] == 20
+    assert plan["own"]["strategy"] == "structure"
+    assert plan["own"]["custom"] is True
+    direct = chunking.kb_plan(
+        store, kb["kb_id"], client.app.state.ctx.settings)
+    assert direct and direct["chunk_size"] == 1024, (
+        "kb_plan 又读回 Lance 旧表了")
+    # 实际入库解析出的方案也必须用它
+    resolved = chunking.resolve_plan(
+        store, client.app.state.ctx.settings, kb_id=kb["kb_id"])
+    assert resolved["chunk_size"] == 1024
+    assert resolved["source"] == "kb"
+
+
+def test_kb_update_with_zero_materializes_defaults(tmp_path):
+    """PUT /kbs 传 chunk_size=0 必须写入具体默认值，而不是留 0。"""
+    client, store, meta = _env(tmp_path, with_meta=True)
+    kb = client.post("/api/kbs", json={
+        "name": "重置方案", "chunk_size": 1024, "overlap_ratio": 20}).json()
+    assert kb["chunk_size"] == 1024
+    r = client.put(f"/api/kbs/{kb['kb_id']}", json={"chunk_size": 0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["chunk_size"] != 0, "又把 0 留在库里了"
+    assert body["plan_custom"] is False, (
+        f"恢复默认后仍被标成自定义：{body}")
+    plan = client.get(f"/api/kbs/{kb['kb_id']}/plan").json()
+    assert plan["own"]["chunk_size"] == body["chunk_size"]
+    assert plan["own"]["custom"] is False, (
+        "reset 后 own.custom 仍为 true：又把“有具体值”当成了“自定义”")
+
+
+def test_kb_plan_reset_restores_global_strategy(tmp_path):
+    """恢复默认必须连策略一起物化，不能只抄数字留下 auto。"""
+    from rag.core.config import SplitConfig
+
+    client, store, meta = _env(tmp_path, with_meta=True)
+    settings = client.app.state.ctx.settings
+    settings.split = SplitConfig(chunk_size=700, chunk_overlap=70,
+                                 strategy="structure")
+    kb = client.post("/api/kbs", json={"name": "策略默认"}).json()
+    r = client.put(f"/api/kbs/{kb['kb_id']}/plan",
+                   json={"chunk_size": 0, "overlap_ratio": 0,
+                         "strategy": ""})
+    assert r.status_code == 200, r.text
+    plan = client.get(f"/api/kbs/{kb['kb_id']}/plan").json()
+    assert plan["own"]["chunk_size"] == 700
+    assert plan["own"]["strategy"] == "structure", (
+        f"恢复默认只恢复了数字，策略仍是 {plan['own']['strategy']}")
+    assert plan["own"]["custom"] is False

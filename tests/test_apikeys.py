@@ -178,6 +178,16 @@ def test_verify_rejects_expired(env):
         apikeys.verify(env.store, secret)
 
 
+def test_malformed_expiry_fails_closed(env):
+    """过期时间损坏时必须拒绝，不能把「读不懂」翻译成「永不过期」。"""
+    row, secret = apikeys.create_key(env.store, "a")
+    env.store.apikeys.update(
+        where=f"key_id = '{row['key_id']}'",
+        values={"expires_at": "not-a-date"})
+    with pytest.raises(apikeys.ApiKeyAuthError, match="过期时间无效"):
+        apikeys.verify(env.store, secret)
+
+
 def test_expiry_in_future_is_accepted(env):
     _, secret = apikeys.create_key(env.store, "a", expires_in_days=30)
     assert apikeys.verify(env.store, secret)
@@ -372,3 +382,27 @@ def test_wrong_token_rejected(env):
     assert env.get("/api/health",
                    headers={"Authorization": "Bearer wrong"}
                    ).status_code == 401
+
+def test_revoke_is_immediately_visible_across_connections(tmp_path):
+    """两个 worker 共用 SQLite 时，吊销必须立刻在另一个连接生效。
+
+    回归防护：verify 缓存原来只按 (store.uri, key_hash) 键，5s TTL 内
+    另一个 worker 仍会用吊销前的行；多进程默认形态下这是真实的权限窗口。
+    现在缓存键带共享 auth_epoch，create/revoke 会递增它。
+    """
+    from types import SimpleNamespace
+
+    from rag.storage.meta import MetaStore
+
+    path = tmp_path / "auth.db"
+    meta_a = MetaStore(path)
+    meta_b = MetaStore(path)
+    a = SimpleNamespace(uri=str(tmp_path), meta=meta_a)
+    b = SimpleNamespace(uri=str(tmp_path), meta=meta_b)
+    row, secret = apikeys.create_key(a, "跨进程", scope="write")
+    assert apikeys.verify(b, secret)["scope"] == "write"
+    assert apikeys.revoke(a, row["key_id"]) is True
+    with pytest.raises(apikeys.ApiKeyAuthError, match="吊销"):
+        apikeys.verify(b, secret)
+    # 代际也要跨连接可见
+    assert meta_b.state_int("auth_epoch") == meta_a.state_int("auth_epoch") >= 2

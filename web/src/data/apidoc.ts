@@ -243,7 +243,7 @@ export const GROUPS: Group[] = [
           { name: "description", type: "string", desc: "描述" },
           { name: "doc_count", type: "number", desc: "文档数" },
           { name: "chunk_count", type: "number", desc: "分块数" },
-          { name: "chunk_size", type: "number", desc: "分块大小；0 表示继承全局" },
+          { name: "chunk_size", type: "number", desc: "分块大小；旧数据 0 会在启动迁移时物化为系统默认" },
           { name: "overlap_ratio", type: "number", desc: "重叠百分比（0-50）" },
           { name: "plan_custom", type: "boolean", desc: "是否自定义了分块方案" },
           { name: "created_at / updated_at", type: "string", desc: "ISO 时间" },
@@ -253,11 +253,11 @@ export const GROUPS: Group[] = [
         method: "POST",
         path: "/api/v1/kbs",
         summary: "创建知识库。",
-        notes: ["只需名称；分块方案留空则继承全局设置。"],
+        notes: ["只需名称；分块方案不填时会把当前系统默认值物化到新库。"],
         params: [
           { name: "name", in: "body", type: "string", required: true, desc: "名称，不能为空" },
           { name: "description", in: "body", type: "string", desc: "描述" },
-          { name: "chunk_size", in: "body", type: "int|null", desc: "分块大小；null/0 = 继承全局（范围 64-8192）" },
+          { name: "chunk_size", in: "body", type: "int|null", desc: "分块大小；null/0 = 物化系统默认（范围 64-8192）" },
           { name: "overlap_ratio", in: "body", type: "number|null", desc: "重叠百分比（0-50）" },
         ],
         example: { name: "设备手册", description: "变频器与伺服产品文档", chunk_size: 768, overlap_ratio: 12 },
@@ -282,13 +282,13 @@ export const GROUPS: Group[] = [
         path: "/api/v1/kbs/{kb_id}",
         summary: "更新知识库基本信息或分块方案。",
         notes: [
-          "只传需要改的字段；chunk_size 传 0 可恢复继承全局。",
+          "只传需要改的字段；chunk_size 传 0 会把当前系统默认**物化**到本库（两级模型没有运行时继承）。",
           "改方案只影响之后入库的文档，已有文档需调用 /resplit 才会重切。",
         ],
         params: [
           { name: "kb_id", in: "path", type: "string", required: true, desc: "知识库 ID" },
           { name: "name / description", in: "body", type: "string", desc: "基本信息" },
-          { name: "chunk_size", in: "body", type: "int|null", desc: "null 不改；0 = 恢复继承" },
+          { name: "chunk_size", in: "body", type: "int|null", desc: "null 不改；0 = 物化系统默认值" },
           { name: "overlap_ratio", in: "body", type: "number|null", desc: "重叠百分比" },
         ],
         example: { name: "设备手册", chunk_size: 1024, overlap_ratio: 15 },
@@ -311,7 +311,7 @@ export const GROUPS: Group[] = [
         summary: "查询知识库的分块方案与继承链。",
         params: [{ name: "kb_id", in: "path", type: "string", required: true, desc: "知识库 ID" }],
         fields: [
-          { name: "own", type: "object", desc: "本库自定义值（custom=false 表示继承）" },
+          { name: "own", type: "object", desc: "本库具体值；own.custom 表示是否偏离系统默认" },
           { name: "effective", type: "object", desc: "当前实际生效值，含 chunk_size / overlap_chars / source" },
           { name: "global", type: "object", desc: "全局默认值，供对比" },
         ],
@@ -320,10 +320,10 @@ export const GROUPS: Group[] = [
         method: "PUT",
         path: "/api/v1/kbs/{kb_id}/plan",
         summary: "设置知识库的分块方案。",
-        notes: ["chunk_size 传 0 或 null 恢复继承全局；不影响已入库文档。"],
+        notes: ["chunk_size 传 0 或 null 会把系统默认物化到本库（两级模型没有运行时继承）；不影响已入库文档。"],
         params: [
           { name: "kb_id", in: "path", type: "string", required: true, desc: "知识库 ID" },
-          { name: "chunk_size", in: "body", type: "int|null", desc: "null/0 = 继承全局" },
+          { name: "chunk_size", in: "body", type: "int|null", desc: "null/0 = 物化系统默认值" },
           { name: "overlap_ratio", in: "body", type: "number|null", desc: "重叠百分比" },
         ],
         example: { chunk_size: 1024, overlap_ratio: 15 },
@@ -799,6 +799,7 @@ export const GROUPS: Group[] = [
           { name: "llm", type: "LLMConfig", desc: "provider / model / base_url / api_key / temperature / max_tokens" },
           { name: "rerank", type: "RerankConfig", desc: "enabled / provider / model / base_url / api_key / top_n / timeout" },
           { name: "retrieve", type: "RetrieveConfig", desc: "检索默认值（mode / top_k / candidate_k / window / nprobes / k_rrf / refine_factor 等），供前端显示「留空 = 用多少」" },
+          { name: "features", type: "Features", desc: "功能开关（answer）；前端据此禁用问答入口，避免点了才收到 503" },
         ],
       },
       {
@@ -947,14 +948,19 @@ export const GROUPS: Group[] = [
         method: "GET",
         path: "/api/v1/jobs",
         summary: "最近的任务列表（按开始时间倒序）。",
-        notes: ["active_only=true 只返回未结束的任务，可用于「正在入库」指示。"],
+        notes: [
+          "status 在**分页之前**过滤，total 是过滤后的行数；offset 下推到存储层。",
+          "active_only=true 是 status=active 的兼容别名，用于「正在入库」指示。",
+        ],
         params: [
-          { name: "limit", in: "query", type: "int", desc: "条数上限，默认 50" },
-          { name: "active_only", in: "query", type: "boolean", desc: "只要未结束的任务" },
+          { name: "limit", in: "query", type: "int", desc: "每页条数，默认 50，上限 500" },
+          { name: "offset", in: "query", type: "int", desc: "跳过前 N 条；用于分页" },
+          { name: "status", in: "query", type: "string", desc: "all / active / failed / done / cancelled，默认 all" },
+          { name: "active_only", in: "query", type: "boolean", desc: "兼容别名：等价于 status=active" },
         ],
         fields: [
           { name: "items", type: "Job[]", desc: "任务列表" },
-          { name: "total", type: "number", desc: "返回条数" },
+          { name: "total", type: "number", desc: "**过滤后的**总条数（不是本页条数）" },
           { name: "queue", type: "object", desc: "队列状态：workers / pending / max_pending" },
         ],
       },
@@ -1007,7 +1013,7 @@ export const GROUPS: Group[] = [
   {
     id: "system",
     title: "系统运维",
-    desc: "健康检查、容量统计、索引重建、数据对账与版本回滚。",
+    desc: "健康检查、容量统计、索引重建与数据对账。",
     notes: [
       "健康检查的 status 为 degraded 有两类原因，看 `checks_failed` 区分：" +
         "一是 count_mismatch / orphan_chunks / dim_mismatch / " +
@@ -1035,20 +1041,18 @@ export const GROUPS: Group[] = [
           { name: "embedding_dim / stored_embedding_dim", type: "number", desc: "配置的维度与表中实际维度" },
           { name: "dim_mismatch", type: "boolean", desc: "维度是否不一致（不一致会导致写入失败）" },
           { name: "embedding_model_mismatch", type: "boolean", desc: "表内 embed_model 是否与当前配置不一致" },
-          { name: "lancedb_versions", type: "number", desc: "chunks 表版本数" },
           { name: "index_state", type: "object", desc: "vector / text_seg 的索引状态与未索引行数" },
         ],
       },
       {
         method: "GET",
         path: "/api/v1/stats",
-        summary: "容量 / 索引 / 版本 / 磁盘统计。",
+        summary: "容量 / 索引 / 磁盘统计。",
         fields: [
           { name: "doc_count / chunk_count / job_count", type: "number", desc: "各表行数" },
           { name: "data_dir_bytes / lancedb_dir_bytes", type: "number", desc: "目录占用字节" },
           { name: "disk_free_bytes", type: "number", desc: "剩余磁盘字节；获取失败为 -1" },
           { name: "indexes", type: "object", desc: "chunks / documents 的索引清单" },
-          { name: "versions", type: "number", desc: "chunks 表版本数" },
         ],
       },
       {
@@ -1070,37 +1074,6 @@ export const GROUPS: Group[] = [
           "**不能修复向量维度变更**——索引重建不改变表 schema。",
         ],
         fields: [{ name: "ok", type: "boolean", desc: "固定为 true" }],
-      },
-      {
-        method: "GET",
-        path: "/api/v1/versions",
-        summary: "列出表的历史版本（供回滚使用）。",
-        params: [
-          { name: "table", in: "query", type: "string", desc: "表名，默认 chunks" },
-        ],
-        fields: [
-          { name: "table", type: "string", desc: "表名" },
-          { name: "versions", type: "object[]", desc: "版本列表" },
-        ],
-      },
-      {
-        method: "POST",
-        path: "/api/v1/rollback",
-        summary: "把指定表回滚到历史版本。",
-        notes: [
-          "**危险**：LanceDB 按表管理版本，回滚 chunks 后 documents 表不会跟着回滚，" +
-            "必须随后调用 /api/v1/health 对账、必要时执行 /api/v1/reconcile。",
-        ],
-        params: [
-          { name: "version", in: "body", type: "int", required: true, desc: "目标版本号" },
-          { name: "table", in: "body", type: "string", desc: "表名，默认 chunks" },
-        ],
-        example: { version: 12, table: "chunks" },
-        fields: [
-          { name: "ok", type: "boolean", desc: "固定为 true" },
-          { name: "rolled_back_to", type: "number", desc: "回滚到的版本号" },
-          { name: "note", type: "string", desc: "提示：对账提醒" },
-        ],
       },
     ],
   },

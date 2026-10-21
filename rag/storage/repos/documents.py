@@ -137,11 +137,16 @@ def list_documents(
     return out, total
 
 def stored_file(store: "LanceStore", doc_id: str) -> str | None:
-    """读 documents.stored_file（上传原文的归档名）。"""
+    """读 documents.stored_file（上传原文的归档名）。
 
+    **必须走 docs_query**：元数据真源可能是 SQLite，直接读
+    `store.documents`（Lance 旧表）在默认部署下永远返回 None。
+    这个 bug 不会报错，只会让单篇删除漏掉归档文件、重解析说
+    「没有留档原文」——都是把「读错引擎」伪装成「数据不存在」。
+    """
     try:
-        rows = scalar_rows(store.documents, cols=["stored_file"],
-                           where=f"doc_id = '{escape_sql(doc_id)}'", limit=1)
+        rows = docs_query(store, ["stored_file"],
+                          eq={"doc_id": doc_id}, limit=1)
         if rows:
             return rows[0].get("stored_file") or None
     except Exception as e:  # noqa: BLE001
@@ -162,15 +167,23 @@ def delete_document(store: "LanceStore", doc_id: str, backend=None) -> None:
     执行，新块会写进已被删掉的 documents 行里，成为永久孤儿 chunk，
     health 的 orphan_chunks 恒大于 0 且永不恢复。
     """
-    name = stored_file(store, doc_id)
+    # 先删元数据与分块，**最后**删归档。
+    #
+    # 反过来（先删文件、再删行）在删除失败或进程被杀时，会留下一篇
+    # 界面可见、重解析也救不回来的文档：正文索引还在，原文却已没了。
+    # 反之只剩一个无人引用的归档文件，是可以用维护任务回收的垃圾，
+    # 不会让用户丢数据。归档删除失败也不再只记 debug：它会累积磁盘占用，
+    # 必须在默认日志级别下可见。
+    with store.write_lock():
+        name = stored_file(store, doc_id)
+        store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
+        _delete_doc_rows(store, [doc_id])
     if name and backend is not None:
         try:
             backend.delete_blob(name)
         except Exception as e:  # noqa: BLE001
-            logger.debug("归档清理失败 %s: %s", name, e)
-    with store.write_lock():
-        store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
-        _delete_doc_rows(store, [doc_id])
+            logger.warning("归档清理失败（元数据已删，留下孤立文件）%s: %s",
+                           name, e)
 
 def delete_documents(store: "LanceStore", doc_ids: list[str],
                      backend=None) -> dict:
@@ -188,24 +201,26 @@ def delete_documents(store: "LanceStore", doc_ids: list[str],
     ids = [d for d in dict.fromkeys(str(i) for i in doc_ids) if d]
     if not ids:
         return {"deleted": 0, "skipped": 0}
-    # 一次取回，不在循环里逐条查（删 50 篇 = 以前 50 次 ~5ms 的往返）
-    found = get_documents(store, ids, cols=["doc_id", "stored_file"])
-    names = [str(found[i].get("stored_file") or "")
-             for i in found if found[i].get("stored_file")]
-    known = list(found)
-    if not known:
-        return {"deleted": 0, "skipped": len(ids)}
     with store.write_lock():
-        for name in names:
-            if backend is None:
-                continue
-            try:
-                backend.delete_blob(name)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("归档清理失败 %s: %s", name, e)
+        # 一次取回，不在循环里逐条查（删 50 篇 = 以前 50 次 ~5ms 的往返）。
+        # 放在锁内：否则刚取到归档名、另一条入库流水线就可能改写文档。
+        found = get_documents(store, ids, cols=["doc_id", "stored_file"])
+        known = list(found)
+        if not known:
+            return {"deleted": 0, "skipped": len(ids)}
+        names = [str(found[i].get("stored_file") or "")
+                 for i in found if found[i].get("stored_file")]
         for doc_id in known:
             store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
         _delete_doc_rows(store, known)
+    # 归档在元数据删除之后清理：同样的「先删行、后删文件」顺序。
+    if backend is not None:
+        for name in names:
+            try:
+                backend.delete_blob(name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("归档清理失败（元数据已删，留下孤立文件）%s: %s",
+                               name, e)
     return {"deleted": len(known), "skipped": len(ids) - len(known)}
 
 def _delete_doc_rows(store: "LanceStore", doc_ids: list[str]) -> None:

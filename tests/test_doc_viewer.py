@@ -184,15 +184,26 @@ def test_pdf_ingest_works_without_langchain_loader(client, tmp_path):
 
 
 def test_pdf_pages_mapped(client, tmp_path):
-    """按页解析要给出页码映射，否则无法跳页。"""
+    """按页解析要给出页码映射，否则无法跳页。
+
+    2026-10-08 语义更新：切分改为**跨页**之后，块的 page 是"块起点所在的
+    页"（跳页定位用的就是块起点）。短文档（3 页各一行 ≈105 字符）整篇成
+    一块、归第 1 页是**正确**行为——旧行为会把 105 字符切成 3 个 35 字符
+    的碎片块，页码字段"正确"但每一块都是检索噪声。
+
+    这里钉的是映射本身：page 字段存在、合法、落在文档页范围内、首块在首页。
+    """
     raw = _make_pdf(tmp_path, pages=3)
     did = client.post(
         "/api/documents",
         files={"file": ("m.pdf", raw, "application/pdf")},
         data={"title": "m"}).json()["doc_id"]
     detail = client.get(f"/api/documents/{did}").json()
-    pages = sorted({c["page"] for c in detail["chunks"] if c.get("page")})
-    assert pages == [1, 2, 3], f"页码映射不正确: {pages}"
+    chunks = detail["chunks"]
+    assert chunks, "应至少产出一个分块"
+    pages = sorted({c["page"] for c in chunks if c.get("page")})
+    assert pages and set(pages) <= {1, 2, 3}, f"页码映射不正确: {pages}"
+    assert pages[0] == 1, "首块应落在第 1 页"
 
 
 def test_file_endpoint_returns_exact_bytes(client, tmp_path):
@@ -344,25 +355,15 @@ def test_path_traversal_rejected(tmp_path):
 
 
 def test_doc_view_is_two_pane():
-    """文档详情页必须是「左原文 / 右分块」双栏。
+    """文档详情页必须是「分块为主 / 原文按需展开」的工作台。
 
-    阶段 4 起双栏骨架搬进了 ui/SplitView.svelte。原来这条守卫查的是
-    `id="docSplit"` / `id="sourceBody"` / `id="chunkWrap"` 三个 id——
-    而它们**没有任何代码引用**（只是当年手写 DOM 时代留下的挂钩），
-    等于把"存在三个没用的 id"当成了契约。改查真正的结构：
-    视图用 SplitView，且 SplitView 确实渲染出两个带标签的面板。
+    迁移后骨架是一个显式 grid：分块表常驻，原文面板在 `?src=1` 或深链
+    带 `chunk` 时出现。两个面板都要有可读名称（aria-label）。
     """
-    view = (WEB / "src" / "views" / "DocView.svelte").read_text(encoding="utf-8")
-    assert "SplitView" in view, "文档页未使用双栏组件"
-    assert 'leftLabel="原文"' in view, "缺少原文面板标签"
-    assert 'rightLabel="分块列表"' in view, "缺少分块面板标签"
-    assert "{#snippet leftBody()}" in view and "{#snippet rightBody()}" in view, \
-        "双栏槽位缺失"
-
-    split = (WEB / "src" / "ui" / "SplitView.svelte").read_text(encoding="utf-8")
-    assert split.count('<section class="pane"') == 2, "SplitView 必须恰好两栏"
-    assert "aria-label={leftLabel}" in split and "aria-label={rightLabel}" in split, \
-        "两栏缺少可读名称"
+    view = (WEB / "src" / "views" / "DocView.tsx").read_text(encoding="utf-8")
+    assert 'aria-label="分块列表"' in view, "缺少分块面板标签"
+    assert 'aria-label="原文"' in view, "缺少原文面板标签"
+    assert "gridTemplateColumns" in view and "showSrc ?" in view, "双栏骨架缺失"
     assert "原文" in view and "分块" in view
 
 
@@ -371,12 +372,37 @@ def test_source_uses_native_pdf_viewer():
 
     这是刻意的取舍：项目零运行时依赖，而主流浏览器都内置 PDF 查看器
     且支持 #page=N 跳页——分块到页码的联动用这一条就够。
+
+    缩放一条（2026-10-08 实测修复）：必须用 `zoom=page-width`（宽度适应），
+    **不能**用 Adobe 的 `view=FitH`——Chrome 会忽略它，页面按 100% 渲染，
+    而 A4 宽于 iframe（≈490px），用户看到的就是"只显示左半边"。
     """
     src = (SRC / "lib" / "source.ts").read_text(encoding="utf-8")
     assert "iframe" in src, "未使用 iframe 内嵌原文"
     assert "#page=" in src, "缺少按页码跳转"
+    assert "zoom=page-width" in src, "缺少宽度适应——PDF 会超出 iframe 只显示左半"
+    # 查**拼接形式**（`&view=FitH`）而不是裸词：源码注释里说明这段历史时
+    # 会写到 `view=FitH` 这个名字，裸词断言会把注释误伤成红灯
+    # （第一版就是这么错的——否定式断言同样要防注释）。
+    assert "&view=FitH" not in src, "回退到了 Chrome 不认的 view=FitH"
     assert "pdfjs" not in src.lower(), "不应引入 PDF.js"
     assert "cdn" not in src.lower(), "不应依赖外部 CDN"
+
+
+def test_pdf_frame_fits_container_without_double_scroll():
+    """PDF iframe 必须完整落在容器内（单层滚动），按 A4 内接矩形定尺寸。
+
+    回归防护（用户报告"只能显示一半"）：`height:100% + min-height:60vh`
+    会让 iframe 比受限容器还高，容器被迫长出第二层滚动条、iframe 底部
+    被裁在容器之外。修复是 JS 在容器内取 A4 比例的最大矩形。
+    """
+    view = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
+    assert "minHeight: \"60vh\"" not in view, \
+        "PDF 的最小高度会把 iframe 顶出容器，又回到两层滚动"
+    assert re.search(r"const A4_RATIO = 595 / 842", view), "缺少 A4 比例常量"
+    assert "Math.min(availH, availW / A4_RATIO)" in view, "没有计算内接矩形"
+    assert "frameSize.w" in view and "frameSize.h" in view, \
+        "iframe 尺寸未由内接矩形下发（回到 CSS 100% 会重新溢出）"
 
 
 def test_source_handles_each_file_kind():
@@ -389,16 +415,19 @@ def test_source_handles_each_file_kind():
 
 def test_source_falls_back_to_parsed_text():
     """没有留档原文件时用解析全文兜底，而不是空白。"""
-    view = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
+    view = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
     assert "doc.text" in view, "未回退到解析全文"
+    assert "sourceText" in view, "原文与解析全文没有统一的取值来源"
 
 
 def test_chunk_click_reveals_source():
     """点分块要驱动原文定位，且尊重 offset_valid。"""
-    view = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
-    assert "revealChunk" in view, "未接入原文定位"
-    assert "offset_valid" in view, "未检查偏移有效性"
-    assert "is-selected" in view, "缺少选中态"
+    view = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
+    assert "selected?.page" in view, "未接入页码定位"
+    assert "pageUrl(fileUrl, pageNum)" in view, "PDF 原文未按选中块跳页"
+    assert "offset_valid" in view, "文本高亮未校验偏移有效性"
+    assert "hitRef" in view and "scrollIntoView" in view, \
+        "命中段落没有滚入视区"
 
 
 def test_chunks_api_exposes_locator_fields(client):
@@ -422,77 +451,70 @@ def test_chunks_api_exposes_locator_fields(client):
         assert col in items[0], f"/api/chunks 未返回 {col}：{sorted(items[0])}"
 
 
+def test_document_detail_can_omit_chunk_index(client):
+    """详情接口支持省略分块索引，避免打开大文档时重复传一遍全部块正文。"""
+    did = client.post("/api/documents/text", json={
+        "text": "详情瘦身验证：这段正文足够长以产生分块。", "title": "detail"}).json()["doc_id"]
+    full = client.get(f"/api/documents/{did}").json()
+    slim = client.get(f"/api/documents/{did}?include_chunks=false").json()
+    assert full["chunks"], "默认契约仍应返回分块索引"
+    assert slim["chunks"] is None, "include_chunks=false 仍返回了分块索引"
+    assert slim["text"] == full["text"], "省略分块索引不应影响正文"
+
+
 def test_lists_surface_total_for_pagination():
-    """文档列表与分块列表都要把 total 呈现给用户。
+    """文档列表与分块列表都要把 total 呈现给用户，并允许翻页。
 
     回归防护：两者原先都硬截断（文档 200 / 分块 500）且丢弃 total——
-    超出上限的内容静默消失，用户不知道还有东西没看到，
-    更没法把它们调出来。
+    超出上限的内容静默消失，用户不知道还有东西没看到。
     """
-    docs = (SRC / "views" / "KbDocs.svelte").read_text(encoding="utf-8")
+    docs = (SRC / "views" / "KbDocs.tsx").read_text(encoding="utf-8")
     assert "total" in docs, "文档列表未读取 total"
-    assert "再加载" in docs, "文档列表缺「加载更多」"
-    assert "limit=${limit}" in docs or "limit=" in docs, "文档列表限额未参数化"
+    assert "<TablePagination" in docs and "count={total}" in docs, \
+        "文档列表缺基于 total 的分页"
 
-    chunks = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
+    chunks = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
     assert "total" in chunks, "分块列表未读取 total"
-    assert "再加载" in chunks, "分块列表缺「加载更多」"
+    assert "<TablePagination" in chunks and "count={total}" in chunks, \
+        "分块列表缺基于 total 的分页"
 
 
 def test_pagination_uses_api_total_not_item_count():
-    """分页判断必须基于后端 total，而不是已取回的条数。
-
-    只比较「取回条数 < 请求上限」会漏掉「刚好取满」的情况——
-    恰好 200 篇时用户不会看到任何提示，但可能还有 201 篇。
-    """
-    # total 缺失时要有兜底（旧响应可能没有该字段），否则页脚会显示 undefined
-    docs = (SRC / "views" / "KbDocs.svelte").read_text(encoding="utf-8")
+    """分页判断必须基于后端 total，而不是已取回的条数。"""
+    for name in ("KbDocs.tsx", "DocView.tsx", "KbChunks.tsx", "Jobs.tsx"):
+        code = (SRC / "views" / name).read_text(encoding="utf-8")
+        assert "count={total}" in code, f"{name} 的分页数不是后端 total"
+        assert "< limit" not in code, \
+            f"{name} 退回了「已取回条数 < 请求上限」的分页判断"
+    docs = (SRC / "views" / "KbDocs.tsx").read_text(encoding="utf-8")
     assert "r.total ??" in docs, "文档列表未对 total 缺失做兜底"
-    # 阶段 2 起分页判断挪进了 lib/loadstate.svelte.ts 的 Pager：
-    # 视图侧只写 `pager.more`，而它的定义是 offset < total（total 来自后端）。
-    # 守卫跟着挪，但牙齿不变：判断依据必须是后端 total，且不得拿
-    # "已取回条数 < 请求上限" 当分页依据。
-    assert "pager.more" in docs, "文档列表未用基于后端 total 的分页判断"
-    assert "< limit" not in docs, "分页判断退回了「已取回条数 < 请求上限」"
-    paged = (SRC / "lib" / "loadstate.svelte.ts").read_text(encoding="utf-8")
-    assert "this.offset < this.total" in paged, \
-        "Pager.more 必须基于后端 total，而不是已取回的条数"
-
-    chunks = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
+    chunks = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
     assert "r.total ??" in chunks, "分块列表未对 total 缺失做兜底"
-    # 阶段 4：DocView 的分页判断也搬进了 Pager（offset < total）
-    assert "pager.more" in chunks, "分块列表未用基于后端 total 的分页判断"
-    assert "< limit" not in chunks, "分页判断退回了「已取回条数 < 请求上限」"
 
 
 def test_doc_view_chunk_management():
-    """文档页的分块要能编辑 / 新增 / 删除 / 批量启停，而不是只读表格。
-
-    回归防护：Svelte 重写时这些操作一度全部丢失——后端端点齐备、
-    CSS 类也都在，只有界面没跟上，用户只能删了重传。
-    """
-    view = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
+    """文档页的分块要能编辑 / 新增 / 删除 / 批量启停，而不是只读表格。"""
+    view = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
     for label in ("编辑", "删除", "新增分块", "批量停用", "批量启用"):
         assert label in view, f"缺少「{label}」入口"
-    ops = (SRC / "lib" / "chunkops.ts").read_text(encoding="utf-8")
+    ops = (SRC / "lib" / "ops.tsx").read_text(encoding="utf-8")
     assert "/enabled" in ops, "启停未走 /enabled 端点（停用应保留数据）"
     assert "force: true" in ops, "解析分块编辑须显式 force，否则后端 403"
     assert 'method: "DELETE"' in ops, "缺少删除调用"
-    # 独立分块与文档分块共用同一套操作，避免两边行为漂移
-    chunks = (SRC / "views" / "KbChunks.svelte").read_text(encoding="utf-8")
-    assert "chunkops" in chunks, "独立分块页未复用分块操作"
+    chunks = (SRC / "views" / "KbChunks.tsx").read_text(encoding="utf-8")
+    assert "../lib/ops" in chunks, "独立分块页未复用分块操作"
 
 
-def test_chunk_table_is_virtualized():
-    """长分块表按视口窗口化渲染，节点数与数据量脱钩。
+def test_chunk_table_is_bounded_by_server_pagination():
+    """分块表不随文档总量增长：服务端分页每页 20 行。
 
-    回归防护：3000 块的手册曾渲染 3000 个 <tr>，输入过滤时每次按键
-    都要 diff 全表。窗口化依赖固定行高、窗口切片与占位行，缺一不可。
+    旧版用窗口化渲染 520 块；迁移后改为服务端分页，节点数与**页大小**
+    脱钩于总块数，同时避免面板被 `flex: 1` 撑成一屏空白。
     """
-    view = (SRC / "views" / "DocView.svelte").read_text(encoding="utf-8")
-    assert "windowOf" in view, "未接入窗口计算"
-    assert "visibleChunks" in view, "未按窗口切片渲染"
-    assert "padTop" in view and "padBottom" in view, "缺少撑高占位行"
-    lib = (SRC / "lib" / "virtual.ts").read_text(encoding="utf-8")
-    assert "OVERSCAN" in lib, "未预留过扫描缓冲，快速滚动会先看到空白"
-    assert "ROW_H" in lib, "未固定行高——变高行需要逐行测量，得不偿失"
+    for name in ("DocView.tsx", "KbChunks.tsx", "KbDocs.tsx"):
+        view = (SRC / "views" / name).read_text(encoding="utf-8")
+        assert "const PAGE_SIZE = 20" in view, f"{name} 的页大小不是常量 20"
+        assert "offset: String(" in view, f"{name} 未把 offset 交给服务端"
+        assert "DataGrid" not in view, f"{name} 又用回会撑满高度的重度表格"
+    doc = (SRC / "views" / "DocView.tsx").read_text(encoding="utf-8")
+    assert "aria-label=\"分块列表\"" in doc

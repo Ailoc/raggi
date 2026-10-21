@@ -37,6 +37,12 @@ class TTLCache:
         self.ttl = float(ttl_seconds)
         self._data: OrderedDict[Any, tuple[float, float, Any]] = OrderedDict()
         self._lock = threading.Lock()
+        # 单飞锁：同一 key 的并发 miss 只让一个线程算，其余等待后直接
+        # 命中缓存。健康/统计这类「一次计算几秒」的快照，没有它时
+        # N 个并发冷请求会同时跑 N 次全表扫描（docstring 早就说
+        # 「并发合流」，实现却只是 get→compute→set）。
+        self._load_locks: dict[Any, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     def get(self, key) -> Any | None:
         """命中且未过期返回值，否则 None。
@@ -82,24 +88,47 @@ class TTLCache:
         with self._lock:
             self._data.clear()
 
-    def cached(self, key, loader: Callable[[], Any],
-               ttl: float | None = None) -> Any:
-        """取值，未命中时用 loader 计算并写入。
+    def _load_lock(self, key) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._load_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._load_locks[key] = lock
+            return lock
 
-        `loader` 在锁**外**执行：这些 loader 全是查库/查磁盘的慢操作，
-        持锁跑会把所有并发请求串起来——那正是我们要治的病。
-        代价是并发未命中时可能重复计算几次（可接受，无副作用）。
+    def get_or_load(self, key, loader: Callable[[], Any],
+                    ttl: float | None = None) -> tuple[Any, float, bool]:
+        """单飞加载：返回 ``(值, 年龄毫秒, 是否本次计算)``。
 
-        与 `get` 不同，这里能区分「存了 None」：None 也是有效值，
-        计算过就不会再算一遍（在 TTL 内）。
+        同一 key 的并发未命中只有一个线程执行 loader，其余线程在
+        per-key 锁上等待，随后直接读到刚写入的值。不同 key 互不阻塞。
+
+        `loader` 在主锁外执行（慢操作不能串行化全局）；单飞锁只负责
+        「同一个 key 不重复算」。loader 抛异常时锁自然释放，等待者会
+        依次重试——错误不会被缓存成「健康」。
         """
         now = time.monotonic()
         with self._lock:
             hit = self._live(key, now)
             if hit is not None:
-                return hit[2]
-        value = loader()
-        self.set(key, value, ttl=ttl)
+                return hit[2], (now - hit[0]) * 1000.0, False
+
+        lock = self._load_lock(key)
+        with lock:
+            # 双重检查：等锁期间别的线程可能已经算完
+            now = time.monotonic()
+            with self._lock:
+                hit = self._live(key, now)
+                if hit is not None:
+                    return hit[2], (now - hit[0]) * 1000.0, False
+            value = loader()
+            self.set(key, value, ttl=ttl)
+            return value, 0.0, True
+
+    def cached(self, key, loader: Callable[[], Any],
+               ttl: float | None = None) -> Any:
+        """取值，未命中时用 loader 计算并写入（并发合流见 get_or_load）。"""
+        value, _age, _loaded = self.get_or_load(key, loader, ttl=ttl)
         return value
 
     def __len__(self) -> int:

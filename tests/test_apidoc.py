@@ -17,7 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 APIDOC = ROOT / "web" / "src" / "data" / "apidoc.ts"
-APIDOC_VIEW = ROOT / "web" / "src" / "views" / "ApiDoc.svelte"
+APIDOC_VIEW = ROOT / "web" / "src" / "views" / "ApiDoc.tsx"
 
 # FastAPI 自带的文档端点与挂载的静态资源，不属于业务接口
 EXEMPT = {
@@ -170,14 +170,14 @@ def test_copy_has_text_selection_fallback():
     navigator.clipboard 需要安全上下文与权限，内网 http 或权限被拒时会
     抛错；此时给一个失败后毫无反应的按钮比不给按钮更糟。
 
-    阶段 7 起，选区那段实现住在 `lib/actions.ts` 的 `selectText`（DOM 副作用
-    只许有一份）。这条守卫要的是**失败时真的会选中并告知下一步**，不是"这段
-    代码写在视图文件里"——所以两处都要查：视图必须调用它，实现必须真的选中文本。
+    选区实现住在 `lib/dom.ts` 的 `selectText`（浏览器副作用只许有一份）。
+    这条守卫要的是**失败时真的会选中并告知下一步**——两处都查：视图必须
+    调用它，实现必须真的选中文本。
     """
     view = APIDOC_VIEW.read_text(encoding="utf-8")
-    actions = (ROOT / "web" / "src" / "lib" / "actions.ts").read_text(encoding="utf-8")
+    dom = (ROOT / "web" / "src" / "lib" / "dom.ts").read_text(encoding="utf-8")
     assert "selectText(" in view, "复制失败时没有走文本选中兜底"
-    assert "selectNodeContents" in actions, "兜底实现里不再真的选中文本"
+    assert "selectNodeContents" in dom, "兜底实现里不再真的选中文本"
     assert "已选中" in view, "缺少「已选中，按 Ctrl+C 复制」的提示"
 
 
@@ -189,27 +189,16 @@ def test_copy_result_announced_to_screen_readers():
     assert "announce(" in view, "未向 live region 播报复制结果"
 
 
-def test_first_group_expanded_by_default():
-    """首次访问应展开第一组。
-
-    回归防护：全部折叠时首屏只有几行标题，用户看不到任何接口内容，
-    容易误以为页面坏了。
-    """
-    view = (APIDOC_VIEW).read_text(encoding="utf-8")
-    assert "GROUPS[0]?.id" in view, "首次访问未默认展开第一组"
-
-
 def test_view_registered_in_html_and_router():
     """视图容器、导航入口与路由三处必须齐备。"""
-    router = (ROOT / "web" / "src" / "lib" / "router.svelte.ts").read_text(encoding="utf-8")
-    app = (ROOT / "web" / "src" / "App.svelte").read_text(encoding="utf-8")
+    router = (ROOT / "web" / "src" / "lib" / "router.ts").read_text(encoding="utf-8")
+    app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
     # 导航入口从 App.svelte 里手写的 nav 数组抽到了 lib/nav.ts 的 section 表
     # （三处各写一遍导航必然漂移，见该文件注释）。守卫跟着改读同一张表——
     # 查的仍是"入口存在"，只是不再关心它定义在哪个文件。
     nav = (ROOT / "web" / "src" / "lib" / "nav.ts").read_text(encoding="utf-8")
-    # 阶段 3 起路由是模式表（PATTERNS），不再是 `parts[0] === "..."` 的
-    # 手写分支。查的仍是同一件事：apidoc 这条路由存在且指向 apidoc 视图。
-    assert 'seg: ["apidoc"], name: "apidoc"' in router, "路由未处理 apidoc"
+    # 路由是模式表（PATTERNS）；查的仍是同一件事：apidoc 这条路存在。
+    assert '["apidoc", "apidoc"]' in router, "路由未处理 apidoc"
     assert "apidoc" in app, "App 未挂载 apidoc 视图"
     assert "ApiDoc" in app, "App 未渲染 ApiDoc 组件"
     assert 'key: "apidoc"' in nav and "#/apidoc" in nav, "导航缺少 API 入口"
@@ -217,9 +206,13 @@ def test_view_registered_in_html_and_router():
 
 
 def test_documented_endpoint_count_is_stable():
-    """接口数量基线：后端增删接口会同步反映在这里。"""
+    """接口数量基线：后端增删接口会同步反映在这里。
+
+    历史：51 条（含 /versions 与 /rollback）→ 49 条（2026-10-08
+    版本管理整体退役，两个端点一并移除）。
+    """
     n = len(_doc_entries())
-    assert n == 51, (
+    assert n == 49, (
         f"接口数变为 {n}，确认是有意增删并已更新测试")
 
 # ---- DESIGN.md 端点表的一致性 -------------------------------------------

@@ -75,6 +75,7 @@ async def prepare(
         citations.append({
             "index": i,
             "chunk_id": r["chunk_id"],
+            "kb_id": r.get("kb_id", ""),
             "doc_id": r["doc_id"],
             "title": r["title"],
             "heading_path": r["heading_path"],
@@ -155,8 +156,11 @@ async def answer_stream(
                              filters, top_k)
     res = prepared["res"]
     if prepared["empty_text"]:
-        yield {"event": "delta", "data": {"text": prepared["empty_text"]}}
+        # 契约是 sources → delta* → done，即使没有命中也要先发空的
+        # sources：客户端在 delta 里可能已经停止 reading 状态，顺序反过来
+        # 会让它把“空引用”当成一次迟到的更新。
         yield {"event": "sources", "data": {"citations": []}}
+        yield {"event": "delta", "data": {"text": prepared["empty_text"]}}
         yield {"event": "done", "data": {
             "took_ms": res["took_ms"],
             "mode": res["mode"],

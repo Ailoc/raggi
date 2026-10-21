@@ -5,6 +5,9 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
 
+    // React 19 的自动 JSX 运行时（不再需要每个文件 import React）
+    "jsx": "react-jsx",
+
     // 只做类型检查：产物由 Vite 构建到 web/dist（见 vite.config.ts），
     // 源码目录不产出任何编译文件
     "noEmit": true,
@@ -20,5 +23,6 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true
   },
-  "include": ["web/src/**/*.ts", "web/src/**/*.svelte"]
+  // 只检查 React 源码（迁移前的 Svelte 实现已删除）
+  "include": ["web/src/**/*.ts", "web/src/**/*.tsx"]
 }

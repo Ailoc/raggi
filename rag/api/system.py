@@ -1,4 +1,4 @@
-"""系统端点：健康 / 容量统计 / 版本管理 / 回滚 / 重建索引。
+"""系统端点：健康 / 容量统计 / 重建索引 / 计数修复。
 
 这两个「观测端点」原来是全服务最贵的读：
 - `/health` 要对账（扫全部 chunk 的 doc_id 与 embed_model、列版本）≈ 40ms，
@@ -19,8 +19,7 @@ import asyncio
 from fastapi import APIRouter, Request
 
 from rag.api._common import get_ctx
-from rag.api.responses import HealthOut, OkOut, ReconcileOut, RollbackOut, StatsOut, VersionsOut
-from rag.api.schemas import RollbackReq
+from rag.api.responses import HealthOut, OkOut, ReconcileOut, StatsOut
 from rag.core.cache import TTLCache
 from rag.storage.health import health
 from rag.storage.repos import kbs
@@ -48,6 +47,26 @@ def invalidate_snapshots() -> None:
     _stats_cache.clear()
 
 
+def _write_epoch(ctx) -> int:
+    """跨进程写代际：任何成功写都会递增，健康/统计缓存键带上它。
+
+    只靠本进程的 `invalidate_snapshots()` 时，多 worker 下 A 写入、B 的
+    `/health` 仍会返回 B 的 3s 旧快照。代际存在共享 SQLite 里，读一次
+    点查即可判断「我这份快照是不是上一代」。
+    """
+    meta = getattr(ctx, "meta", None)
+    if meta is None:
+        return 0
+    try:
+        return meta.state_int("write_epoch")
+    except Exception as e:  # noqa: BLE001
+        # 读不出去代际时退回 0：最多多算一次，不能因此让观测端点 500
+        import logging
+        logging.getLogger("raggi.api").warning(
+            "读取写代际失败，健康/统计缓存按 0 处理: %s", e)
+        return 0
+
+
 def _health_key(ctx):
     """缓存键 = **数据目录** + 生效的 embed(dim, model)。
 
@@ -60,7 +79,7 @@ def _health_key(ctx):
     旧快照里的 dim_mismatch / embedding_model_mismatch 会变成假数据。
     """
     cfg = ctx.registry.bundle.embed_cfg
-    return (ctx.store.uri, cfg.dim, cfg.model)
+    return (ctx.store.uri, cfg.dim, cfg.model, _write_epoch(ctx))
 
 
 @router.get("/health")
@@ -71,14 +90,13 @@ async def api_health(request: Request,
     key = _health_key(ctx)
     if fresh:
         _health_cache.invalidate(key)
-    age_ms = _health_cache.age_ms(key)
-    snap = _health_cache.get(key)
-    if snap is None:
-        snap = await asyncio.to_thread(
-            health, ctx.store, ctx.registry.bundle.embed_cfg.dim,
-            ctx.registry.bundle.embed_cfg.model)
-        _health_cache.set(key, snap)
-        age_ms = 0.0
+    # get_or_load 在**工作线程**里做单飞：同一 key 的并发冷请求只会
+    # 真正对账一次，其余等待后命中缓存。直接在这里调用会阻塞事件
+    # 循环——对账本身是同步的全表扫描。
+    snap, age_ms, _loaded = await asyncio.to_thread(
+        _health_cache.get_or_load, key,
+        lambda: health(ctx.store, ctx.registry.bundle.embed_cfg.dim,
+                       ctx.registry.bundle.embed_cfg.model))
     # 诚实标注「这份对账是多少毫秒前的」：调用方据此知道刚才那次入库
     # 还没反映进来，而不是把旧快照当成实时状态去做判断。
     request.state.snapshot_age_ms = round(age_ms, 1)
@@ -87,47 +105,20 @@ async def api_health(request: Request,
 
 @router.get("/stats")
 async def api_stats(request: Request, fresh: bool = False) -> StatsOut:
-    """容量/索引/版本/磁盘统计（带 3s 快照）。
+    """容量/索引/磁盘统计（带 3s 快照）。
 
-    里面最贵的两项：递归遍历 data 目录算体积、以及 `list_versions()`
-    （实测 ≈0.17ms/版本，本仓库真实实例的 jobs 表有 379 个版本 = 64ms）。
+    最贵的一项是递归遍历 data 目录算体积。
+    （`list_versions()` 此前也在这里逐表计数，版本管理退役后已移除——
+    版本回收仍由后台维护的 compact_tables 负责，与展示面无关。）
     """
     ctx = get_ctx(request)
-    key = ctx.store.uri
+    key = (ctx.store.uri, _write_epoch(ctx))
     if fresh:
         _stats_cache.invalidate(key)
-    age_ms = _stats_cache.age_ms(key)
-    snap = _stats_cache.get(key)
-    if snap is None:
-        snap = await asyncio.to_thread(ctx.store.stats)
-        _stats_cache.set(key, snap)
-        age_ms = 0.0
+    snap, age_ms, _loaded = await asyncio.to_thread(
+        _stats_cache.get_or_load, key, ctx.store.stats)
     request.state.snapshot_age_ms = round(age_ms, 1)
     return snap
-
-
-@router.get("/versions")
-async def api_versions(request: Request, table: str = "chunks") -> VersionsOut:
-    """列出 LanceDB 表的历史版本（回滚用）。"""
-    ctx = get_ctx(request)
-    versions = await asyncio.to_thread(
-        ctx.store.table_versions, table)
-    return {"table": table, "versions": versions}
-
-
-@router.post("/rollback")
-async def api_rollback(request: Request, body: RollbackReq) -> RollbackOut:
-    """把指定表回滚到历史版本。
-
-    注意：LanceDB 版本按表管理，回滚 chunks 表后 documents 表需对账
-    （/api/health），必要时重放 documents。
-    """
-    ctx = get_ctx(request)
-    await asyncio.to_thread(
-        ctx.store.restore_version, body.version, body.table)
-    return {"ok": True, "table": body.table,
-            "rolled_back_to": body.version,
-            "note": "仅回滚指定表；请用 /api/health 对账"}
 
 
 @router.post("/reindex")

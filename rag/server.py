@@ -62,8 +62,36 @@ def build_app():
     # 内部按线程隔离连接）；auto 模式下首启会从 LanceDB 旧表一次性导入。
     meta = prepare_meta_store(settings, store, log=log)
     registry = ModelRegistry(settings)
+    _warn_if_unauthenticated_listener(settings, store)
     app = create_app(Ctx(settings, store, registry, meta=meta))
     return app
+
+
+def _warn_if_unauthenticated_listener(settings, store) -> None:
+    """未启用鉴权且监听非回环地址时，启动日志必须明说。
+
+    单机自用的零摩擦体验是有意的，但「绑定 0.0.0.0 + 没有任何凭据」
+    意味着同一网段的任何人都能入库、删文档、改模型配置。这个组合
+    在日志里没有一行提示，用户很容易在容器/云主机上默认踩到。
+    """
+    if (settings.token or "").strip():
+        return
+    try:
+        from rag.storage.repos import keys as apikeys
+
+        if apikeys.has_keys(store):
+            return
+    except Exception as e:  # noqa: BLE001
+        log.warning("无法确认是否已配置密钥（鉴权状态未知）: %s", e)
+        return
+    host = (settings.host or "").strip().lower()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return
+    log.warning(
+        "安全提示：API 未启用鉴权，却监听在 %s。同一网络内任何人都能"
+        "读写入库、删除数据与修改模型配置。单机使用请绑定 127.0.0.1，"
+        "对外提供服务请先在「设置 → 密钥」签发密钥或配置 token。",
+        settings.host)
 
 
 def _resolve_processes(raw: str | None) -> int:

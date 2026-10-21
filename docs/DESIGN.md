@@ -25,7 +25,7 @@
 | 模型三件套可插拔 | ✅ 核心 | LLM / Embedding / Rerank 均支持**本地部署**与 **API 接入**，统一配置 + 连通性测试 |
 | 分块内容编辑与重向量化 | ✅ 核心 | `PATCH /api/chunks/{id}`：改原文 → 重算向量 → 更新索引，含 FTS 索引失效治理 |
 | 入库队列 | ✅ 核心 | 有界线程池（默认 2 工人）+ 队列容量 32，满则 503；`wait=false` 立即返回并轮询 `GET /api/jobs/{id}` |
-| 前端查看与报告 | ✅ 核心 | 单页：检索 → 原文对照查看器 → 引用/报告导出 → 入库与健全面板 → 模型设置页 → **API 文档页**（Svelte 5 源码 → Vite 产出 `web/dist`，运行时零依赖） |
+| 前端查看与报告 | ✅ 核心 | 单页：检索 → 原文对照查看器 → 引用/报告导出 → 入库与健全面板 → 模型设置页 → **API 文档页**（React 19 + MUI 6 源码 → Vite 产出 `web/dist`，运行时零依赖） |
 | 生成式问答 | ⚙️ 可选 | `features.answer` 默认关闭；开启后提供带引用标注的 `/api/answer` |
 | 存储后端 | ⚙️ 可选 | `local`（默认，即目录）或 **S3 兼容**（RustFS / MinIO / AWS S3） |
 | 其余 | ❌ | 见 §1.3 |
@@ -88,7 +88,7 @@
 | 中文关键词 | FTS 基于 Tantivy，可建 jieba 分词列，可控 | `full_text_search` 近似，同样依赖外部预处理 |
 | 过滤 | `where(prefilter=True)` SQL 下推 + **标量索引 BTREE** | `where` 元数据过滤，无独立标量索引，大表偏慢 |
 | 行级更新 | `update/delete/merge_insert` 一等公民 → **编辑重向量化一行落地** | `upsert/update`，更新向量需重算后 upsert，无 merge 语义 |
-| 版本/回滚 | **内置版本快照 `versions/checkout/restore`** → 误删误改秒级回滚 | 无原生版本管理 |
+| 版本/回滚 | 内置版本快照；**本项目不做用户级回滚**（2026-10 退役），底层版本仅服务后台 compaction 回收 | 无原生版本管理 |
 | 性能 | 列存 + ANN（HNSW/PQ）+ `refine_factor`，大库优势明显 | hnswlib ANN 快，但规模化后 SQLite meta 成瓶颈 |
 | LangChain | `langchain-lancedb`（可选）；本项目直接调原生 SDK 用满能力 | `langchain_chroma` 封装成熟，但同样只能 `similarity_search` |
 | 运维/备份 | 拷目录即可（建议先 `optimize`） | 需同时拷 SQLite + 向量目录，二者易不一致 |
@@ -102,20 +102,20 @@
 
 ```
 ┌──────────────────────────── 单进程 (uvicorn, 1 worker) ────────────────────────────┐
-│ Web SPA (Svelte 5 → web/dist)             FastAPI  /api/*  (47 操作 / 32 路径)      │
+│ Web SPA (React 19 + MUI → web/dist)       FastAPI  /api/*  (47 操作 / 32 路径)      │
 │ ├ 知识库视图   ──fetch──►    ┌─ 认证中间件：API 密钥（read | write 作用域）          │
 │ ├ 文档列表/上传              │  零密钥时管理端点开放（引导例外，§9）                │
 │ ├ 分块编辑                   ├─ /api/search  /api/answer  /api/search/report      │
 │ ├ 独立分块                   ├─ /api/kbs  /api/documents  /api/chunks  /api/jobs  │
 │ ├ 检索页（参数分层）          ├─ /api/models  /api/embed  /api/keys               │
 │ ├ 原文对照查看器              ├─ /api/health  /api/stats  /api/reconcile          │
-│ ├ 设置页（模型/健康）         ├─ /api/reindex  /api/versions  /api/rollback        │
+│ ├ 设置页（模型/健康）         ├─ /api/reindex  /api/reconcile                     │
 │ └ API 文档页（与 openapi    └─ StaticFiles  前端（签名 URL 供 iframe 取原文）      │
 │    双向漂移测试守护）                                                              │
 │                                            │                                       │
 │  ┌──────── API 层 (rag/api/) ──────────────┼───────────────────────────────────┐   │
 │  │ 路由：search · documents · chunks · kbs · jobs · models · apikeys · plan     │   │
-│  │       auth(中间件) · system(health/stats/reindex/versions/rollback)          │   │
+│  │       auth(中间件) · system(health/stats/reindex/reconcile)                  │   │
 │  │ _common: raise_operation_error —— 领域异常 → HTTP 状态码的唯一映射点          │   │
 │  └─────────────────────────────────────────┼───────────────────────────────────┘   │
 │                                            │                                       │
@@ -389,8 +389,8 @@ class ApiKey(LanceModel):
 | 召回调优 | `.nprobes(n).refine_factor(r)` |
 | 行级更新 | `table.update(where=..., values={...})` → 编辑重向量化的核心 |
 | 幂等写入 | `merge_insert("content_hash").when_matched_update_all()` |
-| 版本管理 | `versions()` / `checkout(v)` / `restore(v)` → 误删误编辑秒级回滚 |
-| 维护 | `optimize()`（compaction）、`cleanup_old_versions()` |
+| 版本管理 | 底层版本快照随写入自动产生，**仅服务后台 compaction 回收**（`optimize(cleanup_older_than=…)`）；用户级回滚已退役（2026-10-08） |
+| 维护 | `optimize()`（compaction + 旧版本回收） |
 
 > **注意**：`db.list_tables()` 返回的是 `ListTablesResponse`，不是表对象列表——直接遍历会对每个元素调用 `.open()` 而报 AttributeError。改用 `table_names()`，同时消除弃用告警（告警数 423 → 134）。
 
@@ -444,10 +444,15 @@ class ApiKey(LanceModel):
 ### 6.2 流水线
 
 1. **加载**：`LoaderRouter` 选引擎 → `loader.load()` → `Normalizer`（提取 `page`、`heading_path`、表格转 Markdown、统一换行）。
-2. **切分**：
-   - Markdown 类输出：`MarkdownHeaderTextSplitter`（按 `#/##/###` 切，继承标题路径）→ `RecursiveCharacterTextSplitter`；
-   - 纯文本：`RecursiveCharacterTextSplitter`；超长硬切兜底；
-   - **必须保留 `char_start/char_end`**：由归一化后的纯文本累加计算，是高亮与查看器定位的唯一依据（不接受正则二次匹配）。
+2. **切分**（`rag/ingest/splitter.py`，四档策略 `auto/structure/recursive/semantic`，库级/文档级可选）：
+   - **结构感知**：markdown 标题行分节（标题与本节正文同块）；表格与代码围栏整体成**原子块**（超长按行切，**不复制表头**——复制会造出非连续区间，破坏偏移闭合）；
+   - 段内 `RecursiveCharacterTextSplitter`（分隔符中英句末齐备），超长硬切兜底；
+   - **跨页切分**：页边界不再是切分边界，块的 page 按"起点所在页"映射（跳页用块起点，跨页块归首页）；
+   - **碎块合并**：小于 `min(64, size/2)` 的块并入相邻块（标题块并给后块，避免"标题进了上一节"）；
+   - **semantic**：句子向量断点（相邻句相似度低于下四分位处切；embedding 不可用降级 structure）；
+   - **必须保留 `char_start/char_end`**：由归一化后的纯文本累加计算，是高亮与查看器定位的唯一依据（不接受正则二次匹配）；
+   - 不能用 `MarkdownHeaderTextSplitter`：其 AST 往返会改写原文（`"\n\n"` → `"  \n"`），破坏偏移闭合。
+3. **向量化**：`embed_documents(batch)`，并发受限，失败退避重试 3 次；结果按序对齐，**禁止乱序写入**。**输入带上下文头**：`文档标题 > heading_path + 原文`——上下文只进检索通道（embedding 与 `text_seg` 分词），存储的 `text` 保持原文切片；`heading_path` 此前只用于展示，数据早就在库里。
 3. **向量化**：`embed_documents(batch)`，并发受限，失败退避重试 3 次；结果按序对齐，**禁止乱序写入**。
 4. **写入**：构造 `pyarrow.Table` → `chunks.merge_insert` 幂等写入 → 更新 `documents` → `jobs.stage=done`。
 5. **索引**：首次写入后创建向量索引与 FTS 索引；后续按阈值 `optimize()`。
@@ -659,105 +664,88 @@ PATCH /api/chunks/{id}  { text, reembed=true, force=false }
 | GET | `/api/v1/jobs` | 任务列表 |
 | GET | `/api/v1/jobs/{job_id}` | 任务进度（stage / progress / error / `terminal`） |
 | DELETE | `/api/v1/jobs/{job_id}` | 取消入库任务（排队中真取消；运行中协作式，在阶段边界退出） |
-| GET | `/api/v1/health` | 健全性：计数对账、孤儿、`fts_stale_count`、维度一致性、版本数、磁盘；`checks_failed` 列出**根本没跑成的检查**（-1 = 未知，不是 0） |
-| GET | `/api/v1/stats` | 容量统计：行数 / 索引状态 / 版本数 / 磁盘占用 |
+| GET | `/api/v1/health` | 健全性：计数对账、孤儿、`fts_stale_count`、维度一致性、磁盘；`checks_failed` 列出**根本没跑成的检查**（-1 = 未知，不是 0） |
+| GET | `/api/v1/stats` | 容量统计：行数 / 索引状态 / 磁盘占用 |
 | POST | `/api/v1/reconcile` | 执行对账并修复发现的不一致 |
 | POST | `/api/v1/reindex` | 重建索引（可选 `engine` 重解析） |
-| GET | `/api/v1/versions` | LanceDB 表版本快照列表 |
-| POST | `/api/v1/rollback` | 回滚指定表到历史版本 |
 | GET | `/` | 前端静态页 |
 
 **错误响应统一为 `{"detail": "..."}`**，且不泄露内部路径与 traceback。
 
 ---
 
-## 11. 前端设计（Svelte 5 + Vite）
+## 11. 前端设计（React 19 + MUI 6 + Vite）
 
-源码 `web/src/`（`.svelte` + `.ts`），Vite 构建产物到 `web/dist/`，由 `StaticFiles(directory=web/dist, html=True)` 托管——**构建只在开发机上发生，运行时零依赖**。
+源码 `web/src/`（`.ts` + `.tsx`），Vite 构建产物到 `web/dist/`，由 `StaticFiles(directory=web/dist, html=True)` 托管——**构建只在开发机上发生，运行时零依赖**。
 
-为何换成 Svelte：早前是手写 DOM + `tsc` 直出，视图间的重复渲染代码、手动查询与 `innerHTML` 替换让界面既难改也容易出错（`$("#x")?.` 找不到元素直接抛错的陷阱即一例）。Svelte 用编译器把「状态 → 视图」交给框架，输入过滤、行内操作与对话组件不再各自维护 DOM。
-
-构建与检查：
+2026-10-10 从 Svelte 5 迁移到 React + MUI（原因：`@mui/material` 是 React-only 组件库；前几代"把 MUI 默认主题的 token 移植到自有 CSS"只能对齐观感，拿不到组件行为）。迁移只换渲染层：URL 结构、后端 API 契约、深链语义一律不变。
 
 ```bash
 npm install --include=dev
 npm run build     # Vite → web/dist（构建前自动清空该目录）
-npm run check     # svelte-check --tsconfig ./tsconfig.json（0 error 才放行）
+npm run check     # tsc --noEmit（0 error 才放行）
 npm run dev       # 开发用 Vite dev server（独立端口）
 ```
 
-- **仓库内只有源码**：`web/dist/` 已 gitignore；`web/src/` 下不得出现编译产物（否则会形成两份事实来源）。产物缺失或过期会在启动时记录日志（`_check_web_build()`），`tests/test_frontend_wiring.py` 亦会拦截。
-- **`svelte.config.js`** 只配 `vitePreprocess()`，供 svelte-check 与编辑器解析 `<script lang="ts">`；构建本身由 `vite.config.ts` 驱动（`base: "./"`，产物可被任意子路径托管）。
-- **`types.ts`**：与 `rag/api/*.py` 的实际返回结构一一对应，是前端唯一的响应形状事实来源。
-- **路由**是 hash 路由；`lib/router.svelte.ts` 把 hash 解析为 `$state`，视图由 Svelte 条件渲染切换。
-- **图标**统一来自 `index.html` 里的 SVG 精灵（`#i-*`，24×24 同描边），经 `ui/Icon.svelte` 使用；**不再混用 emoji 或 unicode 字符**——字符图标在不同字体下的粗细与占位各不相同，界面会显得杂。
-- **面包屑**由 `lib/crumbs.svelte.ts` 集中管理：视图在加载时 `setCrumbs(...)`，面包屑栏统一渲染（只有一层时隐藏）。它现在位于**内容列顶部**而不是顶栏下方——位置指示属于当前内容，dock 已经承担了"在哪个 section"这一层。
+- **仓库内只有源码**：`web/dist/` 已 gitignore；产物缺失或过期会在启动时记录日志（`_check_web_build()`），`tests/test_frontend_wiring.py` 亦会拦截。
+- **主题**：`theme.ts` 的 `createTheme` 只覆盖三件事——中文字体回退、禁用态字色、Paper 分层色；其余吃 MUI 默认（默认值就是设计规范）。`CssBaseline` 负责 `html/body/#root` 满高、body 不滚、`.sr-only`、滚动条与跳转链接。**没有自定义 CSS 层**：`main.ts`、`tokens.css`、`app.css` 等 Svelte 时代的样式已随旧栈删除。
+- **入口**：`main.tsx` 挂载 `ThemeProvider`（按 `data-theme` 构造深浅两套主题）、`CssBaseline`、`App`、`DialogHost`；`index.html` 在首帧前从 localStorage / `prefers-color-scheme` 决定主题，避免浅色用户先看到一帧深色。
+- **路由**是 hash 路由；`lib/router.ts` 用**模式表 + 命名参数**解析。旧地址 `#/kb/{id}` / `#/kb/{id}/standalone` 在读路由时 `location.replace` 成新路径；裸 `#/search` 会恢复 `sessionStorage` 里最后一次有查询词的检索——两件都放在 `readRoute()`（每条 hashchange 的收口），不是只放在 `go()`，因为导航项是 `<a href>`，点击不经过 `go()`。
+- **状态**：`lib/store.ts` 的模块级 store + `useSyncExternalStore`（kbs 带并发去重与世代号、busy、theme、crumbs、队列轮询含 poke）。对话框与 toast 也是模块级（Promise 化的 `confirmDialog` / `formDialog`，`toast()`），因为调用点遍布 `lib` 与视图、没有组件上下文。
+- **导航**：`lib/nav.ts` 的 `SECTIONS` 是唯一事实来源；顶栏用 MUI `Tabs` + `Tab component="a" href=…`（中键新开 / 复制链接 / 状态栏预览都保留）。面包屑在顶栏第二行，由视图 `setCrumbs()` 写入。知识库与文档路由下渲染工作区标签条（`ui/WorkspaceTabs.tsx`，同样是链接）。
+- **布局**：AppBar（品牌 + 分段导航 + 命令面板 + 队列 chip + 主题切换）+ 可选面包屑条 + `main#main` 单列滚动区。`html/body/#root` 100% 高，`main` `flex:1; min-height:0; overflow:auto`；不存在侧栏（三代上下文栏/ dock 都已退役）。
 
 ### 11.1 视图
 
 | 路由 | 视图 |
 |---|---|
-| `#/` | 知识库总览：卡片网格（文件夹图标/描述/文档·分块·更新时间/方案徽标）+ 刷新/新建。**卡片上只有"进入设置"，没有删除**——删除库的入口全站唯一，在设置页危险区 |
-| `#/kb/{id}/docs` | 工作区·文档标签：入库面板（文件/文本/URL 三个标签页 + 解析引擎选择）、页头动作（入库/刷新）、表格（标题/方案/引擎/块数/状态/入库时间 + 行内操作）、服务端标题过滤（`?q=` + debounce）、offset 分页、处理中静默轮询 |
-| `#/kb/{id}/chunks` | 工作区·分块标签：该库**全部**分块，含不属于任何文档的独立块；范围用 `?scope=standalone` 切换（服务端 `only_standalone`），不再是单独一页。内容过滤走服务端 `?q=`（分页前过滤，`total` 是命中块数），0 命中时过滤框与「清空过滤」仍在——不许把空结果说成"库里没有分块" |
-| `#/kb/{id}/doc/{id}` | 文档详情（仍在工作区内，标签条常驻）：**左侧原文对照 + 右侧分块表**（虚拟化窗口渲染），行内编辑（重向量化）/停用启用/删除、批量启停、新增分块、文档重命名、分块方案覆盖、重新解析/重新切分 |
-| `#/kb/{id}/settings` | 工作区·设置标签：基本信息 / 分块方案 / 内容概览 / 危险操作（**唯一的删除库入口**，删除需输入库名）。两个可编辑面板**各自判脏**——共用的那次重载曾把方案面板里未提交的编辑抹掉；方案表单还拦住"取消勾选继承 + 大小留空"（后端把 `chunk_size=0` 解释成恢复继承，放过去就是一次静默错写） |
-| `#/jobs` | 任务列表：队列全景（阶段/耗时/产出/失败原因全文可展开）、四类筛选、有任务在跑才轮询（静默）、进行中可直接停止 |
-| `#/search` | 检索页（§7.3）：页内查询栏（`/` 聚焦）、常用参数平铺 + 高级参数折叠、生效过滤 chips、结果列表 + **右栏原文检视**（上下文与整篇高亮）、可展开的**流式问答面板**（引用先出、`[n]` 可点、真实可中断） |
-| `#/settings/models` | 模型设置：三卡片（provider/model/base_url/api_key/dim，密钥可显隐）+ 每卡片独立连通性测试（结果给"连通/不通 + 延迟/维度/吞吐/排序是否正确"的结论，不再甩一坨 JSON）+ 保存并热切换（维度变更需二次确认）。**有未保存改动时才可见可点**：脏判定比的是打开时的快照，改回原值即恢复禁用 |
-| `#/settings/keys` | 访问密钥：签发（名称/权限/有效期/备注）、一次性明文展示、状态/最近使用/过期、吊销；**本机凭据**面板管理浏览器侧 token 与密钥 |
-| `#/settings/health` | 健康页：键值化状态（✔/⚠ 徽标）+ 索引状态 + 重建索引 / 修复计数 + 原始 JSON 折叠区 |
-| `#/settings/data` | 数据与版本：容量（文档/分块/任务数、数据与索引目录占用、磁盘剩余、已建索引）+ LanceDB 表版本列表 + **回滚**。这三个端点此前完全没有界面，而回滚是单机库最重要的一层自救手段。回滚按表生效不跨表，所以确认要手输表名，后端的 `note`（"仅回滚指定表；请用 /api/health 对账"）原文照抄并给出对账入口 |
-| `#/apidoc` | API 文档页：概览（Base URL/鉴权/错误约定）+ 接口索引 + 分组端点卡片（参数表、curl/示例与复制）。**过滤词同步进 URL**（`#/apidoc?q=…`，可分享可后退），索引与卡片渲染同一份过滤结果，命中分组自动展开——否则会出现"匹配 8 / 51 却一张卡片都没有" |
+| `#/` | 知识库总览：卡片网格（描述/文档·分块·更新时间/方案徽标）+ 刷新/新建；卡片上只有"进入设置"，**删除库入口全站唯一**（设置页危险区） |
+| `#/kb/{id}/docs` | 工作区·文档：入库对话框（文件可多选 / 文本 / URL 三个页签 + 解析引擎）、页头、表格（标题/方案/引擎/块数/状态/入库时间/操作）、服务端标题过滤、20 条/页、处理中任务行内阶段与停止、多选批量删除、行菜单（方案/重命名/重解析/重切） |
+| `#/kb/{id}/chunks` | 工作区·分块：该库全部分块 + `?scope=standalone` 范围切换（服务端 `only_standalone`）；内容过滤走服务端 `?q=`（分页前过滤，`total` 是命中数）；0 命中时过滤框与「清空过滤」仍在 |
+| `#/kb/{id}/doc/{id}` | 文档工作台：**分块表为主 + 原文按需展开**（`?src=1`，深链 `?chunk=` 自动展开并定位到所在页）；行内编辑/启停/删除、批量启停、新增分块、文档重命名/移动/方案覆盖/重解析/重切分；重解析与重切提交后由 `waitForJob` 盯到终态并自动刷新 |
+| `#/kb/{id}/settings` | 基本信息 / 分块方案 / 内容概览 / 危险操作。两个可编辑面板**各自判脏**、各自就地保存；方案表单拦住"取消勾选默认 + 大小留空"（后端把 `chunk_size=0` 解释成恢复默认） |
+| `#/jobs` | 任务列表：阶段/进度/耗时/错误、四类筛选（`status` 服务端过滤，`total` 是过滤后总数）、offset 分页、仅活跃任务时轮询、进行中可直接停止（文案转述服务端 outcome） |
+| `#/search` | 查询栏（`/` 聚焦）、参数草稿 + 「应用并检索」、「生效参数」chips、结果列表（显示返回条数与候选总数）+ 原文检视、流式问答面板（按 `features.answer` 禁用入口） |
+| `#/settings/models` | 模型设置：三张卡片（provider/model/base_url/api_key/dim），每类独立测试并给出结论；保存并热切换；维度变更二次确认；脏状态可见、可放弃 |
+| `#/settings/keys` | 访问密钥：签发 / 一次性明文 / 状态 / 吊销 + 本机凭据 |
+| `#/settings/health` | 健康：键值状态、索引状态、重建索引 / 修复计数、原始 JSON 折叠；「检查没跑成」如实显示为未知 |
+| `#/settings/data` | 存储：容量、目录占用、磁盘剩余、已建索引。**版本管理已整体退役**（2026-10-08），底层版本只服务后台 compaction |
+| `#/apidoc` | 三栏文档站：左导航（过滤词进 URL、过滤后列表）、中正文、右 curl/示例；选中端点进 URL（`?ep=`）；复制失败降级为选中文本并经 live region 播报 |
 
-**工作区与路由**。一个知识库的四个视图不再是四级下钻，而是同一位置的三个标签（`文档 / 分块 / 设置`），标签条由壳层渲染、带库名，文档详情也在它下面。路由是**模式表 + 命名参数**（`lib/router.svelte.ts` 的 `PATTERNS`），视图只接 `{kbId}` / `{docId}` 具名 props，不再用 `parts[1]`、`parts[3]` 这种位置索引——加一级路径过去要同时改路由和一堆视图，漏一处就拿到 `undefined`。
+### 11.2 交互约定（迁移后仍然生效的不变量）
 
-旧地址不会 404：`#/kb/{id}` 与 `#/kb/{id}/standalone` 在 `syncRoute()` 里被 `location.replace` 改写成新的完整路径（用 replace 是为了不留"点进去又立刻被改写"的历史记录）。改写放在 `syncRoute` 而不是只在启动时做，否则书签、手敲、外部贴入的链接会让地址栏停在旧形态，用户复制到的 URL 和当前界面对不上。
+- **导航项必须是 `<a href>`**，不用按钮假装导航——否则中键新开、右键复制链接、状态栏预览全丢。
+- **加载状态是三态，不是一个布尔**：列表/文档/设置页各自用 `phase: initial | ready | failed`。已有数据时不回 `initial`，刷新失败只加一条横幅、不抹掉当前内容。回归防护：单一 `loading` 布尔曾让文档列表的 2.5 秒轮询每次把工具栏连同输入框卸载重建——**用户正在敲的过滤词丢焦点**。
+- **过滤与分页下推到服务端**：`GET /documents` 与 `GET /chunks` 的 `q` 都在分页前过滤、`total` 是过滤后的数；前端不再对已取回数组筛第二遍。分页一律 MUI `TablePagination`，`count` 来自后端 `total`，禁止 `limit += N`（服务端把 limit 夹在 500，第三次点击会被静默压回）。
+- **多选口径只有一份**：`lib/selection.ts` 的 `usePicks()`（`all/some/setAll/toggle/count`），文档列表、全库分块、文档工作台共用；视图不再各写一遍全选/半选。
+- **对话框正文是纯文本**：`confirmDialog({ body })` 不做 Markdown 渲染；正文里不写 `**粗体**`（星号会原样显示）。破坏性操作量化影响（"删除 N 篇文档 / M 个分块"），必要时要求输入名称；**禁止原生 `confirm()/alert()`**。
+- **`wait=false` 提交的任务必须有订阅者**：重解析 / 重切 / 入库都返回 `job_id`，提交方用 `waitForJob(jobId, onTick, signal)` 盯到终态再刷新；组件卸载或对话框关闭时 `abort()`，否则循环会在后台空转到超时。文档列表在最后一个活跃任务结束时还会再取一次列表，避免停在任务结束前那一帧。
+- **URL 只描述"已生效"的检索参数**：控件改动进 `draft`，点「应用并检索」才经 `searchUrl()` 写 URL 并触发检索；有未应用项时按钮上可见计数，并提供「丢弃修改」。结果条读已生效值，不读暂存区。
+- **知识库的"自定义 vs 默认"按后端口径**：两级模型下每个库都持有具体数值，`plan.own.custom` 恒为真；前端用 `isCustomPlan(own, global)`（数值 + 策略，容差 0.05），文案写「与系统默认一致」而不是「继承系统默认」——勾选保存只是把当前默认抄进本库。
+- **保存只更新自己那半张表**：保存基本信息不整页 `load()`（会抹掉方案面板未提交的编辑）；保存方案只重取 `/plan`，不前端重算 `effective`（含 `overlap_chars` / `source`）。
+- **知识库设置方案校验在 PUT 之前**：`64–8192` / `0–50%`；留空在"自定义"模式下必须被拦住，否则会被后端解释成恢复默认。
+- **上传失败要保留**：多文件逐个盯终态，只移除成功的条目；失败项留在队列里可直接重试；每个文件一个幂等键；解析引擎是受控值并随 `FormData` 提交；入库后 `pokeQueue()` 立刻刷新顶栏队列摘要。
+- **展示格式化只有一份**：`lib/format.ts` 的 `fmtTime/fmtTimeShort/fmtAgo/fmtBytes/fmtMs/fmtSpan`；视图不许就地 `toLocaleString` 或手写 `fmt*`。
+- **XSS 面**：任何组件都不得使用 `dangerouslySetInnerHTML`；检索片段用结构化 `{text, marks}` 渲染原生 `<mark>`；API 文档的行内标记由 React 节点解析（`inline()`），不拼 HTML。
+- **可访问性**：导航/工作区标签是链接；输入控件有 `label` 或 `aria-label`；操作列有 `.sr-only` 表头；行可聚焦且 ↑/↓ 换块，行内按钮判断事件来源并 `stopPropagation`；焦点陷阱与 Escape 交给 MUI `Dialog`，不再自写一份挂在面板上的监听。
+- **错误态必须可重试**：每个 `severity="error"` 的状态都带「重试」动作；上传/保存失败就地显示、不关闭对话框，用户填的内容不丢。
+- **浏览器副作用收口**：视图中不做 `getElementById/querySelector/innerHTML`；剪贴板降级选中在 `lib/dom.ts`。`scrollIntoView` 只用于原文命中定位；滚动/下载/主题写 `<html>` 这类没有声明式等价物的操作保留在必要处。
+- **构建产物验证要带查询串**：`index.html` 可能被浏览器缓存，验证新产物时用 `?v=N#/…` 强制重新加载；否则会对旧 bundle 得出"改了没生效"的错误结论。
+- **安全响应头**：所有响应带 CSP、`X-Content-Type-Options`、`X-Frame-Options`、
+  `Referrer-Policy` 与 `Permissions-Policy`；API 响应 `Cache-Control: no-store`。
+  首页由显式路由注入 **per-request nonce**：`style-src-elem 'nonce-…'` 管 Emotion 样式标签，
+  `style-src-attr 'unsafe-inline'` 单独放行 React 的 style 属性；非 HTML 响应是 `style-src 'self'`。
+  首帧主题脚本因此在 `web/public/theme-boot.js`，不得改回内联脚本。
+- **请求体上限**：文件上传按 `max_upload_mb + 2MB`，普通 JSON 至少按 20MB 正文；
+  带 `Content-Length` 的请求在读取前 413，**chunked/无长度**的由 `BodyLimitMiddleware` 按实际字节数拦截。
+  Pydantic 层再对批量列表与文本长度设上界。
+- **跨进程共享状态**：限流令牌桶、幂等键状态机、鉴权/写代际都存在 SQLite（`rate_buckets`/`idempotency`/`meta_state`），
+  默认多 worker 下额度、幂等与吊销不再按进程数放大；`meta_engine=lancedb` 回退时退回进程内并如实降级。
 
-**布局：顶栏 → dock（常驻上下文栏）+ 内容列**。外壳是一层 CSS Grid：`grid-template-columns: var(--dock-w) var(--dock-handle-w) minmax(0,1fr)`，三个子项**显式占列**（靠自动放置的话，把手一旦 `display:none` 就会脱离网格流，把内容列往前挪进那条 0px 宽的列里，界面塌成一条竖排文字的窄带）。
-
-dock 是 **section-aware** 的：顶栏那 5 项全局导航已移进 dock 顶部的 section 切换器（`lib/nav.ts` 的 section 表是导航的单一事实来源——原先 nav 数组、`activeNav` 折叠三元、路由 name switch 三处各写一遍，必然漂移），于是每个 section 都有自己的第二栏：知识库给库→文档两层树、任务给运行中队列、设置给四个子页（与 `Settings.svelte` 的 tabs 一一对应，由 `test_dock_settings_entries_match_the_page_tabs` 钉住）、API 给端点分组目录。
-
-> **历史**：侧栏曾被整体移除，因为第一代实现折叠后把切换入口一起隐藏，而折叠态又写进 `localStorage` 跨刷新保留——用户重开浏览器仍是折叠的且无处可点，成了无法自救的死锁。这次把它做回来，前提是那两条教训被写成了守卫（`test_dock_collapse_is_self_recoverable`、`test_dock_persists_only_width`），见 §11.2 的折叠契约。
-
-### 11.2 交互约定
-
-- **dock 的折叠契约**（四条，前两条由静态守卫锁住）：① 折叠开关属于顶栏、画在 `<Dock>` **之前**，所以它不可能被自己折叠的那个容器藏起来；② **折叠态不落盘**，只有宽度落盘（`raggi.dock.width`），刷新一律回到展开，窄屏的默认折叠是按视口现算的、不是记忆；③ 宽度必须 clamp 在 `240–min(320px, 38vw)`，防止拖出视口后找不回；④ 顶栏常驻「恢复默认布局」入口，折叠开关带 `aria-expanded`/`aria-controls`。窄屏（<900px）dock 改为浮层 + scrim + `Esc` 收起。
-- **断点只有一处**：`lib/dock.svelte.ts` 的 `NARROW_QUERY`；`styles/shell.css` 的 `@media (max-width: 900px)` 必须与之一致（CSS 读不到 JS 常量，靠注释钉住）。
-- **导航项必须是 `<a href>`**，不用 `<button onclick="location.hash=…">`——否则中键新开、右键复制链接、状态栏预览全丢。`onclick` 只用于收起窄屏浮层，不拦截默认跳转。
-- **加载状态是三态，不是一个布尔**：列表视图统一用 `lib/loadstate.svelte.ts` 的 `loader()`——`phase: initial|ready|failed` 决定要不要骨架屏，`refreshing` 只表示"数据在更新"，`error` 在已有数据时降级成一条横幅而不抹掉整屏。规则是**已有数据就不进 initial**，所以轮询/手动刷新/改过滤条件都自然走静默路径，不需要调用方各自记得传"静默"标志。回归防护：旧写法把"没有数据"和"数据在更新"合成一个 `loading`，于是文档列表的 2.5 秒轮询每次都重进加载态，把过滤工具栏连同输入框卸载重建——**用户正在敲的过滤词丢焦点**。分页判断同理必须基于后端 `total`（`Pager.more` = `offset < total`），且不要用 `limit += N` 增长：服务端把 limit 夹在 500，第三次点击会被静默压回。**`Pager` 的 `offset`/`total` 必须是 `$state`**：它们是普通字段时，读 `pager.total` 不建立任何依赖，标签只在"恰好有别的重渲染"时才更新——实测筛到 3 块却显示"匹配 5 块"，而且这种 bug 会偶然正确，根因留着不动。「再加载」块只有一份（`ui/ListMore.svelte`）：四份复制曾漂成三种口径（`pager.loaded` vs `rows.length`）、只有一份带 `aria-busy`；同时 `load(append)` 必须真的用 offset 追加——`DocView` 的按钮当时调的是无参 `load()`，写死 `offset=0` 替换整页，超过 200 块的文档后面的块永远到不了。
-- **过滤要分清"没取到"和"没有匹配"**：`GET /documents` 与 `GET /chunks` 都支持 `q`，且都在**分页前**过滤、`total` 是过滤后的数，所以标题/内容过滤一律走服务端 + debounce（前端不再对已取回的数组筛第二遍——两处各筛一次迟早给出两个答案）。曾经 `/chunks` 没有 `q`，只能在已加载的窗口里筛，文案就必须写"在已加载的 N 块中匹配 M 块"；补齐参数后这句已改为真实命中数。**如果哪天某个列表接口不支持服务端过滤，界面就不许摆一个看起来像全库结果的 `N / M`。**
-- **effect 里别顺手读状态**：切库的 `$effect` 若读了 `filter`（哪怕只是为了同步一个变量），用户每敲一个字都会让它重跑——重置视图、清空数据、并在 cleanup 里把轮询定时器清掉。这类"读依赖"要显式包进 `untrack()`。
-- **反过来，effect 的依赖必须在同步阶段读出来**：`$effect(() => { const t = setTimeout(() => { const v = foo.trim(); … }, 300) })` 里 `foo` 是在回调中读的，effect 建立时没建立依赖 → **它永不重跑**，debounce 同步看起来像"功能没做"（实测：地址栏一直停在 `#/apidoc`）。正确写法是把 `const v = foo.trim()` 提到 `setTimeout` 之前。这一类错误 `svelte-check` 完全无声，只能靠形态守卫（`test_apidoc_filter_is_in_url_and_index_shares_its_source` 钉住两者先后顺序）。
-- **跨路径生效的行为要放在所有路径的收口点上**：hash 变化的唯一收口是 `syncRoute()`，而 `go()` 只覆盖编程式跳转。dock 的「检索」是 `<a href="#/search">`，它不经过 `go()`——"恢复上次检索"写在 `go()` 里时对真实点击一直是死的。守卫也不许只钉"某字符串出现过"：`lastSearch()`、`location.replace` 躺在死分支或注释里时守卫照样绿，要钉**可达的形态**，并对每条断言做变异验证。
-- **`0` 是合法值**：显示数字段不要写 `Number(x) || null`（空表的 `0 B` 会变成 `—`），要显式 `Number.isFinite`。缺字段和值为 0 是两件不同的事。
-- **对话框正文是纯文本**：`ConfirmDialog` 用 `{cur.body}` 渲染（必须如此——正文里是表名等运行时值，能塞 Markdown 就能塞注入面）。所以 `body` 里不要写 `**粗体**`，星号会原样显示，而最该看清的那句反而成了噪声（`test_dialog_text_is_plain_text`）。
-- **知识库的"自定义 vs 默认"按后端口径判断**：两级模型下每个库都持有具体数值（`storage/repos/kbs.py:90-97`），`plan.own.custom` 恒为真、没有信息量；`plan_custom` 的定义是"与系统默认是否不同，容差 0.05"（`api/kbs.py:18-31`），前端必须复用这个判据。文案也不许写"继承系统默认"——勾选保存只是把**当前**默认抄进本库，日后改系统默认不会传到这里；写"继承"就是承诺一个后端做不到的联动。文档级（`doc_plan`）的 `own.custom` 仍然表示"有没有覆盖"，可以直接用。
-- **就地更新只能补自己那半张表**：保存成功后既不整页 `load()`（会抹掉另一面板未提交的编辑，阶段 6 的原始缺陷），也不在前端重算后端派生值（`effective` 还带着 `overlap_chars`/`source`，重算等于把切分口径实现第二遍，实测会让"当前生效"停在旧值）。正确做法是**只重取本面板那个接口**，其余状态原样保留。
-- **浏览器副作用只有一份实现，收在 `lib/actions.ts`**（阶段 7）。视图/组件里禁止 `getElementById`、`querySelector`、`scrollIntoView`、`classList.add/remove`、`createRange/getSelection`、自己写 `.scrollTop =`；由 `test_dom_side_effects_live_in_one_place` 拦。这不是洁癖，是两组实证：焦点陷阱曾有两份——`ConfirmDialog` 把 Escape/Tab 挂在**面板元素**上，而"焦点一直在面板里"这个前提在对话框里根本不成立（提交中按钮被禁用或被移除，焦点就落回 body），于是**那个框既关不掉也走不出去**；两份的可聚焦清单还漂了（一份排除 disabled 输入，一份不排除，而 focus 一个 disabled 元素是**静默失败**）。`revealHit` 也曾在 `Search` 与 `DocView` 里逐字重复。留在视图里的命令式调用只应是"这份元素独有、且无法声明化"的那些（主题写 `<html>`、下载造 `<a>`、剪贴板选区、`visibilityState` 避让）。
-- **滚动的前置条件是目标已有布局盒**。折叠分组用 `hidden` 实现时，卡片元素是**一直挂载**的，"解除 hidden"和"改 key"在同一次 flush 里，`scrollIntoView` 落在还没有布局盒的元素上——表现为"点了索引只闪一下，页面不动"（实测踩过）。修法是调用方 `await tick()` 等渲染完成再改 key，**不是**在 action 里 `requestAnimationFrame`：隐藏文档不跑动画帧，那会让滚动在后台标签页里静默丢掉。`reveal` 另外在 `prefers-reduced-motion` 下把 smooth 退回即时。
-- **状态是值唯一的来源，别让 DOM 当存储**。`<select id="engine">` 曾没有绑定，提交时靠 `document.getElementById(...)?.value ?? "auto"` 读——"元素没找到"和"值就是 auto"是同一种表现，用户选的引擎被静默换掉。同理，检索结果的方向键不能用 `parentElement.children[i ± 1]` 找下一个（模板多包一层就跳错行且不报错），要按 `chunk_id` 认元素。
-- **贴底/跟随这类"看着有实现"的效果，要检查它读的依赖**。`$effect(() => { if (running && el) el.scrollTop = el.scrollHeight })` 读了 `running` 和元素，**没读正文**，于是只在流式开始那一刻滚了一次空内容。共享 action 的参数里带上"变化的值"（`{ follow, text }`），才算得出"新字到了"。
-
-- **破坏性动作的入口必须唯一**：删除知识库以前有 3 个入口（卡片脚、文档列表页头、设置页危险区）且走 2 套确认路径，用户学到的是"哪儿都能删，但弹窗长得不一样"。现在只剩设置页一处。同理，"回到上一级"由工作区标签条统一承担，子页不再各自摆 backlink（两套控件指向同一处，迟早漂移）。
-- **URL 只描述"已生效"的检索参数**：控件改动先进暂存区（`draft`），点「应用并重查」才经 `searchparams.ts` 的 `searchUrl()` 写进 URL 并触发检索，同时给「放弃改动」出口。回归防护：旧实现每个控件 `onchange` 直接改写 URL，而触发检索的 effect 只依赖 `q`——改 top_k / 模式 / 阈值 / 过滤 全都不会重跑，屏幕上"参数面板是新值、结果集是旧值"且毫无提示。这不是慢，是**在说谎**。同理，结果条上的"范围/模式"必须读已生效值，不能读暂存区。
-- **问答流式的 delta 要按帧落地**：`answer += text` 每 token 触发一次模板里的 `splitCitations(answer)` 整串重解析，是 O(n²)；攒到一帧再刷新即可保持逐字观感。停止/结束/出错时必须立即 flush，否则已生成的文字会被半截缓冲吃掉。
-- **`wait=false` 提交的任务必须有订阅者**：重新解析 / 重新切分 / 入库都是异步的，接口回来时流水线才刚启动。提交方拿到 `job_id` 后要用 `waitForJob(jobId, onTick, signal)` 盯到终态再刷新，并在视图销毁时 `abort()`——否则页面永远停在"仍在处理"，用户只能离开再回来，而循环还会在后台继续打接口到超时（约 10 分钟）。由 `tests/test_frontend_wiring.py::test_async_ops_have_a_waiter` 锁住。**提示文案不许承诺界面做不到的事**：这里曾经写的是"处理完成后状态自动更新"，而当时并没有任何自动更新。
-- **双栏对照由 `ui/SplitView.svelte` 唯一实现**：它的 `.pane-body` 自己不滚（只做 flex 列），滚动权交给槽位里的内容——两层滚动容器会让内层拿不到稳定的 scrollTop，虚拟化窗口也就量不准。高度由壳层的 `.main.is-full` 沿 flex 链交下来，不用 `calc(100vh - … - 210px)` 猜页头高度；窄屏在 app.css 的 1100px 块里整体退回普通文档流。
-- **对话组件**：确认用 `confirmDialog()`（量化影响 + 破坏性操作要求输入名称），表单用 `formDialog()`（提交在对话内执行，失败就地显示且不关闭，避免丢掉刚敲的内容）；**禁止原生 `confirm()` / `alert()`**（由 `tests/test_frontend_wiring.py` 静态拦截）。
-- **错误态必须可重试**：错误态统一带「重试」按钮。后端重启期间打开列表页，只给一句话的话用户只能猜是不是要刷新浏览器。
-- **删除/变更要有量化影响**："将删除 342 个分块" 而不是 "确定删除？"。
-- **上传失败要保留**：批量上传只移除**成功**的条目，失败项留在队列供重试——否则失败文件被静默清出，用户只能凭记忆重新选。同时后台仍在处理的任务不报成失败。
-- **长列表窗口化**：分块表按视口只渲染可见行（`lib/virtual.ts`，定高 34px + 过扫描 8 行），节点数与数据量脱钩；行高固定是前提——变高行需要逐行测量，在长列表上得不偿失。注意窗口化依赖"面板自身可滚"：窄屏（<1100px）双栏退回普通文档流时面板不再受限（`clientHeight == scrollHeight`），`windowOf` 会算出"全部可见"而渲染所有行——这是回退行为而不是 bug，但拿它做性能断言时要先确认 measured 高度。
-- **动效尊重系统设置**：`lib/motion.ts` 在 `prefers-reduced-motion: reduce` 下把时长归零（而不是变快）。
-
-### 11.3 构建期注意
-
-- `npm run build` 会先清空 `web/dist/` 再产出（Vite `emptyOutDir`）。产物是哈希文件名，构建后刷新页面即可拿到新版本；**index.html 本身可能被浏览器缓存**，验证新产物时用带查询串的地址强制刷新。
-- `svelte-check` 依赖 `svelte.config.js`；缺失时会回退去读 `vite.config.ts`，而旧版 `@sveltejs/load-config` 认不出 vite-plugin-svelte 5 的插件名，表现为每个 `.svelte` 文件都报 "No Svelte configuration found in vite config"。
-- Python 模块**不会热重载**：后端改动必须重启服务，否则会看到"改了没生效"的幻象（曾因此误判为 `undefined` / `NaN`）。
-
----
+**分块方案只有两级值，没有运行时继承**：知识库始终持有具体值；`chunk_size=0` 只表示
+“物化系统默认”，启动迁移与 PUT/plan 都会立即物化（策略一起）。文档方案的空值才是
+“继承知识库”。后端 `is_custom_plan()` 与前端 `isCustomPlan()` 用同一把尺（容差 0.05）。
+- **Python 模块不会热重载**：后端改动必须重启服务；前端改完必须 `npm run build`（或跑 dev server），否则同样会看到旧界面。
 
 ## 12. 性能设计
 
@@ -857,19 +845,18 @@ Raggi/
 │  ├─ api.py                   # 兼容入口
 │  └─ server.py                # uvicorn 入口 + StaticFiles（含 uvloop 自动探测）
 ├─ web/
-│  ├─ src/                      # 前端源码（唯一需编辑处）
-│  │  ├─ main.ts  App.svelte
-│  │  ├─ views/                 # 路由级视图（KbList/KbDocs/KbChunks/DocView/KbSettings/Search/Settings/ApiDoc）
-│  │  ├─ ui/                    # 组件（对话/表单/上传面板/状态块/图标/密钥面板）
-│  │  ├─ lib/                   # api · router · crumbs · stores · types · virtual · motion
-│  │  │                         #   chunkops · docops · kbops · jobs · searchparams · source
+│  ├─ src/                      # 前端源码（唯一需编辑处，React + MUI）
+│  │  ├─ main.tsx  App.tsx  theme.ts
+│  │  ├─ views/                 # 路由级视图（KbList/KbDocs/KbChunks/DocView/KbSettings/Search/Settings/ApiDoc/Jobs）
+│  │  ├─ ui/                    # AnswerPanel · CommandPalette · KeysPanel · DataPanel · WorkspaceTabs · toast
+│  │  ├─ lib/                   # api · router · store · dialog · ops · selection · dom · types
+│  │  │                         #   jobs · jobcancel · searchparams · source · format · nav · sse
 │  │  ├─ data/apidoc.ts         # API 文档数据
-│  │  └─ styles/app.css
 │  ├─ dist/                     # Vite 产物（gitignore；StaticFiles 托管）
 │  └─ index.html
 ├─ data/{lancedb/, files/, config.toml}   # config.toml 权限应为 0600
 ├─ tests/                      # conftest.py 隔离 RAG_DATA_DIR，测试不读本机配置
-├─ package.json  tsconfig.json  vite.config.ts  svelte.config.js
+├─ package.json  tsconfig.json  vite.config.ts
 ├─ pyproject.toml              # extras: docling / unstructured / local-models / jieba
 └─ docs/{DESIGN.md, AUDIT-*.md, DESIGN-AUDIT-*.md}
 ```
@@ -882,6 +869,7 @@ Raggi/
 
 ```bash
 npm install --include=dev && npm run build    # 前端：Vite 构建 web/src → web/dist
+npm run test:e2e                              # Playwright 浏览器 E2E（临时数据 + 桩 embedding）
 pip install -e ".[docling,unstructured]"      # 或最小集：pip install -e .
 rag serve --host 0.0.0.0 --port 8000 --data ./data
 ```
@@ -900,17 +888,20 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **561 个测试通过**（默认套件；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑，共 562 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
+当前 **625 个测试通过**（另加 6 条 Playwright E2E；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑；含 perf 共 626 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
 
 - **默认套件的边界**：`addopts = ["-m", "not perf"]` 把绝对延迟门槛关在默认套件外。此前只声明了 `markers = [...]`——那只是允许这个标记名，**不会**排除它，于是 `test_latency_budgets`（断言 `p50 < 150ms`）一直每天在默认套件里跑，而它自己的 docstring 第一行写着「只在 `pytest -m perf` 下跑」。注释与行为现在由 addopts 对齐；两条命令都验过（默认 547 passed / 1 deselected；`-m perf` 单跑通过）。
 - **隔离**：`tests/conftest.py` 把 `RAG_DATA_DIR` 指向临时目录。必须如此——`Settings()` 会读 `{data_dir}/config.toml`，测试若不隔离就会读到开发机上的生产配置（实测：本地开启 `features.answer` 后，断言"默认关闭"的测试立刻失败）。
-- **静态守卫**（`test_frontend_wiring.py`，33 条）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、浏览器副作用只允许有 `lib/actions.ts` 一份实现。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
-  > 曾针对「手写 HTML + tsc 直出」校验 import 可解析与 DOM id 存在；改用 Svelte 后这两类由编译器与组件结构接管，保留只会变成噪声，已移除。
-- **交互回归**（`test_architecture.py` / `test_doc_viewer.py`）：分块表窗口化（`windowOf` + 占位行 + 固定行高）、分块编辑/删除/批量启停、独立分块页（`only_standalone=true`）、知识库/文档两级方案编辑、文档重命名、表单对话挂载、异步重解析/重切分入口、流式问答前端（`lib/sse.ts` 四事件齐全 + `AnswerPanel` 真中断）、取消入口（`lib/jobcancel.ts` + 文档列表/入库面板两个入口）、批量操作确实走批量端点。
-  > 文档级动作（重命名/方案/重解析/重切分/删除）集中在 `lib/docops.ts`，知识库级动作在 `lib/kbops.ts`——列表页与详情页共用同一套文案与队列语义，测试断言指向模块而不是某个视图。
+- **静态守卫**（`test_frontend_wiring.py`，54 条，全部针对 React `.tsx/.ts`）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、加载三态、分页后端 total、多选单实现、异步任务有人等、设置分节判脏、API 文档 URL 同源、无原始 HTML 注入。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
+  > import 可解析与 DOM id 存在由 TypeScript / Vite 构建接管，不重复测；Svelte 时代的守卫已全部翻译到 React（2026-10-10），未保留 skip。
+- **浏览器 E2E**（`e2e/app.spec.ts`，`npm run test:e2e`）：临时数据目录 + 桩 embedding 起独立实例，
+  覆盖首页→库→文档、原文按需展开与 `?chunk=` 深链、检索参数草稿与应用、API 文档过滤/选中、主题持久化，
+  以及 **CSP 下 Emotion 样式带 nonce 且实际生效**；失败保留 trace/screenshot。需要系统 Chrome（`PW_CHANNEL` 可换）。
+- **交互回归**（`test_architecture.py` / `test_doc_viewer.py`）：服务端分页每页 20 行（不再是窗口化长列表）、分块编辑/删除/批量启停、独立分块范围（`only_standalone=true`）、知识库/文档两级方案编辑、文档重命名、MUI 对话框挂载、异步重解析/重切分入口、流式问答前端（`lib/sse.ts` 四事件齐全 + `AnswerPanel` 真中断）、取消入口（`lib/jobcancel.ts`，文档列表与入库面板共用）、批量操作确实走批量端点。
+  > 知识库/文档/分块三组动作集中在 `lib/ops.tsx`——列表页与详情页共用同一套文案与队列语义，测试断言指向模块而不是某个视图。
 - **契约守卫**（`test_openapi_contract.py`，14 项）：每个 /api 操作的 200 响应都有 schema、非 JSON 端点（字节流 / Markdown 报告 / SSE 事件流）声明媒体类型、安全方案存在且每个操作都声明 security、tag 分组齐全且只用声明过的 tag、错误契约（401/403/404/503/422）出现在对应操作上、`global` 字段别名不漂移、契约里只有 `/api/v1` 而旧前缀行为一致且同样受鉴权；另有两项用真实请求确认错误体就是 `{"detail": str}`。
 - **批量与流式**（`test_batch_ops.py` 11 项 / `test_answer_stream.py` 7 项）：批量启停的原子性与去重（不做部分成功）、批量删除级联分块且不留孤儿、`skipped` 如实回报；SSE 事件顺序 **sources → delta\* → done**（引用必须先于正文）、与非流式共享同一套引用、列表形态 content 的归一化、空结果/空输出/error 三种边界都给出明确事件而非断连。
 - **任务取消与归属**（`test_job_cancel.py` 11 项）：排队中是真取消（撤销后不产出文档）、运行中是协作式取消（阶段边界退出、旧分块完好、文档不被误标 failed）、已终态幂等、取消后不再出现在活动任务列表、任务行记录 kb_id 且列表/单条都带 terminal、jobs 表补列幂等。
@@ -952,9 +943,9 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
   另一个线程必须仍能读写来验证。
   > 另 2 项测的是**站在它上面的** `Embedder.embed_one`：同文本第二次不许再打远端、
   > **换 embedding 模型必须重算**（缓存键里带模型名，否则拿到另一个模型空间的向量）；
-  > 以及一条**故意断言现状**的测试——缓存不合并「正在飞」的同 key 请求（stampede），
-  > 这是审计 §4.2 里被否证后**保留**的行为，将来实现 in-flight 合并时它会红，
-  > 届时该连决定一起改而不是把断言改小。
+  > 以及 **in-flight 合并**：同 key 的并发请求只真正调用一次 provider。
+  > 2026-10-20 审计把原先“保留 stampede”的决定反转为实现合并（TTLCache 单飞），
+  > 见 [AUDIT-2026-10-20.md](./AUDIT-2026-10-20.md) §3.3。
 - **入库并发闸与合批形状**（`test_queue.py`，4 项）：`_embed_gate` 必须跨调用复用同一实例、
   4 文档 × 4 分片的**峰值在途 ≤ permits**、`peak > 1`（否则「串行也算过」会让上界断言变成空话），
   以及一条**变异检查**：把闸门退回「每次新建」后峰值必须突破 permits——它证明上一条测的是闸门而不是线程数。

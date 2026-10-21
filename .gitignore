@@ -1,4 +1,4 @@
-# 前端源码在 web/src（TypeScript + Svelte），
+# 前端源码在 web/src（React + TypeScript），
 # web/dist 是 Vite 构建产物，运行前由 npm run build 生成，不入库
 node_modules/
 
@@ -17,10 +17,21 @@ dist/
 # 一起排除掉 —— 结果是仓库从干净检出根本构建不起来，而本地因为已有那份文件
 # 一切正常，只有 CI 能发现。这个坑真踩过，见 docs/ARCH-AUDIT-2026-10-06.md。
 /data/
-# Svelte/Vite 构建产物
+# Vite 构建产物
 web/dist/
 
 # 代理/编辑器的本地状态（权限决定、口味文件），不是项目源码
 .commandcode/
 .venv/
 venv/
+
+# 进程管理脚本的运行时产物（start.sh 写、stop.sh 清）
+/.raggi.pid
+/logs/
+
+# 本地调试截图（README 配图在 docs/images，入库）
+/.shots/
+test-results/
+playwright-report/
+blob-report/
+.playwright/

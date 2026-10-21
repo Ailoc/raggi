@@ -61,12 +61,15 @@ class KnowledgeBase(LanceModel):
     分块方案为知识库级默认值：chunk_size == 0 表示继承全局
     settings.split（不用 0/null 混用，避免 LanceDB 空值语义歧义）。
     overlap_ratio 为百分比（0-50），换算见 store.chunking。
+    strategy 为切分策略（auto/structure/recursive/semantic），
+    空串 = 旧数据，读取时归一为 auto（chunk_limits.normalize_strategy）。
     """
     kb_id: str
     name: str
     description: str = ""
     chunk_size: int = 0
     overlap_ratio: float = 0.0
+    strategy: str = ""
     created_at: str = ""
     updated_at: str = ""
 

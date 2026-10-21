@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import re
 
 from fastapi.responses import JSONResponse
@@ -64,7 +65,7 @@ def extract_secret(request) -> str:
 
 def is_protected(path: str) -> bool:
     """该路径是否需要鉴权（静态前端与 OPTIONS 放行）。"""
-    return path.startswith("/api")
+    return path == "/api" or path.startswith("/api/")
 
 
 # 原文文件路径：/api/documents/{doc_id}/file
@@ -107,6 +108,11 @@ def authenticate(ctx, request) -> dict | None:
     if not is_protected(path):
         return None
 
+    # CORS 预检不带凭据，必须放行，否则浏览器端调用会被 401 挡住。
+    # 放在任何查库之前：预检是最频繁的无状态请求，不该为它读一次密钥表。
+    if request.method == "OPTIONS":
+        return None
+
     secret = extract_secret(request)
     legacy = (ctx.settings.token or "").strip()
     q = request.query_params
@@ -115,10 +121,6 @@ def authenticate(ctx, request) -> dict | None:
 
     # 未配置任何鉴权 → 放行（保持单机自用的零摩擦体验）
     if not secret and not legacy and not _keys_configured(ctx):
-        return None
-
-    # CORS 预检不带凭据，必须放行，否则浏览器端调用会被 401 挡住
-    if request.method == "OPTIONS":
         return None
 
     # 签名 URL：<iframe>/<img>/<embed> 无法携带请求头，原文预览只能
@@ -149,8 +151,11 @@ def authenticate(ctx, request) -> dict | None:
         apikeys.touch(ctx.store, str(row.get("key_id")))
         return row
 
-    # 2) 旧版静态 token（兼容既有部署，等价 write 全权限）
-    if legacy and secret == legacy:
+    # 2) 旧版静态 token（兼容既有部署，等价 write 全权限）。
+    # 用常数时间比较：`==` 会在第一个不同字符处返回，理论上可被
+    # 计时攻击逐位试探。静态 token 是长期凭据，不值得省这一步。
+    if legacy and secret and hmac.compare_digest(
+            secret.encode("utf-8"), legacy.encode("utf-8")):
         return None
 
     # 3) **引导例外**：系统里一把密钥都没有时，允许无凭据访问管理接口。

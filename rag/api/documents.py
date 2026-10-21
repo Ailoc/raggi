@@ -33,7 +33,7 @@ from rag.api.schemas import (
     UrlIngestReq,
 )
 from rag.core.errors import Invalid
-from rag.core.idempotency import IdempotencyStore, normalize_key
+from rag.core.idempotency import normalize_key
 from rag.ingest import pipeline
 from rag.ingest.queue import JobCancelled
 from rag.parsing.router import ALLOWED_ENGINES
@@ -50,29 +50,38 @@ from rag.storage.repos import keys as apikeys
 
 logger = logging.getLogger("raggi.api.documents")
 
-# 幂等键存储：模块级实例，create_app 会把它挂到 app.state.idem。
-# 进程内共享是**有意的**——幂等键的作用域本来就只应是「这一次进程」，
-# 多 worker 部署下各持一份只会让重复请求偶尔漏拦，不会造成错误结果。
-IDEM: "IdempotencyStore" = IdempotencyStore()
+async def _idem(ctx, request, path: str, run) -> dict:
+    """带 Idempotency-Key 的请求：同键只执行一次。
 
-
-async def _idem(request, path: str, run) -> dict:
-    """带 Idempotency-Key 的请求：同键重试直接返回首次结果，不重复入库。
-
-    没有键时就是普通执行——**幂等是可选增强**，不给键的老客户端
-    行为不变（内容哈希去重仍会挡住同内容重复入库）。
+    - 首次请求：认领 pending → 执行 → finish(done) / fail(释放)；
+    - 并发同键：等待首次结果（有上限），拿到后回放；
+    - 等待超时：409 + Retry-After，明确告诉调用方首次仍在处理，
+      而不是重复解析/向量化。
     """
     key = normalize_key(request)
     if not key:
         return await run()
-    cached = IDEM.get(key, path)
-    if cached is not None:
-        # 回放首次结果，并明确标记：调用方据此知道这是重试而非新提交
-        return {**cached, "idempotent_replay": True}
-    result = await run()
-    # 只记成功的结果：失败重试应该真能再试一次
+    claim = await asyncio.to_thread(ctx.idem.claim, key, path)
+    if claim.kind == "replay":
+        return {**(claim.result or {}), "idempotent_replay": True}
+    if claim.kind == "pending":
+        raise HTTPException(
+            409, "相同 Idempotency-Key 的请求正在处理中，请稍后重试",
+            headers={"Retry-After": "2"})
+    try:
+        result = await run()
+    except BaseException as e:
+        try:
+            await asyncio.to_thread(
+                ctx.idem.fail, key, path, claim.token, str(e)[:200])
+        except Exception:  # noqa: BLE001
+            logger.warning("释放幂等认领失败 path=%s", path, exc_info=True)
+        raise
     if result.get("status") != "failed":
-        IDEM.put(key, path, result)
+        await asyncio.to_thread(
+            ctx.idem.finish, key, path, claim.token, result)
+    else:
+        await asyncio.to_thread(ctx.idem.fail, key, path, claim.token, "failed")
     return result
 
 
@@ -151,13 +160,18 @@ async def api_upload(request: Request,
     ctx = get_ctx(request)
     if file is None:
         raise HTTPException(400, "需要上传文件")
-    # 幂等检查必须在**读文件与落盘之前**：重试请求不该把大文件再读一遍
-    # 内存、再写一次临时文件。命中缓存就直接回放首次结果。
+    # 幂等认领必须在**读文件与落盘之前**：重试请求不该把大文件再读一遍，
+    # 并发同键也不该跑两遍流水线。replay 直接回放；pending 等待（有上限）。
     key = normalize_key(request)
+    claim = None
     if key:
-        cached = IDEM.get(key, "/documents")
-        if cached is not None:
-            return {**cached, "idempotent_replay": True}
+        claim = await asyncio.to_thread(ctx.idem.claim, key, "/documents")
+        if claim.kind == "replay":
+            return {**(claim.result or {}), "idempotent_replay": True}
+        if claim.kind == "pending":
+            raise HTTPException(
+                409, "相同 Idempotency-Key 的请求正在处理中，请稍后重试",
+                headers={"Retry-After": "2"})
 
     # 流式落盘 + 边写边计数：file.read(n) 会先把 n+1 字节**全部**读进
     # 内存再比较，10 个并发 50MB 上传就是 500MB 常驻（还要 ×2 写盘）。
@@ -175,42 +189,65 @@ async def api_upload(request: Request,
     # 不会在 tmp_dir 里留下一个「看起来完整」的半截文件骗过后续处理。
     part = tmp.with_suffix(tmp.suffix + ".part")
     try:
-        with part.open("wb") as fh:
-            while True:
-                block = await file.read(chunk_size)
-                if not block:
-                    break
-                total += len(block)
-                if total > max_bytes:
-                    raise HTTPException(
-                        413, f"文件超过上限 {ctx.settings.max_upload_mb}MB")
-                fh.write(block)
-        part.replace(tmp)
-    except HTTPException:
-        part.unlink(missing_ok=True)
-        raise
-    except Exception:
-        part.unlink(missing_ok=True)
-        raise_operation_error(RuntimeError("写临时文件失败"), "文件入库失败")
-    try:
-        from functools import partial
-
-        result = await asyncio.to_thread(
-            _enqueue, ctx, partial(_ingest_upload, ctx),
-            tmp, title, parser_cfg, file.filename, kb_id or "",
-            wait=wait)
-        if key and result.get("status") != "failed":
-            IDEM.put(key, "/documents", result)
-        return result
-    except HTTPException:
-        # 入队失败（如队列已满）：任务体从未接管该文件，由请求方清理
         try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+            with part.open("wb") as fh:
+                while True:
+                    block = await file.read(chunk_size)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            413, f"文件超过上限 {ctx.settings.max_upload_mb}MB")
+                    fh.write(block)
+            part.replace(tmp)
+        except HTTPException:
+            part.unlink(missing_ok=True)
+            raise
+        except asyncio.CancelledError:
+            # 客户端断开：不清理会留下 .part 残片；重抛让取消链路正常收尾
+            part.unlink(missing_ok=True)
+            raise
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise_operation_error(
+                RuntimeError("写临时文件失败"), "文件入库失败")
+        try:
+            from functools import partial
+
+            result = await asyncio.to_thread(
+                _enqueue, ctx, partial(_ingest_upload, ctx),
+                tmp, title, parser_cfg, file.filename, kb_id or "",
+                wait=wait)
+            if key and claim is not None:
+                if result.get("status") != "failed":
+                    await asyncio.to_thread(
+                        ctx.idem.finish, key, "/documents",
+                        claim.token, result)
+                else:
+                    await asyncio.to_thread(
+                        ctx.idem.fail, key, "/documents",
+                        claim.token, "failed")
+            return result
+        except HTTPException:
+            # 入队失败（如队列已满）：任务体从未接管该文件，由请求方清理
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise_operation_error(e, "文件入库失败")
+    except BaseException as e:
+        # 任何失败（含取消）都要释放认领，否则同键会一直 pending
+        if key and claim is not None:
+            try:
+                await asyncio.to_thread(
+                    ctx.idem.fail, key, "/documents", claim.token,
+                    str(e)[:200])
+            except Exception:  # noqa: BLE001
+                logger.warning("释放上传幂等认领失败", exc_info=True)
         raise
-    except Exception as e:  # noqa: BLE001
-        raise_operation_error(e, "文件入库失败")
 
 
 @router.post("/documents/text")
@@ -225,7 +262,7 @@ async def api_text(request: Request, body: TextIngestReq,
             ctx.settings, wait=wait, kb_id=body.kb_id or "")
 
     try:
-        return await _idem(request, "/documents/text", _run)
+        return await _idem(ctx, request, "/documents/text", _run)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -272,7 +309,7 @@ async def api_url(request: Request, body: UrlIngestReq,
             wait=wait, kb_id=body.kb_id or "")
 
     try:
-        return await _idem(request, "/documents/url", _run)
+        return await _idem(ctx, request, "/documents/url", _run)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -295,19 +332,28 @@ async def api_list(request: Request, q: str = "", status: str = "",
 
 
 @router.get("/documents/{doc_id}")
-async def api_doc(request: Request, doc_id: str) -> DocumentOut:
+async def api_doc(request: Request, doc_id: str,
+                  include_chunks: bool = True) -> DocumentOut:
+    """文档详情。
+
+    `include_chunks=false` 时省略分块索引：文档工作台与检索原文检视
+    都会另取分块页，详情里再带一份「全部块 + 每块正文」会让打开一篇
+    大文档的请求体成倍膨胀。默认 true 保持既有契约。
+    """
     ctx = get_ctx(request)
     row = await asyncio.to_thread(get_document, ctx.store, doc_id)
     if row is None:
         raise HTTPException(404, "document not found")
     row = scalar_dict(row)
     # 分块索引（不含向量）
-    row["chunks"] = await asyncio.to_thread(
-        _doc_chunks, ctx.store, doc_id)
+    row["chunks"] = (await asyncio.to_thread(_doc_chunks, ctx.store, doc_id)
+                     if include_chunks else None)
     # 原文预览地址：iframe/img 无法带 Authorization 头，
-    # 故启用鉴权时改用短期签名 URL
+    # 故启用鉴权时改用短期签名 URL。
+    # has_keys 可能查库（首次/缓存过期），必须离开事件循环。
     row["has_file"] = bool(row.get("stored_file"))
-    row["file_url"] = _file_url(ctx, doc_id) if row["has_file"] else None
+    row["file_url"] = (await asyncio.to_thread(_file_url, ctx, doc_id)
+                       if row["has_file"] else None)
     return row
 
 

@@ -90,32 +90,53 @@ def get_job(store: "LanceStore", job_id: str,
     return rows[0] if rows else None
 
 def list_jobs(store: "LanceStore", limit: int = 50,
-              kb_id: str = "") -> tuple[list[dict], int]:
-    """最近任务（按开始时间倒序）+ 总数。
+              kb_id: str = "", offset: int = 0,
+              status: str = "all") -> tuple[list[dict], int]:
+    """最近任务（按开始时间倒序）+ **过滤后的**总数。
 
-    排序与分页下推：改前是「全表取回 + Python 排序 + 切片」，
-    而这张表恰恰是增长最快的一张（任务记录保留 7 天）。
+    排序、过滤与 offset 全部下推。旧实现只接受 limit：
+    - 前端传的 offset 被静默忽略，第 2 页永远等于第 1 页；
+    - `active_only` 在 API 层「先取最近 N 条再过滤」，一旦有超过 N 条
+      更新的终态任务，更早的活跃任务就查不到（排队中的任务会从界面消失）。
+
+    status: all / active / failed / done / cancelled。过滤发生在 LIMIT 之前，
+    total 是过滤后的行数，分页条因此和列表是同一口径。
     """
     n = max(1, min(int(limit), 500))
+    off = max(0, int(offset))
+    status = (status or "all").lower()
+    if status not in ("all", "active", "failed", "done", "cancelled"):
+        status = "all"
     meta = _meta(store)
     if meta is not None:
-        # 两个引擎的「过滤条件」不是一种东西：SQLite 要 `WHERE …` 片段 +
-        # 参数元组，Lance 要一个完整的 filter 表达式。
-        # 改前两个分支复用同一个 `where` 名字，类型与含义都串了
-        # （mypy 报的就是这个：str 与 str|None 互相赋值）。分名之后
-        # 「这条 SQL 归谁」在代码里看得见。
-        sql_where: str = ""
-        sql_params: tuple[str, ...] = ()
+        conds: list[str] = []
+        params: list[str] = []
         if kb_id:
-            sql_where, sql_params = "WHERE kb_id=?", (kb_id,)
+            conds.append("kb_id=?")
+            params.append(kb_id)
+        if status == "active":
+            conds.append("stage NOT IN ('done','failed','cancelled')")
+        elif status != "all":
+            conds.append("stage=?")
+            params.append(status)
+        cond = " AND ".join(conds)
+        sql_where = f" WHERE {cond}" if cond else ""
         rows = meta.query(
-            f"SELECT {', '.join(JOB_COLS)} FROM jobs {sql_where} "
-            "ORDER BY started_at DESC, job_id LIMIT ?", (*sql_params, n))
-        return rows, meta.count("jobs", sql_where or None, sql_params)
-    lance_where = f"kb_id = '{escape_sql(kb_id)}'" if kb_id else None
+            f"SELECT {', '.join(JOB_COLS)} FROM jobs{sql_where} "
+            "ORDER BY started_at DESC, job_id LIMIT ? OFFSET ?",
+            (*params, n, off))
+        return rows, meta.count("jobs", cond or None, tuple(params))
+    parts: list[str] = []
+    if kb_id:
+        parts.append(f"kb_id = '{escape_sql(kb_id)}'")
+    if status == "active":
+        parts.append("stage NOT IN ('done','failed','cancelled')")
+    elif status != "all":
+        parts.append(f"stage = '{escape_sql(status)}'")
+    lance_where = " AND ".join(parts) if parts else None
     rows = scalar_rows(store.jobs, cols=JOB_COLS, where=lance_where,
                        order_by=[("started_at", False), ("job_id", True)],
-                       limit=n)
+                       limit=n, offset=off)
     try:
         total = store.jobs.count_rows(filter=lance_where) if lance_where \
             else store.jobs.count_rows()

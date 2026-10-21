@@ -132,7 +132,6 @@ class RetrieveConfig(BaseModel):
     refine_factor: int = 10
     window: int = 1
     use_jieba: bool = True
-    query_rewrite: bool = False
 
 
 # ---------------------------------------------------------------- 其它
@@ -146,7 +145,6 @@ class ParserConfig(BaseModel):
 
 class FeaturesConfig(BaseModel):
     answer: bool = False
-    query_logs: bool = False
 
 
 class SplitConfig(BaseModel):
@@ -155,9 +153,14 @@ class SplitConfig(BaseModel):
     **注意**：这不再是「继承链上的一级」。分块方案已简化为两级
     （知识库 → 文档），本配置只用于**新建知识库时预填**，
     知识库一旦建立就持有具体数值，不存在运行时的「继承全局」状态。
+
+    strategy 见 `rag/ingest/splitter.py`：auto（有 markdown 标题则结构感知）
+    / structure / recursive / semantic。字符数只是 fallback 策略的参数，
+    结构感知与语义分块不再由它俩单独表达。
     """
     chunk_size: int = 512
     chunk_overlap: int = 64
+    strategy: str = "auto"
 
 
 class Settings(BaseSettings):

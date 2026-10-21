@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Security
+from fastapi import FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, ORJSONResponse
 from fastapi.security import APIKeyHeader, HTTPBearer
@@ -21,7 +21,6 @@ from rag.api.answer import router as answer_router
 from rag.api.apikeys import router as apikeys_router
 from rag.api.auth import AuthError, authenticate
 from rag.api.chunks import router as chunks_router
-from rag.api.documents import IDEM as _IDEM
 from rag.api.documents import router as documents_router
 from rag.api.jobs import router as jobs_router
 from rag.api.kbs import router as kbs_router
@@ -72,6 +71,110 @@ TAGS_METADATA = [
 # 会改变数据状态的方法。判定「该不该作废健康快照」用（与 ratelimit.is_limited_method
 # 用的是同一组语义，但不 import 它——那个函数还包含限流豁免的判断，语义并不等价）。
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# 非文件请求的正文上限：正文入库允许 MAX_DOC_CHARS（20MB），JSON 包装
+# 与转义会再膨胀一点；multipart 另按 max_upload_mb 计算。
+_JSON_BODY_MAX_BYTES = 20 * 1024 * 1024
+_BODY_OVERHEAD_BYTES = 2 * 1024 * 1024
+
+
+def _body_limit_bytes(settings) -> int:
+    upload = int(settings.max_upload_mb) * 1024 * 1024
+    return max(_JSON_BODY_MAX_BYTES, upload) + _BODY_OVERHEAD_BYTES
+
+
+class BodyLimitMiddleware:
+    """纯 ASGI 的正文硬上限（覆盖 chunked / 没有 Content-Length 的请求）。
+
+    `_http_guards` 里的 Content-Length 预检能省掉读取，但客户端可以
+    不发这个头。这里包住 receive，按**实际收到**的字节数计数；超限时
+    抛 HTTPException(413)，由内层 FastAPI ExceptionMiddleware 转成响应，
+    再经外层 guards 补安全头。正文已被读取的部分不会继续消费——直接
+    中断，避免攻击者用 chunked 绕过上传上限把内存/磁盘打满。
+    """
+
+    def __init__(self, app, limit_bytes: int):
+        self.app = app
+        self.limit = max(1, int(limit_bytes))
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        total = 0
+
+        async def limited_receive():
+            nonlocal total
+            message = await receive()
+            if message.get("type") == "http.request":
+                total += len(message.get("body") or b"")
+                if total > self.limit:
+                    raise HTTPException(
+                        413, f"请求体超过上限（{self.limit // (1024 * 1024)}MB）")
+            return message
+
+        return await self.app(scope, limited_receive, send)
+
+# 安全响应头：CSP 是纵深防御，不是替代 React 的转义。
+# - script-src 'self'：主题引导已外置为 /theme-boot.js，页面没有任何内联脚本；
+# - style-src 'unsafe-inline'：Emotion（MUI 的样式引擎）在运行时插入 <style>，
+#   这一条是组件库的硬要求；
+# - frame-src 'self'：PDF 原文用同源 iframe 内嵌；
+# - connect-src 'self'：前端只调用本服务 API；
+# - img-src 允许 blob:/data:（导出/预览），object-src 关闭（PDF 用 iframe）。
+_CSP_COMMON = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-src 'self'; "
+    "media-src 'self'; "
+    "manifest-src 'self'; "
+    "worker-src 'self' blob:; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'self'"
+)
+
+
+def _csp_header(nonce: str | None = None) -> str:
+    """CSP：HTML 页面用 per-request nonce 管 style 元素。
+
+    MUI/Emotion 在运行时插入 <style data-emotion>，所以不能简单砍掉
+    style 源；nonce 是「只允许服务端认可的样式标签」的标准做法。
+    React 的 style 属性（Popper 定位、CSS 变量等）无法带 nonce，
+    由 `style-src-attr 'unsafe-inline'` 单独放行——它不覆盖 <style>，
+    两者是不同的指令。
+    """
+    if nonce:
+        style = (
+            "style-src 'self'; "
+            f"style-src-elem 'self' 'nonce-{nonce}'; "
+            "style-src-attr 'unsafe-inline'"
+        )
+    else:
+        # 非 HTML 响应（API/JS/CSS）不需要样式源；不再整条放行 unsafe-inline。
+        style = "style-src 'self'"
+    return f"{_CSP_COMMON}; {style}"
+
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": _csp_header(),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+}
+
+
+def _finalize_response(response, rid: str, started: float):
+    """把每个响应都该有的头一次加齐（错误/限流路径也不漏）。"""
+    response.headers[requestid.HEADER] = rid
+    response.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 # 源码在 web/src/（Svelte 5 + Vite），产物在 web/dist/。
@@ -104,6 +207,10 @@ class Ctx:  # 应用上下文（在 server 中装配）
 
         self.queue = IngestQueue(store, workers=settings.ingest_workers,
                                  retention_days=settings.job_retention_days)
+        # 幂等键：有 MetaStore 时跨进程；None 时退回进程内（lancedb 回退形态）
+        from rag.core.idempotency import IdempotencyStore
+
+        self.idem = IdempotencyStore(meta=meta)
 
 
 def _check_web_build() -> None:
@@ -118,7 +225,7 @@ def _check_web_build() -> None:
         # 递归扫描：视图在 views/、组件在 ui/、样式在 styles/，
         # 只看顶层 *.ts 会漏掉绝大多数改动
         sources = [p for p in WEB_SRC_DIR.rglob("*")
-                   if p.suffix in (".ts", ".svelte", ".css") and p.is_file()]
+                   if p.suffix in (".ts", ".tsx") and p.is_file()]
         stale = [p.name for p in sources
                  if p.stat().st_mtime > entry.stat().st_mtime]
         if stale:
@@ -203,12 +310,15 @@ def create_app(ctx: Ctx) -> FastAPI:
         openapi_tags=TAGS_METADATA,
     )
     app.state.ctx = ctx
-    # 幂等键存储挂到 app.state：进程内共享是有意的（见 documents.IDEM
-    # 的注释），挂出来是为了让测试与运维能触达它、重置它。
-    app.state.idem = _IDEM
+    app.add_middleware(BodyLimitMiddleware,
+                       limit_bytes=_body_limit_bytes(ctx.settings))
+    # 幂等键存储挂到 app.state：默认跨进程（SQLite）；lancedb 回退时进程内。
+    # 挂出来是为了让测试与运维能触达它、重置它。
+    app.state.idem = ctx.idem
     app.state.limiter = RateLimiter(
         limit=ctx.settings.rate_limit_writes_per_min,
-        burst=ctx.settings.rate_limit_burst)
+        burst=ctx.settings.rate_limit_burst,
+        meta=ctx.meta)
     _check_web_build()
 
     @app.middleware("http")
@@ -251,9 +361,39 @@ def _wire_routers(app: FastAPI) -> None:
                            dependencies=SECURITY_DEPS)
 
     if WEB_DIST_DIR.exists():
+        _wire_index(app)
         app.mount(
             "/", StaticFiles(directory=str(WEB_DIST_DIR), html=True),
             name="web")
+
+
+def _wire_index(app: FastAPI) -> None:
+    """首页单独走一条路由：注入 per-request nonce 的 CSP。
+
+    StaticFiles(html=True) 不会给每个响应生成 nonce；把首页换成显式
+    路由后，CSP 的 style-src-elem 可以是 `'nonce-...'` 而不是
+    `'unsafe-inline'`。非首页响应沿用全局 CSP（它们不渲染 HTML）。
+    """
+    import secrets
+
+    from fastapi.responses import HTMLResponse
+
+    index = WEB_DIST_DIR / "index.html"
+    if not index.exists():
+        return
+
+    @app.get("/", include_in_schema=False, response_class=HTMLResponse)
+    @app.get("/index.html", include_in_schema=False, response_class=HTMLResponse)
+    async def index_page() -> HTMLResponse:
+        html = index.read_text(encoding="utf-8")
+        nonce = secrets.token_urlsafe(16)
+        html = html.replace(
+            "</head>",
+            f'    <meta name="csp-nonce" content="{nonce}" />\n  </head>')
+        return HTMLResponse(
+            html,
+            headers={"Content-Security-Policy": _csp_header(nonce),
+                     "Cache-Control": "no-cache"})
 
 
 def _wire_exception_handlers(app: FastAPI) -> None:
@@ -307,6 +447,28 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
     rid = requestid.resolve(request)
     request.state.request_id = rid
     started = time.perf_counter()
+
+    # 先于鉴权拒掉超大请求：Content-Length 是客户端自报的，用它避免
+    # 把 GB 级 JSON 读进内存；没有 Content-Length 的 chunked 请求仍会在
+    # 读取时受限（uvicorn 不提供通用上限）。
+    # 文件上传的 multipart 按 max_upload_mb 放行，其余按 20MB 正文上限。
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = -1
+        if declared < 0:
+            return _finalize_response(JSONResponse(
+                {"detail": "Content-Length 不合法", "request_id": rid},
+                status_code=400), rid, started)
+        upload_limit = ctx.settings.max_upload_mb * 1024 * 1024
+        limit = max(_JSON_BODY_MAX_BYTES, upload_limit) + _BODY_OVERHEAD_BYTES
+        if declared > limit:
+            return _finalize_response(JSONResponse(
+                {"detail": f"请求体超过上限（{limit // (1024 * 1024)}MB）",
+                 "request_id": rid},
+                status_code=413), rid, started)
     # 鉴权：API 密钥（可吊销/过期/分作用域）优先，兼容旧版静态 token。
     # 未配置 token 且无任何密钥时不拦截（单机自用零摩擦）。
     # 静态前端与 CORS 预检放行。
@@ -319,10 +481,7 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
     except AuthError as e:
         # 必须在中间件里显式构造响应：此时 ExceptionMiddleware 尚未
         # 生效，直接抛 HTTPException 会退化成裸 500，调用方看不出原因。
-        resp = e.to_response()
-        resp.headers[requestid.HEADER] = rid
-        resp.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
-        return resp
+        return _finalize_response(e.to_response(), rid, started)
 
     # 限流放在鉴权之后：未通过鉴权的请求不该消耗别人的配额，
     # 也不该向调用方泄露「这个 key 还有多少额度」。
@@ -331,16 +490,17 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
             and ratelimit.is_limited_method(request)
             and path.startswith("/api")
             and not ratelimit.is_idempotent(path)):
-        ok, retry = app.state.limiter.allow(
+        # 共享实现要跑 SQLite 事务（BEGIN IMMEDIATE），不能占用事件循环
+        ok, retry = await asyncio.to_thread(
+            app.state.limiter.allow,
             ratelimit.caller_key(request, key_row))
         if not ok:
             resp = JSONResponse(
                 {"detail": f"写入过于频繁，请 {retry} 秒后重试",
                  "retry_after": retry, "request_id": rid},
                 status_code=429,
-                headers={requestid.HEADER: rid,
-                         "Retry-After": str(retry)})
-            return resp
+                headers={"Retry-After": str(retry)})
+            return _finalize_response(resp, rid, started)
 
     response = await call_next(request)
     # 快照类端点（/health、/stats）带 3s 缓存，如实告诉调用方
@@ -357,7 +517,19 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
         from rag.api.system import invalidate_snapshots
 
         invalidate_snapshots()
-    if not request.url.path.startswith("/api"):
+        # 跨进程：其它 worker 的 /health、/stats 缓存键会因代际变化而失效。
+        # 这是观测层，递增失败不该影响已经成功的业务写入；记录 warning。
+        if ctx.meta is not None:
+            try:
+                ctx.meta.bump_state("write_epoch")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("递增写代际失败（跨进程快照可能短暂过期）: %s", e)
+    if request.url.path.startswith("/api"):
+        # API 响应可能含密钥列表、文档正文等敏感/实时数据：
+        # 既不允许浏览器落盘，也不允许中间代理缓存。
+        # 端点自己设置更具体的 Cache-Control（如原文签名链接）时保留它。
+        response.headers.setdefault("Cache-Control", "no-store")
+    else:
         # Vite 的产物文件名自带内容哈希（assets/xxx-<hash>.js），
         # 所以 /assets/ 下的资源可以永久强缓存：改了前端会生成新文件名，
         # index.html 里的引用也随之变化 —— 不存在「改了但页面没变」。
@@ -371,9 +543,7 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
         else:
             # index.html 与 favicon 等仍不缓存：它们是「指向哪份产物」的入口
             response.headers["Cache-Control"] = "no-cache"
-    response.headers[requestid.HEADER] = rid
-    response.headers["X-Response-Time-Ms"] = _elapsed_ms(started)
-    return response
+    return _finalize_response(response, rid, started)
 
 
 def _elapsed_ms(started: float) -> str:

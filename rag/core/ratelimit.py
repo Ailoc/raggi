@@ -12,9 +12,13 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
+
+logger = logging.getLogger("raggi.ratelimit")
 
 # 幂等与无害的写：不消耗配额。
 # 停用/启用分块同理——它只是翻一个布尔列，不触发重新向量化。
@@ -45,12 +49,21 @@ class RateLimiter:
 
     limit: int = 0
     burst: int = 0
+    # 有 MetaStore 时使用跨进程共享桶；None（lancedb 回退形态）时退回
+    # 进程内桶。共享模式用 wall clock，因为 monotonic 不能跨进程比较。
+    meta: Any | None = field(default=None, repr=False, compare=False)
     _buckets: dict[str, _Bucket] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _shared_gc_at: float = field(default=0.0, init=False, repr=False)
+    _shared_error_logged: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.burst <= 0:
             self.burst = max(1, self.limit)
+
+    @property
+    def shared(self) -> bool:
+        return self.meta is not None
 
     @property
     def enabled(self) -> bool:
@@ -64,6 +77,8 @@ class RateLimiter:
         """
         if not self.enabled:
             return True, 0
+        if self.shared:
+            return self._allow_shared(key)
         now = time.monotonic()
         with self._lock:
             b = self._buckets.get(key)
@@ -84,6 +99,62 @@ class RateLimiter:
             retry = int(need * 60.0 / self.limit) + 1
             return False, max(1, retry)
 
+    def _allow_shared(self, key: str) -> tuple[bool, int]:
+        """SQLite 共享令牌桶（多 worker 下额度不会被乘以进程数）。
+
+        整个 read-modify-write 在一个 BEGIN IMMEDIATE 事务里完成；
+        busy_timeout 让并发请求排队而不是直接报 SQLITE_BUSY。
+
+        数据库暂时不可用时选择**放行并告警**：限流是保护措施，不能
+        因为观测/元数据层故障把所有写请求一起打死。鉴权路径的默认值
+        相反（拿不准就拒绝），因为那是权限边界。
+        """
+        now = time.time()
+        try:
+            with self.meta.tx() as conn:
+                row = conn.execute(
+                    "SELECT tokens, updated FROM rate_buckets WHERE caller=?",
+                    (key,)).fetchone()
+                if row is None:
+                    tokens = float(self.burst)
+                    updated = now
+                else:
+                    tokens = min(
+                        float(self.burst),
+                        float(row["tokens"])
+                        + (now - float(row["updated"])) * self.limit / 60.0)
+                    updated = now
+                if tokens >= 1.0:
+                    tokens -= 1.0
+                    allowed, retry = True, 0
+                else:
+                    need = 1.0 - tokens
+                    retry = max(1, int(need * 60.0 / self.limit) + 1)
+                    allowed = False
+                conn.execute(
+                    "INSERT INTO rate_buckets(caller, tokens, updated) "
+                    "VALUES(?,?,?) ON CONFLICT(caller) DO UPDATE SET "
+                    "tokens=excluded.tokens, updated=excluded.updated",
+                    (key, tokens, updated))
+                self._gc_shared(conn, now)
+                return allowed, retry
+        except Exception as e:  # noqa: BLE001
+            if not self._shared_error_logged:
+                self._shared_error_logged = True
+                logger.warning(
+                    "共享限流不可用，本次放行（后续同类错误不再逐条记录）: %s", e)
+            return True, 0
+
+    def _gc_shared(self, conn, now: float) -> None:
+        """每小时最多清一次长期不用的桶；桶已补满的与新建等价。"""
+        if now - self._shared_gc_at < 3600:
+            return
+        self._shared_gc_at = now
+        stale = self.burst / max(1, self.limit / 60.0) * 2 + 60
+        conn.execute(
+            "DELETE FROM rate_buckets WHERE updated < ? AND tokens >= ?",
+            (now - stale, float(self.burst)))
+
     def _gc(self, now: float) -> None:
         """清掉长期不用的桶，避免 key 无限增长。
 
@@ -100,6 +171,11 @@ class RateLimiter:
     def reset(self) -> None:
         with self._lock:
             self._buckets.clear()
+        if self.meta is not None:
+            try:
+                self.meta.execute("DELETE FROM rate_buckets")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("清空共享限流桶失败: %s", e)
 
 
 def caller_key(request, key_row: dict | None) -> str:

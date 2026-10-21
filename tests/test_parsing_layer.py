@@ -252,12 +252,18 @@ def test_heading_path_uses_nearest_preceding_heading():
     assert heading_path_for([], 0) == ""
 
 
-def test_heading_regex_rejects_five_levels():
-    """5 级以上标题不参与（与 _HEADERS 1–4 级一致）。"""
+def test_heading_regex_accepts_one_through_six_levels():
+    """标题识别覆盖 markdown 标准的 1–6 级；7 个 # 不算标题。
+
+    历史：旧实现只认 1–4 级（`_HEADERS` 常量所限），解析产物里的
+    5–6 级标题会被静默忽略——heading_path 在这类文档里断链，
+    检索结果的面包屑指到错误的层级。
+    """
     from rag.ingest.splitter import _headings
 
-    text = "##### 五级\n\n内容"
-    assert _headings(text) == []
+    assert _headings("##### 五级\n\n内容"), "5 级标题应参与 heading_path"
+    assert _headings("###### 六级\n\n内容"), "6 级标题应参与"
+    assert _headings("####### 七级\n\n内容") == [], "7 个 # 不是 markdown 标题"
 
 
 def test_split_attaches_heading_path():

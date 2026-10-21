@@ -28,6 +28,7 @@ def _split_payload(plan: dict) -> dict:
     return {"chunk_size": plan["chunk_size"],
             "overlap_ratio": plan["overlap_ratio"],
             "overlap_chars": plan["overlap_chars"],
+            "strategy": plan.get("strategy", "auto"),
             "source": plan["source"]}
 
 
@@ -50,6 +51,7 @@ async def api_kb_plan_put(request: Request, kb_id: str,
         chunking.set_kb_plan(ctx.store, kb_id,
                              chunk_size=body.chunk_size or 0,
                              overlap_ratio=body.overlap_ratio or 0.0,
+                             strategy=body.strategy or "",
                              settings=ctx.settings)
         return _kb_plan(ctx.store, ctx.settings, kb_id)
 
@@ -72,7 +74,8 @@ async def api_doc_plan_put(request: Request, doc_id: str,
         try:
             chunking.set_doc_plan(ctx.store, doc_id,
                                   chunk_size=body.chunk_size,
-                                  overlap_ratio=body.overlap_ratio or 0.0)
+                                  overlap_ratio=body.overlap_ratio or 0.0,
+                                  strategy=body.strategy or "")
         except KeyError:
             raise HTTPException(404, "document not found")
         return _doc_plan(ctx.store, ctx.settings, doc_id)
@@ -107,16 +110,20 @@ async def api_doc_resplit(request: Request, doc_id: str,
 
 def _kb_plan(store, settings, kb_id: str) -> dict:
     own = chunking.kb_plan(store, kb_id, settings) or {
-        "chunk_size": 0, "overlap_ratio": 0.0, "custom": False}
+        "chunk_size": 0, "overlap_ratio": 0.0, "strategy": "auto",
+        "custom": False}
+    g = chunking.global_plan(settings)
     effective = chunking.resolve_plan(store, settings, kb_id=kb_id)
     return {
         "scope": "kb",
         "kb_id": kb_id,
         "own": {"chunk_size": own["chunk_size"],
                 "overlap_ratio": own["overlap_ratio"],
-                "custom": own["custom"]},
+                "strategy": own.get("strategy", "auto"),
+                # 后端口径：与系统默认比较，而不是“有没有设置过”
+                "custom": chunking.is_custom_plan(own, g)},
         "effective": _split_payload(effective),
-        "global": _split_payload(chunking.global_plan(settings)),
+        "global": _split_payload(g),
     }
 
 
@@ -134,6 +141,7 @@ def _doc_plan(store, settings, doc_id: str) -> dict:
         "kb_id": kb_id,
         "own": {"chunk_size": own["chunk_size"],
                 "overlap_ratio": own["overlap_ratio"],
+                "strategy": own.get("strategy", "auto"),
                 "custom": own["custom"]},
         "effective": _split_payload(effective),
         # 实际入库时用的参数（改设置后不会自动变，用于解释历史分块）

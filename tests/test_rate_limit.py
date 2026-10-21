@@ -272,3 +272,38 @@ def _client_with_limit(tmp_path, limit: int, embedder: bool = False):
         reg.bundle.embedder = _E()
     return TestClient(create_app(Ctx(s, store, reg)),
                       raise_server_exceptions=False)
+
+# ---- 跨进程共享令牌桶（SQLite）------------------------------------------
+
+
+def test_shared_limiter_enforces_one_quota_across_instances(tmp_path):
+    """两个 worker 看到同一个桶：额度不能被进程数放大。
+
+    回归防护：限流器原来是纯内存的，默认 api_processes=auto（最多 4）
+    下实际额度会变成配置值的 N 倍——配置写着 60/min，实际 240/min。
+    """
+    from rag.core.ratelimit import RateLimiter
+    from rag.storage.meta import MetaStore
+
+    path = tmp_path / "shared.db"
+    a = RateLimiter(limit=60, burst=2, meta=MetaStore(path))
+    b = RateLimiter(limit=60, burst=2, meta=MetaStore(path))
+    assert a.allow("same-caller")[0] is True
+    assert a.allow("same-caller")[0] is True
+    ok, retry = b.allow("same-caller")
+    assert ok is False, "第二个进程没有看到第一个进程消耗的令牌"
+    assert retry >= 1
+    # 另一个调用方仍然是独立桶
+    assert b.allow("other-caller")[0] is True
+
+
+def test_shared_limiter_refills_and_keeps_retry_semantics(tmp_path):
+    from rag.core.ratelimit import RateLimiter
+    from rag.storage.meta import MetaStore
+
+    rl = RateLimiter(limit=120, burst=1, meta=MetaStore(tmp_path / "r.db"))
+    assert rl.allow("k")[0] is True
+    ok, retry = rl.allow("k")
+    assert ok is False and retry >= 1
+    time.sleep(0.7)          # 120/min = 2/s，0.7s 补回 >1 个
+    assert rl.allow("k")[0] is True

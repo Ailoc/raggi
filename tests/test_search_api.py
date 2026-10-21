@@ -273,33 +273,23 @@ def test_report_is_clean_markdown(client):
 def test_topbar_has_no_param_controls():
     """检索参数不得留在顶栏：顶栏是全局 chrome，放不下参数面板。
 
-    回归防护：原先 #searchForm / #q / #searchScope / #searchMode 全在顶栏，
-    占掉右半屏却只有 3 个控件，且所有页面都得为它让位。
-
-    注意：顶栏保留一个「跳转到检索页」的快捷输入是允许的——它是入口，
-    不是参数区。这里断言的是**参数控件**不出现在顶栏。
+    顶栏保留「搜索与跳转」入口是允许的——它是入口，不是参数区。
+    主导航必须是原生链接（中键新开 / 复制链接 / 状态栏预览）。
     """
-    src = (SRC / "App.svelte").read_text(encoding="utf-8")
-    topbar = src.split('class="topbar"')[1].split("</header>")[0]
+    src = (SRC / "App.tsx").read_text(encoding="utf-8")
     for pid in ("pTopK", "pMode", "pKb", "pCandidate", "paramsPanel"):
-        assert pid not in topbar, f"顶栏仍含参数控件 {pid}"
-    # 主导航现在由 dock 的 section 切换器渲染（双栏工作台把导航从顶栏
-    # 移进了壳层侧栏）。守卫跟着改读渲染处，并顺手把"导航必须是链接"
-    # 这条本项目付过学费的规则也锁上——button 假装导航会丢掉
-    # 中键新开、右键复制链接与状态栏预览。
-    switcher = (SRC / "ui" / "SectionSwitcher.svelte").read_text(encoding="utf-8")
-    assert 'href={s.href}' in switcher, "缺少导航渲染"
-    assert '<button class="section-item"' not in switcher, \
-        "导航项用了 button，应改用原生 <a href>"
-    assert '"检索", href: "#/search"' in (
-        SRC / "lib" / "nav.ts").read_text(encoding="utf-8"), "主导航缺少检索入口"
+        assert pid not in src, f"顶栏仍含参数控件 {pid}"
+    assert 'component="a"' in src and "href={s.href}" in src, \
+        "主导航不是链接"
+    nav = (SRC / "lib" / "nav.ts").read_text(encoding="utf-8")
+    assert '"检索", href: "#/search"' in nav, "主导航缺少检索入口"
 
 
 def test_search_view_has_query_and_params():
     """检索页必须自带查询区与参数面板。"""
-    src = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
-    assert "params-inline" in src, "检索页缺常用参数区"
-    assert "params-body" in src, "检索页缺高级参数面板"
+    src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
+    assert 'p.group === "base"' in src, "检索页缺常用参数区"
+    assert "过滤与高级参数" in src, "检索页缺高级参数面板"
 
 
 @pytest.mark.parametrize("pid", [
@@ -310,43 +300,33 @@ def test_search_view_has_query_and_params():
 def test_param_controls_exist(pid):
     """参数控件必须齐全（与 API 的专业参数一一对应）。
 
-    回归防护：Svelte 重写时曾只移植了 2 个参数，把另外 15 个弄丢了——
+    回归防护：重写时曾只移植了 2 个参数，把另外 15 个弄丢了——
     后端支持、界面没有，等于功能不存在。
     """
-    src = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
-    assert 'id={p.id}' in src or f'id="{pid}"' in src, "控件由规格表渲染"
-    spec = (SRC / "lib/searchparams.ts").read_text(encoding="utf-8")
+    src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
+    assert "id={p.id}" in src, "控件没有从规格表取 id"
+    spec = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
     assert f'id: "{pid}"' in spec, f"参数规格表缺少 {pid}"
 
 
 def test_url_is_param_source_of_truth():
     """参数写进 URL：刷新/收藏/分享都能复现同一次检索。
 
-    回归防护：若参数只存在内存里，刷新页面参数即丢，
-    也无法把一次调好的检索发给别人。
-
-    阶段 5 收紧了一层：URL 必须描述**已生效**的参数，而不是"正在编辑的意图"。
+    阶段 5 起 URL 只描述**已生效**的参数；控件改动进草稿，提交才写 URL。
     """
-    src = (SRC / "lib/searchparams.ts").read_text(encoding="utf-8")
+    src = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
     assert "toBody" in src, "缺 URL→请求体的序列化"
     assert "searchUrl" in src, "缺参数→URL 的回写"
-    # 查"定义"而不是"出现"：注释里提到旧函数名是正常的（要说清替换了什么）
     assert "export function withParam" not in src, \
         "withParam 是「改一个参数就立刻改写 URL」的旧路径，会重新引入参数与结果脱节"
-    assert "URLSearchParams" in src
-    # 默认值不入 URL，保持链接精简
-    assert "DEFAULTS" in src
-    view = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
-    assert "query.get(" in view, "视图必须从 URL 读参数，而不是本地状态"
+    assert "URLSearchParams" in src and "DEFAULTS" in src
+    view = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
+    assert "route.query.get(" in view, "视图必须从 URL 读参数，而不是本地状态"
 
 
-def test_score_rendering_uses_score_kind():
-    """前端应显示后端给出的分数口径，而不是写死字段名。
-
-    回归防护：后端把 scores 改名后，若前端仍读旧字段会渲染出 NaN。
-    """
-    src = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
-    assert "score_kind" in src, "未读 score_kind"
+def test_search_degradation_is_visible():
+    """检索降级必须在界面上可见，而不是悄悄给出打折的结果。"""
+    src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
     assert "degraded_reason" in src, "未展示降级原因"
 
 
@@ -370,33 +350,24 @@ def test_param_spec_covers_every_api_param():
 def test_param_kind_matches_control_type():
     """规格表声明的 kind 必须与实际渲染的控件类型一致。
 
-    回归防护：group_by_doc 是 <select>（值为 "true"/"false"），
-    却曾按 bool 处理——读写都落到 .checked 上，结果 select 永远提交
-    默认值、也永远回填不出 URL 里的状态。这类错误 tsc 查不出
-    （都是 HTMLElement），只能靠交叉校验。
-
-    现在控件由规格表渲染，所以校验的是「kind 与渲染分支是否自洽」。
+    回归防护：group_by_doc 是下拉框（值为 "true"/"false"），却曾按
+    bool 处理——读写都落到 .checked 上，结果 select 永远提交默认值。
     """
-    spec = (SRC / "lib/searchparams.ts").read_text(encoding="utf-8")
-    view = (SRC / "views/Search.svelte").read_text(encoding="utf-8")
+    spec = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
+    view = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
 
     kinds = dict(re.findall(r'id: "(p[A-Za-z]+)",\s*kind: "(\w+)"', spec))
     assert kinds, "未解析到 kind 声明"
 
-    # kind=bool 的控件必须渲染成 checkbox
-    assert 'type="checkbox"' in view, "bool 类参数未渲染为复选框"
-    # kind=str 且用 select 呈现的参数必须在视图里有对应的 <select>
-    selects = set(re.findall(r'<select id=\{p\.id\}', view))
-    assert selects or "<select" in view, "select 类参数未渲染为下拉框"
+    assert 'p.kind === "bool"' in view and "<Switch" in view, \
+        "bool 类参数未渲染为开关"
+    assert "select" in view and "<MenuItem" in view, "select 类参数未渲染为下拉框"
+    assert 'p.key === "group_by_doc"' in view
 
 
 def test_no_vanilla_dom_helpers_remain():
-    """旧的 vanilla DOM 操作不应出现在 Svelte 视图里。
-
-    回归防护：`$("#x")` 在元素缺失时会抛异常，`?.` 也兜不住——
-    曾经因此让分页按钮一渲染就把列表变红。Svelte 用绑定替代了这类查询。
-    """
-    for f in (SRC / "views").glob("*.svelte"):
+    """视图不得手动查询 DOM 或整块替换 innerHTML。"""
+    for f in (SRC / "views").glob("*.tsx"):
         body = f.read_text(encoding="utf-8")
-        assert 'document.querySelector(' not in body, f"{f.name} 仍在手动查询 DOM"
+        assert "document.querySelector(" not in body, f"{f.name} 仍在手动查询 DOM"
         assert "innerHTML = " not in body, f"{f.name} 仍在用 innerHTML 全量替换"

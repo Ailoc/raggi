@@ -231,6 +231,7 @@ class SplitOut(BaseModel):
     chunk_size: int
     overlap_ratio: float
     overlap_chars: int
+    strategy: str = "auto"
     source: str
 
 
@@ -238,6 +239,7 @@ class PlanOwnOut(BaseModel):
     """本层自己持有的值（custom=false 表示与上一层一致）。"""
     chunk_size: int
     overlap_ratio: float
+    strategy: str = "auto"
     custom: bool
 
 
@@ -245,6 +247,7 @@ class SnapshotOut(BaseModel):
     """入库时的方案快照（用于解释历史分块、判断"需重切"）。"""
     chunk_size: int
     overlap_ratio: float
+    strategy: str = "auto"
     source: str
 
 
@@ -334,6 +337,7 @@ class SearchOut(BaseModel):
 class CitationOut(BaseModel):
     index: int
     chunk_id: str
+    kb_id: str = ""
     doc_id: str = ""
     title: str = ""
     heading_path: str = ""
@@ -396,7 +400,11 @@ class RetrieveCfgOut(BaseModel):
     refine_factor: int = 0
     window: int = 0
     use_jieba: bool = True
-    query_rewrite: bool = False
+
+
+class FeaturesOut(BaseModel):
+    """功能开关：前端据此隐藏/禁用依赖它才会工作的入口。"""
+    answer: bool = False
 
 
 class ModelsOut(BaseModel):
@@ -405,6 +413,7 @@ class ModelsOut(BaseModel):
     llm: LlmCfgOut
     rerank: RerankCfgOut
     retrieve: RetrieveCfgOut
+    features: FeaturesOut = FeaturesOut()
 
 
 class ModelsUpdateOut(BaseModel):
@@ -544,7 +553,6 @@ class HealthOut(BaseModel):
     dim_mismatch: bool = False
     embedding_model: str = ""
     embedding_model_mismatch: bool = False
-    lancedb_versions: int = 0
     index_state: dict[str, IndexStateOut] = Field(default_factory=dict)
 
 
@@ -556,18 +564,6 @@ class StatsOut(BaseModel):
     chunk_count: int = 0
     job_count: int = 0
     backend: str = ""
-
-
-class VersionsOut(BaseModel):
-    table: str
-    versions: list[dict[str, Any]]
-
-
-class RollbackOut(BaseModel):
-    ok: bool = True
-    table: str
-    rolled_back_to: int
-    note: str = ""
 
 
 class ReconcileOut(BaseModel):

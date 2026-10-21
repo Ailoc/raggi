@@ -15,6 +15,19 @@ MAX_OVERLAP_RATIO = 50.0
 MIN_CHUNK_SIZE = 64
 MAX_CHUNK_SIZE = 8192
 
+# 分块策略（实现见 rag/ingest/splitter.py）：
+#   auto      —— 正文有 markdown 标题则结构感知，否则递归字符
+#   structure —— 标题分节（标题与本节正文同块）
+#   recursive —— 递归字符（中英句末分隔 + 表格/代码保护 + 碎块合并）
+#   semantic  —— 句子向量断点（较慢；embedding 不可用时降级 structure）
+VALID_STRATEGIES = ("auto", "structure", "recursive", "semantic")
+
+
+def normalize_strategy(value) -> str:
+    """策略归一：未知值（含旧数据的空值）一律回落到 auto。"""
+    s = str(value or "").strip().lower()
+    return s if s in VALID_STRATEGIES else "auto"
+
 
 def clamp_size(value) -> int:
     """分块大小限幅（0 = 继承）。"""

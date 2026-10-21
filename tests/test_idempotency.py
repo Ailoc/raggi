@@ -14,7 +14,6 @@ def client(tmp_path):
     from fastapi.testclient import TestClient
 
     from rag.api import Ctx, create_app
-    from rag.api.documents import IDEM
     from rag.core.config import Settings
     from rag.models.registry import ModelRegistry
     from rag.storage.tables import LanceStore
@@ -37,9 +36,9 @@ def client(tmp_path):
     registry.bundle.embedder = _E()
     c = TestClient(create_app(Ctx(s, store, registry)),
                    raise_server_exceptions=False)
-    IDEM.reset()          # 用例之间不该互相看到对方的键
+    c.app.state.idem.reset()   # 用例之间不该互相看到对方的键
     yield c
-    IDEM.reset()
+    c.app.state.idem.reset()
 
 
 def _total(client) -> int:
@@ -201,3 +200,79 @@ def test_upload_retry_skips_reading_the_file(client, tmp_path):
     assert second.status_code == 200, second.text
     assert second.json().get("idempotent_replay") is True
     assert _total(client) == 1
+
+
+# ---- 跨进程共享幂等状态机 ------------------------------------------------
+
+def _shared_stores(tmp_path, **kw):
+    from rag.core.idempotency import IdempotencyStore
+    from rag.storage.meta import MetaStore
+
+    path = tmp_path / "idem.db"
+    return (IdempotencyStore(meta=MetaStore(path), **kw),
+            IdempotencyStore(meta=MetaStore(path), **kw))
+
+
+def test_shared_claim_blocks_second_worker_while_pending(tmp_path):
+    """A 进程认领后，B 进程同键只能等待，不能同时执行。"""
+    a, b = _shared_stores(tmp_path)
+    first = a.claim("k1", "/p", wait_seconds=0)
+    assert first.kind == "owned" and first.token
+
+    second = b.claim("k1", "/p", wait_seconds=0.15)
+    assert second.kind == "pending", "同键 pending 时第二个 worker 拿到了执行权"
+
+    assert a.finish("k1", "/p", first.token, {"doc_id": "d1"}) is True
+    replay = b.claim("k1", "/p", wait_seconds=0.15)
+    assert replay.kind == "replay"
+    assert replay.result == {"doc_id": "d1"}
+
+
+def test_shared_failed_claim_can_be_retried(tmp_path):
+    a, b = _shared_stores(tmp_path)
+    first = a.claim("k2", "/p", wait_seconds=0)
+    assert first.kind == "owned"
+    assert a.fail("k2", "/p", first.token, "boom") is True
+    retry = b.claim("k2", "/p", wait_seconds=0)
+    assert retry.kind == "owned", "失败后没有释放认领，重试永远拿不到执行权"
+
+
+def test_shared_stale_pending_can_be_taken_over(tmp_path):
+    """进程被杀留下的 pending 必须在超时后可被接管。"""
+    import time
+
+    a, b = _shared_stores(tmp_path, pending_ttl=0.05)
+    first = a.claim("k3", "/p", wait_seconds=0)
+    assert first.kind == "owned"
+    time.sleep(0.1)
+    takeover = b.claim("k3", "/p", wait_seconds=0)
+    assert takeover.kind == "owned", "超时 pending 没有被接管"
+    assert b.finish("k3", "/p", takeover.token, {"ok": True})
+    # 旧 owner 的 finish 不能覆盖新结果
+    assert a.finish("k3", "/p", first.token, {"stale": True}) is False
+    assert b.claim("k3", "/p", wait_seconds=0).result == {"ok": True}
+
+
+def test_claim_waits_for_first_result_and_replays(tmp_path):
+    """等待者拿到的是首个请求的结果，而不是自己再执行一遍。"""
+    import threading
+    import time
+
+    a, b = _shared_stores(tmp_path)
+    first = a.claim("k4", "/p", wait_seconds=0)
+    assert first.kind == "owned"
+    got = {}
+    started = threading.Event()
+
+    def waiter():
+        started.set()
+        got["claim"] = b.claim("k4", "/p", wait_seconds=2.0)
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    assert started.wait(1)
+    time.sleep(0.1)
+    a.finish("k4", "/p", first.token, {"doc_id": "d4"})
+    t.join(3)
+    assert got["claim"].kind == "replay"
+    assert got["claim"].result == {"doc_id": "d4"}

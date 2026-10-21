@@ -1,25 +1,37 @@
-import { svelte } from "@sveltejs/vite-plugin-svelte";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 /**
- * 前端构建：Svelte 5 → web/dist，由 FastAPI 的 StaticFiles 托管。
+ * 前端构建：React 19 + MUI 9 → web/dist，由 FastAPI 的 StaticFiles 托管。
  *
- * 为什么产物放 web/dist 而不是就地覆盖 web/：
- * 原地覆盖会让「源码目录」与「产物目录」混在一起，`npm run build` 的
- * 清空动作可能误删源码。分成两棵树后，构建永远只写 dist。
+ * 2026-10-10 从 Svelte 5 迁到 React：迁移的驱动是"要用真的 MUI 组件库"
+ * （MUI 只有 React 实现）。URL 结构、后端 API 契约、深链语义一律不变——
+ * 迁移只换渲染层。
  *
  * base 用 "./"：产物要被任意路径前缀托管（反代/子路径）而不改配置。
  */
 export default defineConfig({
   root: "web",
-  plugins: [svelte()],
+  plugins: [react()],
   base: "./",
   build: {
     outDir: "dist",
     emptyOutDir: true,
     target: "es2022",
     sourcemap: false,
-    // 单页应用只有一个入口，拆成多 chunk 反而增加请求数
-    rollupOptions: { output: { manualChunks: undefined } },
+    rollupOptions: {
+      output: {
+        // 依赖合并成**一个** vendor 块：MUI 内部 import React，拆成两块会
+        // 形成 react ↔ mui 循环（rollup 会警告并可能把模块塞进任意一侧）。
+        // 应用码与依赖分开仍然成立——日常改动的只有 index 那块。
+        manualChunks: {
+          vendor: [
+            "react", "react-dom",
+            "@mui/material", "@mui/icons-material",
+            "@emotion/react", "@emotion/styled",
+          ],
+        },
+      },
+    },
   },
 });

@@ -30,6 +30,7 @@ const STAGE_LABEL: Record<string, string> = {
   split: "切分文本",
   embed: "向量化",
   write: "写入索引",
+  cancelling: "正在停止",
   done: "完成",
   failed: "失败",
 };

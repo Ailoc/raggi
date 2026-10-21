@@ -25,6 +25,8 @@ export interface SplitPayload {
   chunk_size: number;
   overlap_ratio: number;
   overlap_chars: number;
+  /** auto | structure | recursive | semantic（见 rag/ingest/splitter.py） */
+  strategy: string;
   /** global | kb | doc —— 生效值的来源层级 */
   source: string;
 }
@@ -33,13 +35,27 @@ export interface SplitPayload {
 export interface PlanSnapshot {
   chunk_size: number;
   overlap_ratio: number;
+  strategy: string;
   source: string;
 }
 
 export interface PlanOwn {
   chunk_size: number;
   overlap_ratio: number;
+  strategy: string;
   custom: boolean;
+}
+
+/** 策略取值与中文名（下拉与徽标共用一份，避免两处各写一遍）。 */
+export const CHUNK_STRATEGIES: { value: string; label: string; hint: string }[] = [
+  { value: "auto", label: "自动", hint: "有 Markdown 标题走结构感知，否则递归字符" },
+  { value: "structure", label: "结构感知", hint: "按标题分节，表格/代码整体成块（推荐用于手册、规范）" },
+  { value: "recursive", label: "递归字符", hint: "只按长度与标点切分（适合纯叙述文本）" },
+  { value: "semantic", label: "语义断点", hint: "按句子向量相似度断点；较慢，入库时长约为普通的 2-3 倍" },
+];
+
+export function strategyLabel(value: string | null | undefined): string {
+  return CHUNK_STRATEGIES.find((s) => s.value === value)?.label ?? "自动";
 }
 
 export interface KbPlan {
@@ -203,7 +219,7 @@ export interface SearchResponse {
  *
  * 早前这里是后端拼好的 `<mark>` 字符串，前端必须 `{@html}` 注入，
  * 安全性依赖后端每次都记得转义（入库文本来自 URL 抓取，漏一次就是
- * 存储型 XSS）。现在文本由 Svelte 原生插值自动转义。
+ * 存储型 XSS）。现在文本由 React 原生插值自动转义。
  */
 export interface Snippet {
   text: string;
@@ -214,6 +230,8 @@ export interface Snippet {
 export interface Citation {
   index: number;
   chunk_id: string;
+  /** 命中分块所属知识库；跨库检索时用它生成正确的“在文档中打开”链接 */
+  kb_id?: string;
   doc_id: string;
   title: string;
   heading_path: string;
@@ -324,6 +342,21 @@ export interface ModelsConfig {
   embed: EmbedConfig;
   llm: LlmConfig;
   rerank: RerankConfig;
+  /** 检索默认值（GET /api/models 附带）：界面用它把"留空 = 用默认"说成具体数字 */
+  retrieve?: Record<string, unknown>;
+  /** 功能开关：问答按钮据此禁用，而不是等提交后吃 503 */
+  features?: { answer?: boolean };
+}
+
+export interface Stats {
+  doc_count: number;
+  chunk_count: number;
+  job_count: number;
+  backend: string;
+  data_dir_bytes?: number;
+  lancedb_dir_bytes?: number;
+  disk_free_bytes?: number;
+  indexes?: Record<string, Array<{ columns: string[]; type: string }>>;
 }
 
 // ---- 访问密钥 ----
@@ -397,7 +430,6 @@ export interface Health {
   dim_mismatch: boolean;
   embedding_model: string;
   embedding_model_mismatch: boolean;
-  lancedb_versions: number;
   index_state: Record<string, IndexState>;
   /** 磁盘与索引细节，随版本演进 */
   [k: string]: unknown;

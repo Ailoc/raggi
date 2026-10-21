@@ -42,7 +42,12 @@ def build_lc_embeddings(cfg: EmbedConfig):
     if cfg.provider == "ollama":
         from langchain_ollama import OllamaEmbeddings
 
-        return OllamaEmbeddings(model=cfg.model, base_url=cfg.base_url)
+        return OllamaEmbeddings(
+            model=cfg.model, base_url=cfg.base_url,
+            # Ollama 客户端把 timeout 透传给 httpx；不传时用库默认，
+            # 用户改 embed.timeout 会静默无效。
+            client_kwargs={"timeout": cfg.timeout},
+        )
     if cfg.provider in ("openai", "custom"):
         from langchain_openai import OpenAIEmbeddings
 
@@ -52,6 +57,11 @@ def build_lc_embeddings(cfg: EmbedConfig):
             api_key=cfg.api_key or "EMPTY",
             check_embedding_ctx_length=False,
             dimensions=cfg.dim if cfg.provider == "openai" else None,
+            request_timeout=cfg.timeout,
+            # 重试只保留 Embedder 自己那一层：LangChain 默认还会再重试
+            # 2 次，叠加后一次坏请求最多打 9 次远端（3×3），退避时间
+            # 也会翻倍。重试策略必须只有一个来源。
+            max_retries=0,
         )
     if cfg.provider == "huggingface":
         from langchain_huggingface import HuggingFaceEmbeddings
@@ -101,17 +111,18 @@ class Embedder:
         ) from last
 
     def embed_one(self, text: str) -> list[float]:
-        """单条向量化（带线程安全的 LRU 结果缓存）。
+        """单条向量化（带线程安全的 LRU 结果缓存 + in-flight 合并）。
 
         TTL 而非永久：热点查询重复命中是检索并发的主要成本来源，
         但永久缓存会让长跑进程的内存随查询数无界增长。
+
+        ``get_or_load`` 让同一个 key 的并发请求只真正调用一次 provider：
+        16 个并发的相同热点查询从 16 次远端往返降到 1 次，等待者拿到
+        同一份结果。没有引入队列式合批的等待窗口——不同 key 互不阻塞。
         """
         key = f"{self.model}\x00{text}"
-        vec = self._one_cache.get(key)
-        if vec is not None:
-            return vec
-        vec = self.embed([text])[0]
-        self._one_cache.set(key, vec)
+        vec, _age, _loaded = self._one_cache.get_or_load(
+            key, lambda: self.embed([text])[0])
         return vec
 
 

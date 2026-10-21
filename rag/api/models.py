@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -22,6 +23,33 @@ router = APIRouter(
     responses=error_responses(unavailable=True),
 )
 
+# 配置更新是「改 settings 的多个子模型 → 重建模型客户端 → 原子落盘」，
+# 两个并发 PUT 交错会让 registry 用一半旧一半新的配置重建。串行化它。
+_MODEL_UPDATE_LOCK = threading.RLock()
+
+
+def _apply_models_update(ctx, body: ModelsUpdateReq, persist: bool) -> dict:
+    """同步执行热切换与落盘，由端点放进线程池调用。
+
+    `registry.reload()` 会重新构造 embedding/chat/rerank 客户端；选择
+    HuggingFace provider 时这一步可能加载本地模型（数秒）。`save_config`
+    还要 fsync。两者都不该占着事件循环——单进程下那等于整个服务暂停。
+    """
+    with _MODEL_UPDATE_LOCK:
+        applied = []
+        for key in ("embed", "llm", "rerank"):
+            patch = getattr(body, key)
+            if patch and isinstance(patch, dict):
+                merge_sub(ctx.settings, key, patch)
+                applied.append(key)
+        result = ctx.registry.reload()
+        persisted = False
+        if persist:
+            save_config(ctx.settings)
+            persisted = True
+        return {"ok": True, "applied": applied,
+                "warnings": result["warnings"], "persisted": persisted}
+
 
 @router.get("/models")
 async def api_models(request: Request) -> ModelsOut:
@@ -36,6 +64,9 @@ async def api_models(request: Request) -> ModelsOut:
         # 检索默认值：前端据此把「留空 = 用默认」变成可见的具体数字，
         # 否则用户想调大 top_k 时无从知道现在是多少。
         "retrieve": ctx.settings.retrieve.model_dump(),
+        # 功能开关：Search 的「问答」按钮要据此禁用，而不是等用户点了
+        # 提交才收到 503——那等于让界面先承诺一个不存在的功能。
+        "features": ctx.settings.features.model_dump(),
     }
 
 
@@ -48,19 +79,7 @@ async def api_models_put(request: Request, body: ModelsUpdateReq,
     配置没生效。要临时只热切换请显式传 persist=false。
     """
     ctx = get_ctx(request)
-    applied = []
-    for key in ("embed", "llm", "rerank"):
-        patch = getattr(body, key)
-        if patch and isinstance(patch, dict):
-            merge_sub(ctx.settings, key, patch)
-            applied.append(key)
-    result = ctx.registry.reload()
-    persisted = False
-    if persist:
-        save_config(ctx.settings)
-        persisted = True
-    return {"ok": True, "applied": applied,
-            "warnings": result["warnings"], "persisted": persisted}
+    return await asyncio.to_thread(_apply_models_update, ctx, body, persist)
 
 
 @router.post("/models/test")
@@ -78,7 +97,8 @@ async def api_models_test(request: Request, body: ModelsTestReq,
     if body.kind in ("all", "llm"):
         out["llm"] = await safe(test_llm(ctx.registry.chat()))
     if persist:
-        save_config(ctx.settings)
+        # fsync 落盘不占事件循环
+        await asyncio.to_thread(save_config, ctx.settings)
         out["persisted"] = True
     return out
 

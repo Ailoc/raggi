@@ -12,9 +12,9 @@
 
 
 设计取舍：
-- 文档级覆盖存 documents.meta.chunking（NULL/缺省 = 继承知识库），
-  与既有 meta.kb_id / meta.stored_file 同一惯例，避免 LanceDB 加列。
-- 知识库级存 kbs.chunk_size，chunk_size == 0 表示继承全局。
+- 文档级覆盖存 documents.meta.chunking（NULL/缺省 = 继承知识库）。
+- 知识库级存 kbs.chunk_size；两级模型下它是**具体值**，0 只可能是
+  尚未物化的旧数据（启动迁移会补齐），读取时按系统默认兜底。
 - 重叠一律按百分比 overlap_ratio 存（0-50）。若存绝对字符数，文档
   覆盖 chunk_size 时有效重叠比例会被静默改变（RAGFlow 同此设计）。
 - 入库时把生效方案快照进 meta.chunking.snapshot，否则改设置后无法解释
@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .chunk_limits import clamp_ratio, clamp_size, overlap_chars
+from .chunk_limits import clamp_ratio, clamp_size, normalize_strategy, overlap_chars
 from .repos import docs_query, get_document, kbs_query, set_doc_fields, set_kb_fields
-from .sql import escape_sql, fetch_rows
 from .sql import scalar as _scalar
 
 if TYPE_CHECKING:
@@ -59,35 +58,59 @@ def global_plan(settings) -> dict:
     overlap = max(0, int(settings.split.chunk_overlap or 0))
     ratio = round(overlap * 100.0 / size, 1) if size else 0.0
     return {"chunk_size": size, "overlap_ratio": ratio,
+            "strategy": normalize_strategy(getattr(settings.split, "strategy", "")),
             "source": "global", "custom": False,
             "overlap_chars": overlap_chars(size, ratio)}
+
+
+def is_custom_plan(own: dict, global_plan_: dict) -> bool:
+    """方案是否偏离系统默认（数值容差 0.05，策略也参与）。
+
+    知识库两级模型里 `own.custom` 不能再表示“有没有设置过”（每个库都有
+    具体值，恒为真）；对用户有意义的判据是“与默认为不同”。
+    后端 /api/kbs 的 plan_custom、/plan 的 own.custom 与前端
+    KbSettings.isCustomPlan 必须共用这一把尺子。
+    """
+    return (
+        int(own.get("chunk_size") or 0)
+        != int(global_plan_.get("chunk_size") or 0)
+        or abs(float(own.get("overlap_ratio") or 0.0)
+               - float(global_plan_.get("overlap_ratio") or 0.0)) > 0.05
+        or normalize_strategy(own.get("strategy"))
+        != normalize_strategy(global_plan_.get("strategy"))
+    )
 
 
 def kb_plan(store: LanceStore, kb_id: str,
             settings) -> dict | None:
     """知识库的分块方案；kb 不存在返回 None。
 
-    存量数据里 chunk_size == 0 表示「继承全局」——那是旧的三级模型。
+    存量数据里 chunk_size == 0 是旧三级模型的「继承全局」占位。
     读取时按系统默认值兜底（真正的物化迁移见 materialize_kb_defaults），
     这样即使迁移还没跑，运行行为也不会错。
     """
     if not kb_id:
         return None
-    rows = fetch_rows(store.kbs.search().where(
-        f"kb_id = '{escape_sql(kb_id)}'").select(
-        ["chunk_size", "overlap_ratio"]))
+    # 必须走 kbs_query（引擎分派）：默认部署的真源是 SQLite，
+    # 直接读 store.kbs 会在新建知识库上返回空/旧值，导致自定义方案
+    # 被静默当成系统默认——没有任何报错，只有入库后块大小不对。
+    rows = kbs_query(store, ["chunk_size", "overlap_ratio", "strategy"],
+                     eq={"kb_id": kb_id}, limit=1)
     if not rows:
         return None
     row = rows[0]
     size = clamp_size(_scalar(row.get("chunk_size")))
     ratio = clamp_ratio(_scalar(row.get("overlap_ratio")))
+    strat = normalize_strategy(_scalar(row.get("strategy")))
     if size <= 0:
         # 旧数据：物化为系统默认（比率按绝对重叠换算）
         g = global_plan(settings)
         return {"chunk_size": g["chunk_size"],
                 "overlap_ratio": g["overlap_ratio"],
+                "strategy": g["strategy"],
                 "custom": False, "materialized": True}
-    return {"chunk_size": size, "overlap_ratio": ratio, "custom": True}
+    return {"chunk_size": size, "overlap_ratio": ratio,
+            "strategy": strat, "custom": True}
 
 
 def _doc_meta(store: LanceStore, doc_id: str) -> dict:
@@ -106,6 +129,7 @@ def doc_plan(store: LanceStore, doc_id: str) -> dict:
     size = clamp_size(ck.get("chunk_size"))
     ratio = clamp_ratio(ck.get("overlap_ratio"))
     return {"chunk_size": size, "overlap_ratio": ratio,
+            "strategy": normalize_strategy(ck.get("strategy")),
             "custom": size > 0,
             "snapshot": ck.get("snapshot") or None}
 
@@ -125,12 +149,14 @@ def resolve_plan(store: LanceStore, settings, *,
         if kp:
             plan = {"chunk_size": kp["chunk_size"],
                     "overlap_ratio": kp["overlap_ratio"],
+                    "strategy": kp.get("strategy", "auto"),
                     "source": "kb", "custom": kp.get("custom", True)}
     if doc_id:
         dp = doc_plan(store, doc_id)
         if dp["custom"]:
             plan = {"chunk_size": dp["chunk_size"],
                     "overlap_ratio": dp["overlap_ratio"],
+                    "strategy": dp.get("strategy", "auto"),
                     "source": "doc", "custom": True}
     plan["overlap_chars"] = overlap_chars(
         plan["chunk_size"], plan["overlap_ratio"])
@@ -138,7 +164,7 @@ def resolve_plan(store: LanceStore, settings, *,
 
 
 def materialize_kb_defaults(store: LanceStore, settings) -> int:
-    """把存量知识库里「继承全局」的占位值物化成具体数值。
+    """把存量知识库里旧三级模型的「继承全局」占位值物化成具体数值。
 
     旧模型用 chunk_size == 0 表示继承，新增或修改时都要在运行时
     重新解析；两级模型下每个知识库直接持有数值。本迁移幂等：
@@ -170,27 +196,35 @@ def materialize_kb_defaults(store: LanceStore, settings) -> int:
 
 
 def set_kb_plan(store: LanceStore, kb_id: str, *, chunk_size,
-                overlap_ratio, settings=None) -> None:
+                overlap_ratio, strategy="", settings=None) -> None:
     """写知识库方案。
 
     两级模型下知识库始终持有具体值：chunk_size 传 0/None 表示
     「恢复系统默认」，此时**物化**为默认数值，而不是留一个需要
-    运行时解释的 0。
+    运行时解释的 0。strategy 同理：空值回落 auto。
     """
     size: int = clamp_size(chunk_size)
     ratio: float = clamp_ratio(overlap_ratio)
     if size <= 0:
-        g = global_plan(settings) if settings is not None else {
-            "chunk_size": 512, "overlap_ratio": 12.5}
+        g: dict[str, Any] = (global_plan(settings) if settings is not None
+                             else {"chunk_size": 512, "overlap_ratio": 12.5,
+                                   "strategy": "auto"})
         # 显式转换而不是直接赋值：`global_plan()` 返回的是无类型的 dict，
         # 拿它的值赋给已声明为 int/float 的变量，正是 mypy 该拦下来的那种事。
+        # fallback 字面量必须标注 Any：混入 strategy（str）后 mypy 会把整个
+        # dict 推断成 dict[str, object]，int()/float() 立即报 arg-type。
         size, ratio = int(g["chunk_size"]), float(g["overlap_ratio"])
-    set_kb_fields(store, kb_id, chunk_size=size, overlap_ratio=ratio)
+        if not str(strategy or "").strip():
+            # “恢复默认”必须连策略一起恢复；否则全局是 structure、
+            # 重置后却变成 auto，数字看起来是默认、行为不是。
+            strategy = str(g["strategy"])
+    set_kb_fields(store, kb_id, chunk_size=size, overlap_ratio=ratio,
+                  strategy=normalize_strategy(strategy))
 
 
 def set_doc_plan(store: LanceStore, doc_id: str, *,
-                 chunk_size, overlap_ratio) -> None:
-    """写文档覆盖方案。chunk_size 为 None/0 时清除覆盖（恢复继承）。"""
+                 chunk_size, overlap_ratio, strategy="") -> None:
+    """写文档覆盖方案。chunk_size 为 None/0 时清除覆盖（继承知识库）。"""
     row = get_document(store, doc_id)
     if row is None:
         raise KeyError("document not found")
@@ -202,6 +236,7 @@ def set_doc_plan(store: LanceStore, doc_id: str, *,
         ck.pop("snapshot", None)   # 改覆盖后旧快照失效，待重切分再写
         ck["chunk_size"] = clamp_size(chunk_size)
         ck["overlap_ratio"] = clamp_ratio(overlap_ratio)
+        ck["strategy"] = normalize_strategy(strategy)
         meta["chunking"] = ck
     set_doc_fields(store, doc_id, meta=json.dumps(meta))
 
@@ -216,6 +251,7 @@ def stamp_snapshot(store: LanceStore, doc_id: str,
     ck = _meta(meta.get("chunking"))
     ck["snapshot"] = {"chunk_size": plan["chunk_size"],
                       "overlap_ratio": plan["overlap_ratio"],
+                      "strategy": plan.get("strategy", "auto"),
                       "source": plan["source"]}
     meta["chunking"] = ck
     set_doc_fields(store, doc_id, meta=json.dumps(meta))

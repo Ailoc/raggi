@@ -486,11 +486,15 @@ pyflakes 与 ruff 的差异也只是「pyflakes 不认 `# noqa`，ruff 认」—
   （键已带模型名，见 `embeddings.py:106`）。
 
 **决定：不做队列式合批。** 两个关键事实都固化成了断言，不会随本轮脚本一起蒸发：
-合批形状 → `tests/test_queue.py::test_embed_batches_by_configured_size`；
-「不合并 in-flight」这个**有记录的现状** →
-`tests/test_cache.py::test_embed_one_does_not_merge_inflight_identical_queries`
-（它故意断言「会重复调用」，谁实现了合并它会红 —— 那时要连本节的决定一起改，
-而不是顺手把断言改小）。
+合批形状 → `tests/test_queue.py::test_embed_batches_by_configured_size`。
+
+> **2026-10-20 更新：in-flight 合并已实现。** `TTLCache` 增加了 per-key 单飞的
+> `get_or_load()`，`Embedder.embed_one` 已改用它：同一模型 + 同一文本的并发请求
+> 只打一次 provider，等待者共享结果，且没有队列式合批的等待窗口。
+> 原「不合并」测试已更名为
+> `tests/test_cache.py::test_embed_one_merges_inflight_identical_queries`
+> 并断言只调用一次。证据与理由见 [AUDIT-2026-10-20.md](./AUDIT-2026-10-20.md) §3.3。
+> 队列式合批仍然**不做**。
 
 ### 4.3 P2 · 检索参数敏感性：已测完，**结论是「不要按延迟调默认值」**（已定案）
 
