@@ -58,6 +58,46 @@ test("检索：空态居中输入，发送后结果在上、条件草稿本地�
   await expect(page).not.toHaveURL(/q=/);
   await expect(page.getByText(/条 · 候选/).first()).toBeVisible();
   await expect(page.getByText("检索结果")).toBeVisible();
+  // 发送即清空：查询词保留在结果标题里，输入台不应继续显示旧文本。
+  await expect(box).toHaveValue("");
+
+  // 结果列必须与输入台同宽同左边界：1440/1280 下都是 900px 工作列，
+  // 窄屏下是同一个扣除内边距后的宽度（滚动条宽度也要一起计入）。
+  const list = page.locator('ol[aria-label="检索证据"]');
+  const composer = page.locator(".lg-composer");
+  const listBox = await list.boundingBox();
+  const composerBox = await composer.boundingBox();
+  if (!listBox || !composerBox) throw new Error("结果列或输入台未渲染");
+  expect(Math.abs(listBox.width - composerBox.width)).toBeLessThan(1.5);
+  expect(Math.abs(listBox.x - composerBox.x)).toBeLessThan(1.5);
+
+  // 滚动区要伸进输入台顶部的两个圆角缺口（约一个圆角半径），
+  // 这样卡片是绕开玻璃圆角消失的；玻璃下方由同色衬底遮住内容。
+  const scrollerBottom = await list.evaluate((ol) => {
+    let el = ol.parentElement;
+    while (el
+      && !["auto", "scroll"].includes(getComputedStyle(el).overflowY)) {
+      el = el.parentElement;
+    }
+    return el ? el.getBoundingClientRect().bottom : null;
+  });
+  if (scrollerBottom == null) throw new Error("滚动容器未渲染");
+  // 滚动区必须越过输入台上沿、进入圆角缺口区域（不能提前裁断），
+  // 同时又不能整段铺到输入台背后（玻璃下方有衬底遮住内容）。
+  expect(scrollerBottom).toBeGreaterThan(composerBox.y + 12);
+
+  // 滚到底：最后一张卡必须完整落在输入台上方，不能被输入台盖住。
+  await list.evaluate((ol) => {
+    let el = ol.parentElement;
+    while (el
+      && !["auto", "scroll"].includes(getComputedStyle(el).overflowY)) {
+      el = el.parentElement;
+    }
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+  const lastBox = await list.locator("li").last().boundingBox();
+  if (!lastBox) throw new Error("最后一张结果卡未渲染");
+  expect(lastBox.y + lastBox.height).toBeLessThan(composerBox.y - 8);
 
   const first = page.getByRole("button", { name: /苹果/ }).first();
   await expect(first).toBeVisible();

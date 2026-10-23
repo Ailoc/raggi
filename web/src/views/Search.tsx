@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -45,6 +47,23 @@ const CHAT_STATE_KEY = "raggi.chatState.v1";
  * 高度，底部输入台正好被挤出屏幕。
  */
 const FILL_HEIGHT = "calc(100% - var(--shell-header-h, 84px))";
+
+/**
+ * 检索态的工作列宽：结果、空态卡片、浮动输入台共用同一列。
+ *
+ * 改前结果区用全站 CONTENT_MAX（1680），输入台是 900：1440 视口下卡片
+ * 1392px、输入 900px，左右各错开 246px。现在结果列与输入台同宽，
+ * 输入台是浮在滚动区上的独立玻璃面——内容从它背后滑过，而不是被
+ * 底部一条全宽区域截断。
+ */
+const SEARCH_COLUMN_MAX = 900;
+// 与 SearchComposer 的 COMPOSER_RADIUS 一致。滚动区向下多伸出这段，
+// 让条目能进入顶部两个圆角缺口；玻璃下方另铺同色圆角衬底，避免条目
+// 从玻璃中间透出来。
+const SEARCH_COMPOSER_RADIUS = 26;
+// 与底部输入台外层的内边距一致（xs=16px、md=32px）；结果列用
+// calc 从滚动区宽度里扣除同样的值，滚动条出现时两边仍严格对齐。
+const SEARCH_COLUMN_INSET = { xs: 32, md: 64 } as const;
 
 interface StoredChat {
   turns: ChatTurn[];
@@ -191,7 +210,16 @@ export default function Search(): React.ReactElement {
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const searchSeq = useRef(0);
+  const searchRootRef = useRef<HTMLDivElement | null>(null);
   const searchScrollRef = useRef<HTMLDivElement | null>(null);
+  const searchContentRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  // 滚动条占掉的宽度：结果列与输入台都要扣除同一份，才能在任意视口
+  // 严格同宽（否则经典滚动条会让结果列凭空窄 15px）。
+  const [searchScrollbarW, setSearchScrollbarW] = useState(0);
+  // 从工作台底边到输入台上沿的距离（输入台高度 + 底部外边距）。
+  // 滚动区在输入台上沿截止，条目不会穿到输入台背后。
+  const [searchComposerInset, setSearchComposerInset] = useState(0);
 
   const chatStream = useRef<StreamHandle | null>(null);
   const chatSearchCtrl = useRef<AbortController | null>(null);
@@ -329,6 +357,51 @@ export default function Search(): React.ReactElement {
     return () => ctrl.abort();
   }, [runSearch]);
 
+  // 记录滚动条宽度（0 表示 overlay 滚动条/无滚动）。
+  // 同时观察滚动区与内容列：结果从骨架切到卡片、或展开一条证据时，
+  // 内容高度变化才让滚动条出现，仅观察滚动区本身不会触发尺寸回调。
+  useLayoutEffect(() => {
+    if (!searchActive) {
+      setSearchScrollbarW(0);
+      return;
+    }
+    const el = searchScrollRef.current;
+    if (!el) return;
+    const sync = (): void => {
+      const w = Math.max(0, el.offsetWidth - el.clientWidth);
+      setSearchScrollbarW((prev) => (prev === w ? prev : w));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    if (searchContentRef.current) ro.observe(searchContentRef.current);
+    return () => ro.disconnect();
+  }, [searchActive, searchResp, searchBusy, searchError]);
+
+  // 输入台浮在底部，但不与内容重叠：滚动区在它的**上沿**截止，
+  // 条目滑到这里就被裁掉，不会穿过玻璃。高度随多行输入/条件 chip
+  // 变化；观察输入台与工作台两者：输入台变高、或顶栏高度变化导致
+  // 工作台变矮，都要重新计算底边到上沿的距离。
+  useLayoutEffect(() => {
+    if (!searchActive) {
+      setSearchComposerInset(0);
+      return;
+    }
+    const el = composerRef.current;
+    const root = searchRootRef.current;
+    if (!el || !root) return;
+    const sync = (): void => {
+      const inset = Math.max(0, Math.ceil(
+        root.getBoundingClientRect().bottom - el.getBoundingClientRect().top));
+      setSearchComposerInset((prev) => (prev === inset ? prev : inset));
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [searchActive]);
+
   // 组件离开时断开正在进行的证据检索与生成流。
   useEffect(() => () => {
     chatStream.current?.stop();
@@ -364,6 +437,9 @@ export default function Search(): React.ReactElement {
   function submitSearch(): void {
     const text = searchDraft.trim();
     if (!text) return;
+    // 发送即清空输入台：查询词已经落在结果标题里，输入框继续留着
+    // 上一次的文本会让人以为“还没发出去”，也挡着下一轮输入。
+    setSearchDraft("");
     if (text === query) {
       // 同一个问题再按一次：原地重查，而不是被状态相等吃掉。
       void runSearch();
@@ -750,18 +826,49 @@ export default function Search(): React.ReactElement {
     return (
       <>
       <Box
+        ref={searchRootRef}
         sx={{
           height: FILL_HEIGHT,
-          display: "flex",
-          flexDirection: "column",
+          position: "relative",
           minHeight: 0,
           backgroundImage: (t) => `radial-gradient(1000px 360px at 50% -120px, `
             + `${alpha(t.palette.primary.main, 0.08)}, transparent 70%)`,
           backgroundRepeat: "no-repeat",
         }}
       >
-        <Box ref={searchScrollRef} sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <Box sx={{ maxWidth: CONTENT_MAX, mx: "auto", px: { xs: 2, md: 3 }, py: { xs: 2, md: 3 } }}>
+        {/*
+          滚动区止于输入台上沿，并向下多伸出一个圆角半径：中间部分被
+          输入台的圆角衬底盖住，两个圆角缺口处则继续显示条目——条目是
+          绕开玻璃圆角消失的，而不是被一个矩形连同圆角一起裁掉。
+        */}
+        <Box
+          ref={searchScrollRef}
+          sx={{
+            height: `calc(100% - ${Math.max(0, searchComposerInset - SEARCH_COMPOSER_RADIUS)}px)`,
+            overflowY: "auto",
+            // 键盘/scrollIntoView 定位时，为输入台和圆角缺口留出空间。
+            scrollPaddingBottom: `${SEARCH_COMPOSER_RADIUS + 24}px`,
+          }}
+        >
+          <Box
+            ref={searchContentRef}
+            sx={{
+              // 与浮动输入台同宽：两侧内边距 + 900 上限。
+              width: {
+                xs: `calc(100% - ${SEARCH_COLUMN_INSET.xs}px)`,
+                md: `calc(100% - ${SEARCH_COLUMN_INSET.md}px)`,
+              },
+              maxWidth: SEARCH_COLUMN_MAX,
+              mx: "auto",
+              pt: { xs: 2, md: 3 },
+              // 滚动区向下多伸出一个圆角半径；这里再加回它，保证滚到
+              // 底时最后一条停在输入台上方，而不是藏在圆角缺口里。
+              pb: {
+                xs: `${SEARCH_COMPOSER_RADIUS + 24}px`,
+                md: `${SEARCH_COMPOSER_RADIUS + 32}px`,
+              },
+            }}
+          >
             <Stack
               direction="row"
               spacing={2}
@@ -874,18 +981,57 @@ export default function Search(): React.ReactElement {
           </Box>
         </Box>
 
+        {/*
+          唯一的底部元素：居中的玻璃输入台本身。容器透明、只负责定位，
+          不再铺整条背景；左右空白处 pointer-events: none，滚轮与点击
+          直接落到下面的结果区。
+        */}
         <Box
           sx={{
-            flex: "none",
-            px: { xs: 2, md: 4 },
-            pt: 1,
-            pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: 1.5 },
-            backgroundImage: (t) => `linear-gradient(180deg, `
-              + `${alpha(t.palette.background.default, 0)}, `
-              + `${t.palette.background.default} 55%)`,
+            position: "absolute",
+            left: 0,
+            right: `${searchScrollbarW}px`,
+            bottom: 0,
+            display: "flex",
+            justifyContent: "center",
+            pl: { xs: "16px", md: "32px" },
+            pr: { xs: "16px", md: "32px" },
+            pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: "12px" },
+            pointerEvents: "none",
+            zIndex: 2,
           }}
         >
-          <Box sx={{ maxWidth: 900, mx: "auto" }}>{composer(true)}</Box>
+          <Box
+            ref={composerRef}
+            sx={{
+              position: "relative",
+              width: "100%",
+              maxWidth: SEARCH_COLUMN_MAX,
+              pointerEvents: "auto",
+              // 玻璃投影默认向上扩散约 40px；只保留左/右/下方的投影，
+              // 顶部裁到 0，避免阴影压住条目。
+              clipPath: "inset(0 -64px -64px -64px)",
+            }}
+          >
+            {/*
+              玻璃下方的同色圆角衬底：让滚动内容在玻璃覆盖区不可见，
+              但在两个圆角缺口外继续可见（衬底的圆角与玻璃一致）。
+            */}
+            <Box
+              aria-hidden
+              sx={{
+                position: "absolute",
+                inset: 0,
+                borderRadius: `${SEARCH_COMPOSER_RADIUS}px`,
+                bgcolor: "background.default",
+                pointerEvents: "none",
+                zIndex: 0,
+              }}
+            />
+            <Box sx={{ position: "relative", zIndex: 1 }}>
+              {composer(true)}
+            </Box>
+          </Box>
         </Box>
       </Box>
       {filtersPanel}

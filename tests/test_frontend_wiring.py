@@ -923,8 +923,12 @@ def test_viewport_filling_views_subtract_the_measured_shell_header():
     """填满视口的视图必须用壳层实测顶栏高度，而不是 100% / 100vh-84。
 
     回归防护：顶栏在滚动区内部且高度随面包屑、工作区标签变化。写死值
-    会让检索页多出一个顶栏的高度——底部输入台正好被挤出屏幕，对话页
-    的输入台也一起消失；页面还会多出一条无意义的纵向滚动。
+    会让工作台多出一个顶栏的高度，页面出现无意义的纵向滚动，检索页的
+    浮动输入台也会偏出底部。
+
+    注意区分**外层工作台**与**子滚动层**：外层必须用 FILL_HEIGHT；
+    检索页的滚动容器在外层内部，用 height:100% 撑满它是正确的——旧断言
+    全局禁止 `height: "100%"`，会把这种合法结构误判成回归。
     """
     app = read(SRC / "App.tsx")
     assert "--shell-header-h" in app, "壳层没有下发顶栏实测高度"
@@ -933,8 +937,9 @@ def test_viewport_filling_views_subtract_the_measured_shell_header():
     search = read(VIEWS / "Search.tsx")
     assert "calc(100% - var(--shell-header-h" in search, \
         "检索工作台没有按剩余视口定高"
-    assert 'height: "100%"' not in search, \
-        "检索页又直接按 100% 定高，输入台会被顶出屏幕"
+    # 空态 / 检索 / 对话三个外层工作台都要用 FILL_HEIGHT
+    assert search.count("height: FILL_HEIGHT") >= 3, \
+        "有外层工作台退回了 100% 定高（页面会多出一条纵向滚动）"
 
     api = read(VIEWS / "ApiDoc.tsx")
     assert "calc(100% - var(--shell-header-h" in api, \
