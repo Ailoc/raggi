@@ -265,8 +265,8 @@ def test_no_raw_html_injection_of_server_data():
 
 
 def test_snippet_component_uses_no_raw_html():
-    """检索片段渲染不得含原始 HTML 注入。"""
-    for rel in ("views/Search.tsx", "ui/AnswerPanel.tsx"):
+    """检索片段/对话引用渲染不得含原始 HTML 注入。"""
+    for rel in ("views/Search.tsx", "ui/EvidenceList.tsx", "ui/ChatThread.tsx"):
         text = _strip_comments((SRC / rel).read_text(encoding="utf-8"))
         assert "dangerouslySetInnerHTML" not in text, f"{rel} 仍允许原始 HTML"
         assert "innerHTML" not in text, f"{rel} 仍在拼 innerHTML"
@@ -274,7 +274,7 @@ def test_snippet_component_uses_no_raw_html():
 
 def test_snippet_component_renders_mark_natively():
     """高亮必须是原生 <mark> 标签，而不是拼 HTML 字符串。"""
-    text = _strip_comments((SRC / "views" / "Search.tsx")
+    text = _strip_comments((SRC / "ui" / "EvidenceList.tsx")
                            .read_text(encoding="utf-8"))
     assert "<mark" in text, "检索片段未渲染 <mark>"
     assert "snippet.marks" in text, "未使用结构化高亮区间"
@@ -282,7 +282,7 @@ def test_snippet_component_renders_mark_natively():
 
 def test_no_component_escapes_snippet_manually():
     """前端不得再手工 escape snippet（后端已不做，重复会双重转义）。"""
-    for rel in ("views/Search.tsx", "ui/AnswerPanel.tsx"):
+    for rel in ("views/Search.tsx", "ui/EvidenceList.tsx", "ui/ChatThread.tsx"):
         text = _strip_comments((SRC / rel).read_text(encoding="utf-8"))
         assert "escapeHtml" not in text, f"{rel} 仍在手工转义 snippet"
 

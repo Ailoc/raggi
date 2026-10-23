@@ -1,0 +1,393 @@
+/*
+ * 液态玻璃的应用层样式。
+ *
+ * 材质本身（填充、模糊、高光边缘、边缘透镜、投影）由 open-glass-ui
+ * 算成内联样式挂在元素上——它的样式表用 `:where()`，特异性为 0，
+ * MUI 的 Emotion class 压得住它；反过来我们要改的地方（布局、极光）
+ * 用自己的 class，不去动库的材质。
+ *
+ * 库已经处理了 prefers-reduced-transparency、forced-colors 与
+ * prefers-reduced-motion，这里不再重复一份。
+ */
+
+/* 玻璃面在流里（库自己给的是 position: relative，这里只补布局） */
+.lg-glass-panel {
+  box-sizing: border-box;
+}
+
+/*
+ * 平面玻璃：去掉材质的投影，只留玻璃本身。
+ *
+ * 库给每一块玻璃都挂了 `0 16px 48px -8px` 的大范围暗影。代码卡片是
+ * 上下紧挨着排的薄片，上一张的阴影会盖到下一张的顶边，看起来像两张
+ * 卡连成了一条；路径条下面也会多出一条脏影。代码块与路径条都用这个
+ * 变体。
+ */
+.lg-glass-flat {
+  box-shadow: none !important;
+}
+
+/*
+ * 对话框纸面：Material 的 Paper 有一层 elevation 背景图，会盖在玻璃
+ * 材质上；这里只保留玻璃自己的填充。
+ */
+.lg-dialog-paper {
+  background-image: none !important;
+}
+
+/*
+ * 菜单 / Select 下拉 / Popover：MUI 的浮层必须保留 Popper 的定位与
+ * 纸面布局，不能换成 Glass 组件，否则定位会丢。这里用同一套玻璃语言
+ * （半透 + 模糊 + 细边 + 柔影）覆盖纸面，全站菜单统一。
+ */
+.MuiMenu-paper,
+.MuiPopover-paper,
+.MuiAutocomplete-paper {
+  background-color: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  box-shadow: 0 18px 48px -24px rgba(15, 23, 42, 0.35) !important;
+}
+
+[data-theme="dark"] .MuiMenu-paper,
+[data-theme="dark"] .MuiPopover-paper,
+[data-theme="dark"] .MuiAutocomplete-paper {
+  background-color: rgba(18, 32, 34, 0.78) !important;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 48px -20px rgba(0, 0, 0, 0.6) !important;
+}
+
+/*
+ * Tooltip：也走同一套玻璃语言（深色半透 + 模糊 + 细边），
+ * 不引入新的颜色，只是把默认的实色黑底换成会透背景的材质。
+ */
+.MuiTooltip-tooltip {
+  background-color: rgba(24, 32, 44, 0.82) !important;
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 32px -18px rgba(0, 0, 0, 0.6) !important;
+}
+
+/*
+ * 顶栏：贴齐视口、**没有下方阴影、也没有底部分隔线**。
+ *
+ * 阴影会把玻璃顶栏压回"AppBar"的观感，底边线则像贴在玻璃上的一条
+ * 实色胶带；两层都去掉之后，顶栏与页面共用同一片环境光，边界由材质
+ * 自己的受光边交代。
+ */
+.lg-topbar {
+  border-bottom: none;
+  box-shadow: none !important;
+  /*
+   * 压住材质的 saturate(1.85)：环境底色本来就饱和，再乘一遍会把蓝色
+   * 通道顶到 255 被截断，顶栏于是比页面亮出一整条——这正是"割裂感"
+   * 的像素级来源（实测顶栏 (185,180,255) vs 页面 (183,178,233)）。
+   * 顶栏只要模糊与轻微提亮，不要二次加饱和。
+   */
+  backdrop-filter: blur(24px) saturate(1.05) brightness(0.98) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.05) brightness(0.98) !important;
+}
+
+[data-theme="dark"] .lg-topbar {
+  backdrop-filter: blur(24px) saturate(1.08) brightness(1.03) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.08) brightness(1.03) !important;
+}
+
+/*
+ * 页面在顶部时：整条玻璃完全隐形。
+ *
+ * 默认状态用户看到的应该只是"悬浮在页面里的导航内容"，而不是一条
+ * 带材质的横条。开始滚动后才浮出玻璃（`scrolled` 切换 class），
+ * 既保持沉浸感，也保证内容滑到导航下面时仍然读得清。
+ */
+.lg-topbar--immersive,
+[data-theme="dark"] .lg-topbar--immersive {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.lg-topbar--immersive::before,
+.lg-topbar--immersive::after {
+  display: none !important;
+}
+
+.lg-topbar-fade--hidden {
+  display: none;
+}
+
+/*
+ * 面包屑：和主栏共用一片玻璃，不再画内部分隔线。
+ * 分隔线会把一条完整的玻璃切成两截，正是"割裂感"的来源。
+ */
+.lg-topbar-crumbs {
+  border-top: none;
+}
+
+/*
+ * 玻璃底部的柔化层：只做模糊、不带颜色，用遮罩淡出。
+ *
+ * 玻璃面在底部硬收边时会像一条贴上去的色带；这一层把顶栏下方的模糊
+ * 再往下延伸 32px 并渐隐，内容滑出来时是渐进的，没有硬缝，也没有阴影。
+ */
+.lg-topbar-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 32px;
+  pointer-events: none;
+  backdrop-filter: blur(10px) saturate(1.15);
+  -webkit-backdrop-filter: blur(10px) saturate(1.15);
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent);
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent);
+}
+
+/* ---- 环境光：缓慢漂移的光斑 ------------------------------------------ */
+
+/*
+ * 四团大而柔的光斑（薄荷 / 天蓝 / 水绿 / 一点暖光），各自以不同周期
+ * 缓慢移动。底色是接近白的冷调，颜色几乎全部由这些会动的光提供——
+ * 静态光斑一多，背景看起来就"没动"。
+ *
+ * 只动 transform（合成层），不动 background-position：后者每一帧都要
+ * 重新绘制整屏渐变，风扇会转起来。周期取 20/24/29/25 秒且方向不同，
+ * 叠加后的光纹很久不会重复，读起来像"呼吸"而不是循环动画。
+ */
+.lg-aurora-blob {
+  --lg-blob-min: 0.3;
+  --lg-blob-max: 1;
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: var(--lg-blob-max);
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
+}
+
+[data-theme="dark"] .lg-aurora-blob {
+  --lg-blob-min: 0.22;
+  --lg-blob-max: 0.85;
+}
+
+/* 薄荷：左上 → 中上 → 中心 → 中下 → 回到左上 */
+.lg-aurora-blob--a {
+  width: 52vmax;
+  height: 52vmax;
+  left: -14vw;
+  top: -18vh;
+  animation: lg-aurora-drift-a 54s ease-in-out infinite;
+  animation-delay: -4s;
+}
+
+/* 天蓝：右上 → 中右 → 中心 → 中下 → 回到右上 */
+.lg-aurora-blob--b {
+  width: 46vmax;
+  height: 46vmax;
+  right: -12vw;
+  top: -14vh;
+  animation: lg-aurora-drift-b 63s ease-in-out infinite;
+  animation-delay: -22s;
+}
+
+/* 水绿：左下 → 中下 → 中心 → 中上 → 回到左下 */
+.lg-aurora-blob--c {
+  width: 56vmax;
+  height: 56vmax;
+  left: 6vw;
+  bottom: -28vh;
+  animation: lg-aurora-drift-c 71s ease-in-out infinite;
+  animation-delay: -40s;
+}
+
+/* 暖光：右下 → 中右 → 中心 → 中上 → 回到右下 */
+.lg-aurora-blob--d {
+  width: 36vmax;
+  height: 36vmax;
+  right: 2vw;
+  bottom: -14vh;
+  animation: lg-aurora-drift-d 59s ease-in-out infinite;
+  animation-delay: -15s;
+}
+
+/*
+ * 路径是**穿过页面**的闭环，而不是只在家门口小幅晃动：
+ * 每团光都依次经过自己的角落 → 页面中上/中下 → 中心 → 另一侧，
+ * 再原路回到起点。这样中心和上方的空白也会被不同颜色的光扫过。
+ *
+ * 闭环要求 100% 与 0% 完全一致（transform + opacity），否则循环处
+ * 会跳一下；四种周期 54/63/71/59 秒互质，加上负延迟错开相位，
+ * 叠加后的光纹很久不会重复。
+ *
+ * 全部落在合成层：transform + opacity，不触发重排/重绘。
+ */
+@keyframes lg-aurora-drift-a {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+    opacity: var(--lg-blob-min);
+  }
+  25% {
+    transform: translate3d(18vw, 10vh, 0) scale(1.08) rotate(5deg);
+    opacity: var(--lg-blob-max);
+  }
+  50% {
+    transform: translate3d(40vw, 26vh, 0) scale(1.16) rotate(10deg);
+    opacity: var(--lg-blob-min);
+  }
+  75% {
+    transform: translate3d(22vw, 40vh, 0) scale(1.04) rotate(-4deg);
+    opacity: var(--lg-blob-max);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+    opacity: var(--lg-blob-min);
+  }
+}
+
+@keyframes lg-aurora-drift-b {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1.05) rotate(0deg);
+    opacity: var(--lg-blob-max);
+  }
+  25% {
+    transform: translate3d(-16vw, 12vh, 0) scale(0.98) rotate(-6deg);
+    opacity: var(--lg-blob-min);
+  }
+  50% {
+    transform: translate3d(-38vw, 28vh, 0) scale(1.1) rotate(-12deg);
+    opacity: var(--lg-blob-max);
+  }
+  75% {
+    transform: translate3d(-20vw, 42vh, 0) scale(1.02) rotate(4deg);
+    opacity: var(--lg-blob-min);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.05) rotate(0deg);
+    opacity: var(--lg-blob-max);
+  }
+}
+
+@keyframes lg-aurora-drift-c {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.98) rotate(0deg);
+    opacity: var(--lg-blob-min);
+  }
+  25% {
+    transform: translate3d(14vw, -10vh, 0) scale(1.06) rotate(4deg);
+    opacity: var(--lg-blob-max);
+  }
+  50% {
+    transform: translate3d(34vw, -26vh, 0) scale(1.14) rotate(8deg);
+    opacity: var(--lg-blob-min);
+  }
+  75% {
+    transform: translate3d(18vw, -38vh, 0) scale(1.02) rotate(-5deg);
+    opacity: var(--lg-blob-max);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(0.98) rotate(0deg);
+    opacity: var(--lg-blob-min);
+  }
+}
+
+@keyframes lg-aurora-drift-d {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+    opacity: var(--lg-blob-max);
+  }
+  25% {
+    transform: translate3d(-12vw, -8vh, 0) scale(1.08) rotate(-4deg);
+    opacity: var(--lg-blob-min);
+  }
+  50% {
+    transform: translate3d(-30vw, -22vh, 0) scale(1.16) rotate(-9deg);
+    opacity: var(--lg-blob-max);
+  }
+  75% {
+    transform: translate3d(-14vw, -34vh, 0) scale(1.03) rotate(5deg);
+    opacity: var(--lg-blob-min);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+    opacity: var(--lg-blob-max);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lg-aurora-blob {
+    animation: none;
+  }
+}
+
+/* 知识库卡片 */
+.lg-kb-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 148px;
+}
+
+/*
+ * 悬停提示画成 outline 而不是改材质：材质是库算好的内联样式，
+ * 覆盖它等于跟库打架。outline 画在玻璃之外，两条渲染路径一致。
+ */
+.lg-kb-card:hover {
+  outline: 1px solid var(--lg-hover-ring, rgba(15, 23, 42, 0.14));
+  outline-offset: -1px;
+}
+
+/*
+ * 整卡悬停加深。
+ *
+ * MUI 的 CardActionArea 只会给自己那块区域加悬停遮罩，下半张卡的
+ * CardActions 在它外面，于是出现"只有上半截变深"的断层。这里用
+ * 玻璃自己的 ::before 铺一层覆盖整卡的淡色，卡片的上下半截一起
+ * 响应；CardActionArea 的局部遮罩已在 KbList 里关掉。
+ */
+.lg-kb-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.045);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+
+.lg-kb-card:hover::before {
+  opacity: 1;
+}
+
+[data-theme="dark"] .lg-kb-card::before {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* 检索输入台 */
+.lg-composer {
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * 焦点提示：不用描边，也不用彩色。
+ *
+ * 在玻璃外面画一圈线有两个问题：一是"贴纸感"，二是它会盖住玻璃自己
+ * 那条受光边，反而把材质做坏了。画一圈彩色柔光同样落了下乘——焦点
+ * 不该给界面加一个色。
+ *
+ * 玻璃面的聚焦用材质自己的语言表达：**边缘亮起来、面板抬起来**。
+ * 全部落在库自己的材质系数上（--ogui-glass-*），不引入任何额外的颜色
+ * 或形状。
+ *
+ * 实现细节：材质把这些系数以**内联自定义属性**写在元素上，样式表要
+ * 盖过内联值必须带 !important。
+ */
+.lg-composer:focus-within {
+  --ogui-glass-rim: 2.2 !important;
+  --ogui-glass-lensing: 2.4 !important;
+  --ogui-glass-highlight: 1.8 !important;
+  --ogui-glass-opacity: 1.08 !important;
+}

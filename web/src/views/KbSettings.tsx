@@ -6,7 +6,7 @@ import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
@@ -18,6 +18,7 @@ import LayersIcon from "@mui/icons-material/Layers";
 import SaveIcon from "@mui/icons-material/Save";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { fmtTime } from "../lib/format";
 import { removeKbDialog } from "../lib/ops";
 import { href, go } from "../lib/router";
@@ -63,6 +64,7 @@ const planSnap = (inherit: boolean, size: number, ratio: number, strategy: strin
  * 重载——旧版重载会把方案面板里未提交的编辑静默抹掉。
  */
 export default function KbSettings({ kbId }: { kbId: string }): React.ReactElement {
+  const look = useGlassLook("card");
   const { kbsLoaded } = useStore();
   const [kb, setKb] = useState<Kb | null>(null);
   const [plan, setPlan] = useState<KbPlan | null>(null);
@@ -238,7 +240,7 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
 
   if (phase === "initial") {
     return (
-      <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 960, mx: "auto" }}>
+      <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
         <Skeleton variant="rounded" height={200} sx={{ mb: 2 }} />
         <Skeleton variant="rounded" height={260} />
       </Box>
@@ -247,7 +249,7 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
 
   if (phase === "failed" || !kb || !plan) {
     return (
-      <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 960, mx: "auto" }}>
+      <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
         <Alert
           severity="error"
           action={<Button color="inherit" size="small" onClick={() => void load()}>重试</Button>}
@@ -259,13 +261,13 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
   }
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 960, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Typography variant="h5" sx={{ fontWeight: 500, mb: 0.5 }}>{kb.name}</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         {kb.doc_count} 个文档 · {kb.chunk_count} 个分块 · 更新于 {fmtTime(kb.updated_at)}
       </Typography>
 
-      <Paper variant="outlined" sx={{ p: 3, mb: 2 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3, mb: 2 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>基本信息</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           名称与描述。描述只给人看，不参与检索。
@@ -299,9 +301,9 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
             {savingInfo ? "保存中…" : "保存基本信息"}
           </Button>
         </Stack>
-      </Paper>
+      </GlassPanel>
 
-      <Paper variant="outlined" sx={{ p: 3, mb: 2 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3, mb: 2 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>分块方案</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           决定文档入库时怎么切。单个文档还可再覆盖一次。
@@ -403,9 +405,9 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
             {savingPlan ? "保存中…" : "保存方案"}
           </Button>
         </Stack>
-      </Paper>
+      </GlassPanel>
 
-      <Paper variant="outlined" sx={{ p: 3, mb: 2 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3, mb: 2 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>内容概览</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           只读统计，用于核对入库结果。
@@ -441,9 +443,9 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
             独立分块
           </Button>
         </Stack>
-      </Paper>
+      </GlassPanel>
 
-      <Paper variant="outlined" sx={{ p: 3, borderColor: "error.main" }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3, borderColor: "error.main" }}>
         <Typography variant="h6" sx={{ fontSize: 16, color: "error.main" }}>危险操作</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           删除知识库会连同它的 {kb.doc_count} 篇文档、{kb.chunk_count} 个分块与留档原文一起删除，不可撤销。
@@ -455,7 +457,7 @@ export default function KbSettings({ kbId }: { kbId: string }): React.ReactEleme
         >
           删除本知识库
         </Button>
-      </Paper>
+      </GlassPanel>
     </Box>
   );
 }

@@ -1,6 +1,8 @@
 import { createTheme } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
 
+import { GlassDialogPaper } from "./ui/glass";
+
 /**
  * MUI 主题。
  *
@@ -23,10 +25,12 @@ export function buildTheme(mode: "dark" | "light"): Theme {
   return createTheme({
     palette: {
       mode,
+      // 知识库是长时间阅读的界面：浅色用带一点薄荷的冷白，深色用深青
+      // 墨色而不是纯黑。两者都与环境光的清新色相在同一家族里。
       background:
         mode === "dark"
-          ? { default: "#121212", paper: "#1e1e1e" }
-          : { default: "#fafafa", paper: "#ffffff" },
+          ? { default: "#0b1416", paper: "#122022" }
+          : { default: "#f4faf8", paper: "#ffffff" },
     },
     typography: {
       fontFamily: [
@@ -106,6 +110,30 @@ export function buildTheme(mode: "dark" | "light"): Theme {
           // 全带阴影会"像贴了一墙便利贴"。这需要在调用处传 variant，
           // 这里只保证圆角一致。
           rounded: { borderRadius: 4 },
+        },
+      },
+      MuiDialog: {
+        // 全站对话框统一换成交互式玻璃纸面。
+        defaultProps: { PaperComponent: GlassDialogPaper },
+        styleOverrides: {
+          paper: (props) => {
+            const dark = props.theme.palette.mode === "dark";
+            return {
+              // 轻度 frosted glass：对话框浮在内容之上，半透 + 模糊，
+              // 与液态玻璃家族和谐，同时保证文字可读。
+              backdropFilter: "blur(16px) saturate(140%)",
+              WebkitBackdropFilter: "blur(16px) saturate(140%)",
+              backgroundColor: dark
+                ? "rgba(30, 30, 30, 0.72)"
+                : "rgba(255, 255, 255, 0.78)",
+              boxShadow: dark
+                ? "0 24px 60px rgba(0,0,0,0.5)"
+                : "0 24px 60px rgba(0,0,0,0.12)",
+              border: dark
+                ? "1px solid rgba(255,255,255,0.08)"
+                : "1px solid rgba(0,0,0,0.06)",
+            };
+          },
         },
       },
       MuiTablePagination: {

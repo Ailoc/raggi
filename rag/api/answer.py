@@ -12,7 +12,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from rag.api._common import cfg_with_overrides, get_ctx, raise_operation_error
+from rag.api._common import get_ctx, raise_operation_error
 from rag.api.responses import AnswerOut, error_responses
 from rag.api.schemas import AnswerReq
 from rag.retrieval.answer import answer, answer_stream
@@ -41,16 +41,49 @@ def _filters(body: AnswerReq) -> dict:
     return filters
 
 
+def _retrieval(ctx, body: AnswerReq):
+    """把请求里的检索参数折算成 (cfg, reranker, search_opts)。
+
+    对话左侧的回答与右侧的证据必须使用同一套召回参数，否则引用编号
+    对应的分块可能根本不在证据列表里。这里与 `/api/search` 的参数
+    语义保持一致；没有暴露的字段才回落到服务端配置。
+    """
+    updates: dict = {}
+    if body.mode in ("hybrid", "vector", "fts"):
+        updates["mode"] = body.mode
+    if body.window is not None:
+        updates["window"] = max(0, int(body.window))
+    for key in ("candidate_k", "nprobes", "refine_factor", "k_rrf"):
+        value = getattr(body, key)
+        if value is not None:
+            updates[key] = value
+    cfg = ctx.settings.retrieve.model_copy(update=updates) if updates \
+        else ctx.settings.retrieve
+    reranker = None if body.rerank is False else ctx.registry.reranker
+    search_opts = {
+        "score_threshold": body.score_threshold,
+        "group_by_doc": body.group_by_doc,
+        "include_context": False,
+        "snippet_chars": body.snippet_chars,
+        "highlight": body.highlight,
+    }
+    return cfg, reranker, search_opts
+
+
+def _history(body: AnswerReq) -> list[dict]:
+    return [turn.model_dump() for turn in body.history]
+
+
 @router.post("/answer")
 async def api_answer(request: Request, body: AnswerReq) -> AnswerOut:
     ctx = get_ctx(request)
     _require_answer_enabled(ctx)
-    cfg = cfg_with_overrides(ctx.settings, body.mode, body.window)
+    cfg, reranker, search_opts = _retrieval(ctx, body)
     try:
         return await answer(
-            ctx.store, ctx.registry.embedder, ctx.registry.reranker,
+            ctx.store, ctx.registry.embedder, reranker,
             ctx.registry.chat(), body.q, cfg, _filters(body),
-            body.top_k)
+            body.top_k, history=_history(body), search_opts=search_opts)
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
@@ -85,14 +118,15 @@ async def api_answer_stream(request: Request,
     """
     ctx = get_ctx(request)
     _require_answer_enabled(ctx)
-    cfg = cfg_with_overrides(ctx.settings, body.mode, body.window)
+    cfg, reranker, search_opts = _retrieval(ctx, body)
 
     async def gen():
         try:
             async for item in answer_stream(
-                    ctx.store, ctx.registry.embedder,
-                    ctx.registry.reranker, ctx.registry.chat(),
-                    body.q, cfg, _filters(body), body.top_k):
+                    ctx.store, ctx.registry.embedder, reranker,
+                    ctx.registry.chat(), body.q, cfg, _filters(body),
+                    body.top_k, history=_history(body),
+                    search_opts=search_opts):
                 yield _sse(item["event"], item["data"])
         except asyncio.CancelledError:
             # 客户端断开：不必再写事件，也不该记成失败

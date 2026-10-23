@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import Box from "@mui/material/Box";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
+import { alpha } from "@mui/material/styles";
 import DescriptionIcon from "@mui/icons-material/Description";
 import LayersIcon from "@mui/icons-material/Layers";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -14,6 +15,10 @@ import { href } from "../lib/router";
  * 用 `<a href>` 而不是按钮：中键新开、右键复制链接、状态栏预览都要保留，
  * 而且这三个地址本来就该可分享。MUI 的 Tab 支持 `component="a"`，
  * 因此视觉是标签、语义仍是链接。
+ *
+ * 它渲染在壳层顶栏玻璃**内部**（`App.tsx`），所以这里不再自带边框、
+ * 最大宽度和页面级内边距——任何一条内部分隔线都会把一片完整的玻璃
+ * 切成两截。选中态用与主栏同款的淡色药丸，而不是下划线。
  */
 const TABS = [
   { key: "docs", label: "文档", icon: <DescriptionIcon fontSize="small" /> },
@@ -30,20 +35,32 @@ export default function WorkspaceTabs({
 }): ReactElement {
   const current = TABS.some((t) => t.key === tab) ? tab : "docs";
   return (
-    <Box
-      sx={{
-        maxWidth: 1440,
-        mx: "auto",
-        px: { xs: 2, md: 3 },
-        pt: 2,
-      }}
-    >
+    <Box sx={{ px: { xs: 1, md: 2 }, pb: 0.75 }}>
       <Tabs
         value={current}
         aria-label="知识库视图"
         variant="scrollable"
         scrollButtons="auto"
-        sx={{ minHeight: 40, borderBottom: 1, borderColor: "divider" }}
+        sx={{
+          minHeight: 38,
+          "& .MuiTabs-indicator": { display: "none" },
+          "& .MuiTab-root": {
+            minHeight: 34,
+            minWidth: 88,
+            px: 1.5,
+            mx: 0.25,
+            gap: 0.5,
+            borderRadius: 999,
+            transition: "background-color .18s ease, color .18s ease",
+          },
+          "& .MuiTab-root.Mui-selected": (t) => ({
+            backgroundColor: alpha(
+              t.palette.primary.main,
+              t.palette.mode === "dark" ? 0.2 : 0.11,
+            ),
+            color: t.palette.primary.main,
+          }),
+        }}
       >
         {TABS.map((t) => (
           <Tab
@@ -54,7 +71,6 @@ export default function WorkspaceTabs({
             icon={t.icon}
             iconPosition="start"
             label={t.label}
-            sx={{ minHeight: 40, minWidth: 96, gap: 0.5 }}
           />
         ))}
       </Tabs>

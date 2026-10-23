@@ -263,23 +263,22 @@ def test_compose_binds_target_kb():
     assert '入库到「{kbName(kbId)}」' in src, "界面未显示入库目标"
 
 
-def test_search_context_is_remembered():
-    """顶栏点「检索」不该丢掉关键词与参数。
+def test_bare_search_starts_empty():
+    """顶栏点「检索」应回到空态输入台，而不是上次的查询与结果。
 
-    恢复必须放在读路由（每条 hashchange 的必经之路）：导航项是 `<a href>`，
-    点击不经过 go()。旧守卫钉 `location.hash = prev` 等于把"写在 go() 里"
-    当契约——功能对真实点击路径一直是死的，守卫却一直是绿的。
+    回归防护：路由层曾把裸 `#/search` 重写成 sessionStorage 里的上次检索，
+    用户点导航看到的是旧查询结果，而不是新的默认页。
     """
     router = (ROOT / "web/src/lib/router.ts").read_text(encoding="utf-8")
-    assert "rememberSearch" in router and "lastSearch" in router
+    assert "rememberSearch" not in router and "lastSearch" not in router, \
+        "路由层仍在恢复上次检索"
     read_route = router[router.index("export function readRoute"):]
-    assert 'raw === "/search" || raw === "/search?"' in read_route, \
-        "裸 #/search 未恢复上次检索（或恢复又搬回 go()）"
-    assert "location.replace(prev)" in read_route, "恢复必须 replace，否则退不出去"
+    assert 'raw === "/search"' not in read_route, "裸 #/search 仍被重写"
+    assert "location.replace(prev)" not in read_route
     search = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
-    assert "searchUrl(" in search
-    assert "rememberSearch(location.hash)" not in search, \
-        "恢复逻辑散落在视图里：导航链接的点击路径不一定经过它"
+    assert "searchUrl" not in search, "检索词仍在写 URL"
+    assert 'query.trim() !== ""' in search, "检索视图没有按查询词判断空态"
+    assert "newSearch" in search and "raggi:newSearch" in search, "缺少回到空态的入口"
 
 
 def test_reparse_entry_exists():
@@ -409,10 +408,14 @@ def test_error_states_offer_retry():
 
 
 def test_search_params_layered():
-    """常用的「范围与模式」不该藏在折叠里。"""
+    """常用范围与召回模式留在输入台，其余完整条件收进抽屉。"""
     view = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
-    assert 'p.group === "base"' in view, "常用参数未提出折叠"
-    assert "过滤与高级参数" in view, "调优参数未收进「高级参数」"
+    composer = (ROOT / "web/src/ui/SearchComposer.tsx").read_text(encoding="utf-8")
+    filters = (ROOT / "web/src/ui/SearchFilters.tsx").read_text(encoding="utf-8")
+    assert "kbName" in composer and "全部知识库" in composer, "输入台缺知识库范围"
+    assert "recallLabel" in composer, "输入台缺召回模式"
+    assert "SearchFilters" in view and "<Drawer" in filters, "完整条件未收进抽屉"
+    assert "召回与排序" in filters, "调优参数没有分组"
 
 
 def test_upload_failures_are_kept():
@@ -585,22 +588,23 @@ def test_health_actions_exposed():
 
 
 def test_streaming_answer_ui():
-    """问答要真的流式：SSE 客户端 + 面板，且卸载时断开。"""
+    """对话要真的流式：SSE 客户端 + 消息流，且卸载时断开。"""
     sse = (ROOT / "web/src/lib/sse.ts").read_text(encoding="utf-8")
     assert "getReader()" in sse, "未按流读取响应体"
     assert "AbortController" in sse, "无法中断请求（停止按钮会变成假停止）"
     for ev in ("sources", "delta", "done", "error"):
         assert f'case "{ev}"' in sse, f"未处理 {ev} 事件"
 
-    panel = (ROOT / "web/src/ui/AnswerPanel.tsx").read_text(encoding="utf-8")
-    assert "streamPost" in panel, "面板未使用流式请求"
-    assert "onSources" in panel, "未接收引用（sources 事件）"
-    assert "onDelta" in panel, "未接收增量文本（delta 事件）"
-    assert "stop()" in panel, "停止按钮未真正断开连接"
-    assert "handleRef.current?.stop()" in panel, "组件卸载时未断开，后端会继续生成"
-
     search = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
-    assert "AnswerPanel" in search, "检索页未接入问答面板"
+    assert "streamPost" in search, "对话未使用流式请求"
+    assert "onSources" in search, "未接收引用（sources 事件）"
+    assert "onDelta" in search, "未接收增量文本（delta 事件）"
+    assert "chatStream.current?.stop()" in search, "停止按钮/卸载未真正断开连接"
+    assert "chatSearchCtrl.current?.abort()" in search, "停止时未中止证据检索"
+    assert "historyFrom" in search, "多轮对话没有携带历史"
+
+    thread = (ROOT / "web/src/ui/ChatThread.tsx").read_text(encoding="utf-8")
+    assert "onCitation" in thread, "引用不可跳回证据"
 
 
 def test_job_cancel_entry_points():

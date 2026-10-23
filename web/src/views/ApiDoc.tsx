@@ -9,7 +9,7 @@ import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
 import ListItemText from "@mui/material/ListItemText";
 import ListSubheader from "@mui/material/ListSubheader";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -25,6 +25,7 @@ import SearchIcon from "@mui/icons-material/Search";
 import { AUTH_NOTE, GROUPS, curlFor } from "../data/apidoc";
 import type { Endpoint, Param } from "../data/apidoc";
 import { selectText } from "../lib/dom";
+import { CONTENT_MAX } from "../lib/layout";
 import { go } from "../lib/router";
 
 const METHOD_COLOR: Record<string, "success" | "info" | "warning" | "secondary" | "error"> = {
@@ -159,14 +160,29 @@ export default function ApiDoc({ query }: { query: URLSearchParams }): React.Rea
   const quickCurl = quickEp ? curlFor(quickEp, base) : "";
 
   return (
-    <Box sx={{ px: { xs: 2, md: 3 }, py: 2, maxWidth: 1680, mx: "auto" }}>
+    <Box
+      sx={{
+        px: { xs: 2, md: 3 },
+        py: 2,
+        maxWidth: CONTENT_MAX,
+        mx: "auto",
+        // 桌面端三栏各自滚动：整页不再跟着滚动，高度锁在视口里。
+        // 84px = 顶栏（顶部留白 20 + 工具条 56 + 底边距 8）。
+        height: { lg: "calc(100vh - 84px)" },
+        display: { lg: "flex" },
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
       <Box id="apiDocLive" className="sr-only" role="status" aria-live="polite">{live}</Box>
 
       <Box
         sx={{
           display: "grid",
           gap: 3,
-          alignItems: "start",
+          alignItems: { xs: "start", lg: "stretch" },
+          flex: { lg: 1 },
+          minHeight: { lg: 0 },
           gridTemplateColumns: {
             xs: "1fr",
             lg: "240px minmax(0, 1fr) 300px",
@@ -178,67 +194,93 @@ export default function ApiDoc({ query }: { query: URLSearchParams }): React.Rea
           aria-label="接口列表"
           sx={{
             minWidth: 0,
+            minHeight: { lg: 0 },
+            display: { lg: "flex" },
+            flexDirection: { lg: "column" },
             maxHeight: { xs: "42vh", lg: "none" },
-            overflowY: { xs: "auto", lg: "visible" },
+            overflowY: { xs: "auto", lg: "hidden" },
             pr: { xs: 1, lg: 0 },
           }}
         >
-          <TextField
-            size="small"
-            type="search"
-            placeholder="搜索接口…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            fullWidth
-            slotProps={{
-              htmlInput: { "aria-label": "过滤 API 端点" },
-              input: {
-                startAdornment: (
-                  <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment>
-                ),
-              },
-            }}
-            helperText={needle ? `${shownCount} / ${total}` : " "}
-          />
+          {/* 搜索框固定在左栏顶部：它不在下面的滚动容器里。 */}
+          <Box sx={{ flexShrink: 0 }}>
+            <TextField
+              size="small"
+              type="search"
+              placeholder="搜索接口…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              fullWidth
+              slotProps={{
+                htmlInput: { "aria-label": "过滤 API 端点" },
+                input: {
+                  startAdornment: (
+                    <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment>
+                  ),
+                },
+              }}
+              helperText={needle ? `${shownCount} / ${total}` : " "}
+            />
+          </Box>
 
-          {shown.map((g) => (
-            <Box key={g.id}>
-              <ListSubheader disableSticky sx={{ px: 0, bgcolor: "transparent", fontSize: 12 }}>
-                {g.title}
-              </ListSubheader>
-              <List dense disablePadding>
-                {g.endpoints.map((e) => (
-                  <ListItemButton
-                    key={epKey(e)}
-                    selected={selectedKey === epKey(e)}
-                    onClick={() => openEp(e)}
-                    title={`${e.method} ${e.path}`}
-                    sx={{ borderRadius: 1, py: 0.4 }}
-                  >
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      color={METHOD_COLOR[e.method] ?? "default"}
-                      label={e.method}
-                      sx={{ mr: 1, height: 20, fontSize: 10, minWidth: 46 }}
-                    />
-                    <ListItemText
-                      primary={titleOf(e)}
-                      slotProps={{ primary: { noWrap: true, fontSize: 12.5 } }}
-                    />
-                  </ListItemButton>
-                ))}
-              </List>
-            </Box>
-          ))}
-          {shown.length === 0 && (
-            <Typography variant="body2" color="text.secondary" sx={{ px: 1, py: 2 }}>
-              没有匹配的端点。
-            </Typography>
-          )}
+          {/* 只有列表滚动，搜索框保持不动。 */}
+          <Box
+            sx={{
+              flex: { lg: 1 },
+              minHeight: { lg: 0 },
+              overflowY: { lg: "auto" },
+              pr: { lg: 1 },
+            }}
+          >
+            {shown.map((g) => (
+              <Box key={g.id}>
+                <ListSubheader disableSticky sx={{ px: 0, bgcolor: "transparent", fontSize: 12 }}>
+                  {g.title}
+                </ListSubheader>
+                <List dense disablePadding>
+                  {g.endpoints.map((e) => (
+                    <ListItemButton
+                      key={epKey(e)}
+                      selected={selectedKey === epKey(e)}
+                      onClick={() => openEp(e)}
+                      title={`${e.method} ${e.path}`}
+                      sx={{ borderRadius: 1, py: 0.4 }}
+                    >
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={METHOD_COLOR[e.method] ?? "default"}
+                        label={e.method}
+                        sx={{ mr: 1, height: 20, fontSize: 10, minWidth: 46 }}
+                      />
+                      <ListItemText
+                        primary={titleOf(e)}
+                        slotProps={{ primary: { noWrap: true, fontSize: 12.5 } }}
+                      />
+                    </ListItemButton>
+                  ))}
+                </List>
+              </Box>
+            ))}
+            {shown.length === 0 && (
+              <Typography variant="body2" color="text.secondary" sx={{ px: 1, py: 2 }}>
+                没有匹配的端点。
+              </Typography>
+            )}
+          </Box>
         </Box>
 
-        <Box component="section" aria-label="接口正文" sx={{ minWidth: 0, pb: 6 }}>
+        <Box
+          component="section"
+          aria-label="接口正文"
+          sx={{
+            minWidth: 0,
+            minHeight: { lg: 0 },
+            overflowY: { lg: "auto" },
+            pr: { lg: 2 },
+            pb: 6,
+          }}
+        >
           {selected ? (
             <EndpointDetail
               groupTitle={selected.group.title}
@@ -261,10 +303,9 @@ export default function ApiDoc({ query }: { query: URLSearchParams }): React.Rea
             flexDirection: "column",
             gap: 2,
             minWidth: 0,
-            position: { xs: "static", lg: "sticky" },
-            top: 0,
-            maxHeight: { lg: "calc(100vh - 140px)" },
+            minHeight: { lg: 0 },
             overflowY: { lg: "auto" },
+            pr: { lg: 0.5 },
           }}
         >
           {selected ? (
@@ -363,6 +404,7 @@ function EndpointDetail({
   curlPre: React.RefObject<HTMLPreElement | null>;
   onCopy: (text: string, key: string, el?: HTMLElement | null) => Promise<void>;
 }): React.ReactElement {
+  const look = useGlassLook("card");
   const params = ep.params ?? [];
   const groups = IN_ORDER
     .map(([k, label]) => ({ label, params: params.filter((p) => p.in === k) }))
@@ -398,7 +440,7 @@ function EndpointDetail({
         </Box>
       ) : null}
 
-      <Paper variant="outlined" sx={{ p: 1.5, my: 2, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
+      <GlassPanel flat radius={12} look={look} sx={{ p: 1.5, my: 2, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
         <Chip size="small" variant="outlined" color={METHOD_COLOR[ep.method] ?? "default"} label={ep.method} />
         <Typography component="code" sx={{ flex: 1, minWidth: 160, fontFamily: "monospace", fontSize: 13.5, wordBreak: "break-all" }}>
           {ep.path}
@@ -411,7 +453,7 @@ function EndpointDetail({
         >
           {copied === `${epKey(ep)} 路径` ? "已复制" : "复制路径"}
         </Button>
-      </Paper>
+      </GlassPanel>
 
       <SectionTitle>参数</SectionTitle>
       {groups.length === 0 ? (
@@ -483,11 +525,12 @@ function CodeCard({
   preRef?: React.RefObject<HTMLPreElement | null>;
   badge?: string;
 }): React.ReactElement {
+  const look = useGlassLook("card");
   const localRef = useRef<HTMLPreElement | null>(null);
   const ref = preRef ?? localRef;
   const done = !!copyKey && copied === copyKey;
   return (
-    <Paper variant="outlined">
+    <GlassPanel flat radius={12} look={look}>
       <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 1.5, py: 0.75, borderBottom: 1, borderColor: "divider" }}>
         {badge && <Chip size="small" color="success" variant="outlined" label={badge} sx={{ height: 20 }} />}
         <Typography variant="caption" sx={{ flex: 1, fontWeight: 600 }}>{title}</Typography>
@@ -512,6 +555,6 @@ function CodeCard({
       >
         <Box component="code">{code}</Box>
       </Box>
-    </Paper>
+    </GlassPanel>
   );
 }

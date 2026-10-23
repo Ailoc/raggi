@@ -16,7 +16,8 @@ import SearchIcon from "@mui/icons-material/Search";
 
 import { api } from "../lib/api";
 import { SECTIONS } from "../lib/nav";
-import { go, href, queryString } from "../lib/router";
+import { go, href } from "../lib/router";
+import { setPendingSearch } from "../lib/searchintent";
 import { useStore } from "../lib/store";
 import type { DocumentList } from "../lib/types";
 
@@ -99,7 +100,12 @@ export default function CommandPalette(): React.ReactElement {
         label: `检索“${q.trim()}”`,
         hint: "全部知识库",
         icon: <SearchIcon fontSize="small" />,
-        run: () => go(href("search") + queryString({ q: q.trim() })),
+        run: () => {
+          const text = q.trim();
+          setPendingSearch(text);
+          window.dispatchEvent(new CustomEvent("raggi:search", { detail: { q: text } }));
+          go(href("search"));
+        },
       });
       group = "检索";
     }
@@ -110,7 +116,12 @@ export default function CommandPalette(): React.ReactElement {
         group: "去往",
         label: s.label,
         icon: <SearchIcon fontSize="small" />,
-        run: () => go(s.href),
+        run: () => {
+          if (s.key === "search") {
+            window.dispatchEvent(new CustomEvent("raggi:newSearch"));
+          }
+          go(s.href);
+        },
       })),
       6,
     );

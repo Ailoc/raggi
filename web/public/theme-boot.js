@@ -12,7 +12,7 @@
     document.documentElement.dataset.theme = t;
     document.documentElement.style.colorScheme = t;
     document.documentElement.style.background =
-      t === "light" ? "#fafafa" : "#121212";
+      t === "light" ? "#f4faf8" : "#0b1416";
   } catch (e) {
     /* 隐私模式下 localStorage 不可用，保持默认深色 */
   }

@@ -68,7 +68,7 @@
 - 分布式、分片、集群、消息队列中间件（Celery / Redis / RabbitMQ）、任务调度平台
 - GraphRAG / 知识图谱 / 实体关系抽取
 - 多模态检索、图片/表格的结构化存储（解析器输出的 Markdown 表格只作为文本分块）
-- 评估平台（RAGAS / A/B / 人工标注）、对话历史与多轮记忆
+- 评估平台（RAGAS / A/B / 人工标注）、长期记忆 / 跨会话记忆（当前只保留本会话最近 8 条历史，服务端上限 12 条）
 - Agent / 工具调用 / 工作流编排
 - 前端工程化（框架、状态管理、构建产物、SSR）
 - **多机并发写**：写锁是同机文件锁（flock），跨机不成立 ⇒ 多机共享一个 bucket
@@ -107,7 +107,7 @@
 │ ├ 文档列表/上传              │  零密钥时管理端点开放（引导例外，§9）                │
 │ ├ 分块编辑                   ├─ /api/search  /api/answer  /api/search/report      │
 │ ├ 独立分块                   ├─ /api/kbs  /api/documents  /api/chunks  /api/jobs  │
-│ ├ 检索页（参数分层）          ├─ /api/models  /api/embed  /api/keys               │
+│ ├ 检索/对话工作台            ├─ /api/models  /api/embed  /api/keys               │
 │ ├ 原文对照查看器              ├─ /api/health  /api/stats  /api/reconcile          │
 │ ├ 设置页（模型/健康）         ├─ /api/reindex  /api/reconcile                     │
 │ └ API 文档页（与 openapi    └─ StaticFiles  前端（签名 URL 供 iframe 取原文）      │
@@ -520,11 +520,19 @@ query
 - 响应含 `query`（回显）、`has_more`、`total_candidates`、`took_ms`、`degraded_reason`。
 - 报告导出强制 `highlight=off`（Markdown 里不需要 `<mark>` 标签）。
 
-### 7.3 前端参数可用性
+### 7.3 前端检索与对话工作台
 
-- **参数分层展示**：「范围与模式」平铺在查询框下方，调优参数（`nprobes`/`k_rrf`/`refine_factor`）收进折叠的「高级参数」——17 个控件全部平铺会让第一次使用的人被术语劝退。
-- **默认值可见**：数字输入框的 placeholder 取 `/api/models` 返回的 `retrieve` 生效值。空输入框既可能被读成 0 也可能被读成未设置，显示出来就不需要猜。
-- **生效过滤可见**：生效的过滤条件渲染成可单独移除的 chip；0 命中时明确提示"先看看是不是上面的过滤条件挡住了"。过滤条件跨会话保留在 URL 里，不显示的话用户完全不知道它们还在生效。
+页面围绕一个智能体输入台组织，而不是「参数面板 + 结果列表 + 第二套问答框」。
+
+- **空态只有一个输入台**：页面中央是输入框，检索/对话切换、知识库范围、召回模式与「条件」都在输入区内；不预先展示示例、历史或空结果。
+- **发送后输入台下移**：检索模式的结果占据上方滚动区，输入台固定在底部；对话模式左侧是消息流，右侧是本轮证据，输入台在左侧消息流底部。移动端用「对话 / 证据」标签切换，避免把两栏硬塞进窄屏。
+- **对话是真多轮**：每轮把最近 8 条 user/assistant 历史发给 `/api/answer/stream`（服务端上限 12 条），但检索仍以当前问题为准；提示词明确历史只用于理解指代，事实依据只能来自本轮上下文。回答流式可停止，停止会同时中止证据检索。
+- **每条回答与证据绑定**：对话的每轮独立保存回答、引用和检索结果；点引用或「证据 N」切换到该轮，右侧就地展开片段、相邻上下文与按需全文。引用不在证据列表时明确提示，不做静默失败。
+- **参数仍然分层**：输入台直接放范围/召回；完整 17 项条件在右侧抽屉。抽屉改动先进入草稿，显示未应用计数；应用后写入本地参数并重新检索（对话模式则从下一条消息生效）。
+- **查询与参数都不写 URL**：进入/刷新检索页永远是空态输入台，不会复现上一次结果；代价是查询链接不能分享。顶栏「检索」「新检索」会清空当前查询；命令面板发起检索通过 `raggi:search` 事件/`searchintent` 交接，不再用 `?q=`。
+- **对话历史**：按轮次保存在本机 sessionStorage（最多 10 轮，生成中的轮次不落盘），不跨浏览器会话；刷新/切页后默认回到空态检索模式，切到对话可恢复最近会话；输入台的「新对话」会清空历史。
+- **证据流可键盘操作**：结果按相关性编号排列，`↑`/`↓` 切换、`Enter` 展开、`Esc` 收起；展开后按「命中片段 → 相邻上下文 → 按需读取全文」渐进呈现。
+- **默认值可见**：抽屉数字输入的 placeholder 取 `/api/models` 返回的 `retrieve` 生效值，避免把「留空」误读成 0。
 
 ---
 
@@ -688,12 +696,13 @@ npm run dev       # 开发用 Vite dev server（独立端口）
 ```
 
 - **仓库内只有源码**：`web/dist/` 已 gitignore；产物缺失或过期会在启动时记录日志（`_check_web_build()`），`tests/test_frontend_wiring.py` 亦会拦截。
-- **主题**：`theme.ts` 的 `createTheme` 只覆盖三件事——中文字体回退、禁用态字色、Paper 分层色；其余吃 MUI 默认（默认值就是设计规范）。`CssBaseline` 负责 `html/body/#root` 满高、body 不滚、`.sr-only`、滚动条与跳转链接。**没有自定义 CSS 层**：`main.ts`、`tokens.css`、`app.css` 等 Svelte 时代的样式已随旧栈删除。
+- **主题**：`theme.ts` 的 `createTheme` 只覆盖三件事——中文字体回退、禁用态字色、Paper 分层色；其余吃 MUI 默认（默认值就是设计规范）。`CssBaseline` 负责 `html/body/#root` 满高、body 不滚、`.sr-only`、滚动条与跳转链接。**除玻璃材质外没有自定义 CSS 层**：`main.ts`、`tokens.css`、`app.css` 等 Svelte 时代的样式已随旧栈删除；唯一的手写 CSS 是 `ui/glass.css`（理由见 §11.3）。
 - **入口**：`main.tsx` 挂载 `ThemeProvider`（按 `data-theme` 构造深浅两套主题）、`CssBaseline`、`App`、`DialogHost`；`index.html` 在首帧前从 localStorage / `prefers-color-scheme` 决定主题，避免浅色用户先看到一帧深色。
 - **路由**是 hash 路由；`lib/router.ts` 用**模式表 + 命名参数**解析。旧地址 `#/kb/{id}` / `#/kb/{id}/standalone` 在读路由时 `location.replace` 成新路径；裸 `#/search` 会恢复 `sessionStorage` 里最后一次有查询词的检索——两件都放在 `readRoute()`（每条 hashchange 的收口），不是只放在 `go()`，因为导航项是 `<a href>`，点击不经过 `go()`。
 - **状态**：`lib/store.ts` 的模块级 store + `useSyncExternalStore`（kbs 带并发去重与世代号、busy、theme、crumbs、队列轮询含 poke）。对话框与 toast 也是模块级（Promise 化的 `confirmDialog` / `formDialog`，`toast()`），因为调用点遍布 `lib` 与视图、没有组件上下文。
 - **导航**：`lib/nav.ts` 的 `SECTIONS` 是唯一事实来源；顶栏用 MUI `Tabs` + `Tab component="a" href=…`（中键新开 / 复制链接 / 状态栏预览都保留）。面包屑在顶栏第二行，由视图 `setCrumbs()` 写入。知识库与文档路由下渲染工作区标签条（`ui/WorkspaceTabs.tsx`，同样是链接）。
-- **布局**：AppBar（品牌 + 分段导航 + 命令面板 + 队列 chip + 主题切换）+ 可选面包屑条 + `main#main` 单列滚动区。`html/body/#root` 100% 高，`main` `flex:1; min-height:0; overflow:auto`；不存在侧栏（三代上下文栏/ dock 都已退役）。
+- **布局**：玻璃顶栏（品牌 + 分段导航 + 队列 chip + 主题切换）+ 可选面包屑条 + `main#main` 单列滚动区。`html/body/#root` 100% 高，`main` `flex:1; min-height:0; overflow:auto`；不存在侧栏（三代上下文栏/ dock 都已退役）。
+- **顶栏在滚动区里面**（`position: sticky`）：内容从玻璃底下滑过去，玻璃才有东西可糊。放在 `main` 外面的话，底下永远是一片空的背景色，玻璃就退化成一条半透明的色带。
 
 ### 11.1 视图
 
@@ -705,7 +714,7 @@ npm run dev       # 开发用 Vite dev server（独立端口）
 | `#/kb/{id}/doc/{id}` | 文档工作台：**分块表为主 + 原文按需展开**（`?src=1`，深链 `?chunk=` 自动展开并定位到所在页）；行内编辑/启停/删除、批量启停、新增分块、文档重命名/移动/方案覆盖/重解析/重切分；重解析与重切提交后由 `waitForJob` 盯到终态并自动刷新 |
 | `#/kb/{id}/settings` | 基本信息 / 分块方案 / 内容概览 / 危险操作。两个可编辑面板**各自判脏**、各自就地保存；方案表单拦住"取消勾选默认 + 大小留空"（后端把 `chunk_size=0` 解释成恢复默认） |
 | `#/jobs` | 任务列表：阶段/进度/耗时/错误、四类筛选（`status` 服务端过滤，`total` 是过滤后总数）、offset 分页、仅活跃任务时轮询、进行中可直接停止（文案转述服务端 outcome） |
-| `#/search` | 查询栏（`/` 聚焦）、参数草稿 + 「应用并检索」、「生效参数」chips、结果列表（显示返回条数与候选总数）+ 原文检视、流式问答面板（按 `features.answer` 禁用入口） |
+| `#/search` | 智能体工作台：空态居中输入台（检索/对话、范围、召回、条件）→ 检索模式结果在上/输入台沉底；对话模式左侧多轮消息流、右侧本轮证据；移动端对话/证据标签切换；引用与「证据 N」联动展开。**查询与参数不写 URL**：进入永远是空态 |
 | `#/settings/models` | 模型设置：三张卡片（provider/model/base_url/api_key/dim），每类独立测试并给出结论；保存并热切换；维度变更二次确认；脏状态可见、可放弃 |
 | `#/settings/keys` | 访问密钥：签发 / 一次性明文 / 状态 / 吊销 + 本机凭据 |
 | `#/settings/health` | 健康：键值状态、索引状态、重建索引 / 修复计数、原始 JSON 折叠；「检查没跑成」如实显示为未知 |
@@ -720,7 +729,7 @@ npm run dev       # 开发用 Vite dev server（独立端口）
 - **多选口径只有一份**：`lib/selection.ts` 的 `usePicks()`（`all/some/setAll/toggle/count`），文档列表、全库分块、文档工作台共用；视图不再各写一遍全选/半选。
 - **对话框正文是纯文本**：`confirmDialog({ body })` 不做 Markdown 渲染；正文里不写 `**粗体**`（星号会原样显示）。破坏性操作量化影响（"删除 N 篇文档 / M 个分块"），必要时要求输入名称；**禁止原生 `confirm()/alert()`**。
 - **`wait=false` 提交的任务必须有订阅者**：重解析 / 重切 / 入库都返回 `job_id`，提交方用 `waitForJob(jobId, onTick, signal)` 盯到终态再刷新；组件卸载或对话框关闭时 `abort()`，否则循环会在后台空转到超时。文档列表在最后一个活跃任务结束时还会再取一次列表，避免停在任务结束前那一帧。
-- **URL 只描述"已生效"的检索参数**：控件改动进 `draft`，点「应用并检索」才经 `searchUrl()` 写 URL 并触发检索；有未应用项时按钮上可见计数，并提供「丢弃修改」。结果条读已生效值，不读暂存区。
+- **检索状态是本地 state**：完整条件抽屉里的改动进 `draft`，点「应用筛选」才写入本地 `applied` 并触发检索；有未应用项时抽屉标题显示计数，并提供「撤销修改」。结果条读已生效值，不读暂存区。查询与参数不再写 URL（2026-10-22 产品决策）：进入检索页永远空态，顶栏「检索」与「新检索」清空当前查询。
 - **知识库的"自定义 vs 默认"按后端口径**：两级模型下每个库都持有具体数值，`plan.own.custom` 恒为真；前端用 `isCustomPlan(own, global)`（数值 + 策略，容差 0.05），文案写「与系统默认一致」而不是「继承系统默认」——勾选保存只是把当前默认抄进本库。
 - **保存只更新自己那半张表**：保存基本信息不整页 `load()`（会抹掉方案面板未提交的编辑）；保存方案只重取 `/plan`，不前端重算 `effective`（含 `overlap_chars` / `source`）。
 - **知识库设置方案校验在 PUT 之前**：`64–8192` / `0–50%`；留空在"自定义"模式下必须被拦住，否则会被后端解释成恢复默认。
@@ -746,6 +755,72 @@ npm run dev       # 开发用 Vite dev server（独立端口）
 “物化系统默认”，启动迁移与 PUT/plan 都会立即物化（策略一起）。文档方案的空值才是
 “继承知识库”。后端 `is_custom_plan()` 与前端 `isCustomPlan()` 用同一把尺（容差 0.05）。
 - **Python 模块不会热重载**：后端改动必须重启服务；前端改完必须 `npm run build`（或跑 dev server），否则同样会看到旧界面。
+
+### 11.3 液态玻璃材质
+
+知识库卡片、检索输入台与顶栏用**液态玻璃**呈现。材质来自
+[moekoelueker/open-glass-ui](https://github.com/moekoelueker/open-glass-ui)：
+CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件。
+
+- **为什么不用 WebGPU 那套**：曾试过 [Glass-HQ/liquid-glass](https://github.com/Glass-HQ/liquid-glass)
+  的真折射——它的折射场要由 vgpu/WGSL 渲染成位移图，再喂给 SVG 的
+  `feDisplacementMap`。没有 WebGPU 就没有位移图，库里
+  `dom/index.ts` 会把没有贴图的玻璃面**整个从绘制列表剔除**（一点玻璃都
+  不画），而且贴图就绪前玻璃面是 `visibility:hidden`，卡片会直接消失。
+  桌面浏览器大多有 WebGPU，**Linux 至今仍是缺口**——本地部署工具不能
+  把一半用户排除在外。open-glass-ui 的默认渲染器是纯 CSS
+  （`backdrop-filter` + 方向高光 + 边缘透镜），哪里都能跑。
+- **渲染器锁 `auto`**：`renderer="auto"` 解析成纯 CSS，不会偷偷升级到
+  SVG/WebGL（库的原话是 "never silently escalates"）。真折射是可选的，
+  但浏览器差异大，而且这里全是文字密集的面板，CSS 已经够用。
+- **材质是内联样式**：库把填充、模糊、方向高光、边缘透镜、投影算成
+  一串 CSS 自定义属性挂在元素上（`--ogui-material-*`），不是样式表里的
+  类。它的样式表用 `:where()`（特异性 0），MUI 的 Emotion class 压得住
+  它；反过来要改布局就用自己的 class，不去动材质。
+- **主题必须对齐**（`web/src/ui/glass.tsx` 的 `GlassProvider`）：
+  玻璃系统有自己的明暗两套 token，`appearance` 跟着应用主题走；主题边界
+  会渲染一个 div，`height:100%` 让它不接管布局（壳层的高度链不能多一层）。
+- **艺术指导用 `look`**：逐个表面调模糊、色调、饱和度、亮度、边缘、
+  高光角度、边缘透镜、投影。**明暗两套**（`glassLook()`）：深色下材质把背景
+  压到 0.56 亮度，玻璃里的字才读得出来，放行一部分亮度底下的极光才透得出
+  颜色；浅色则相反，见下。
+- **浅色必须把 brightness 压到 1 以下**：材质在浅色下的基准是
+  `brightness(1.12)`，而应用的白底是 `#fafafa`（250/250/250）——1.12 乘上去
+  三个通道全部越过 255 被**截断**，玻璃里透出来的背景变成纯白。实测：卡片
+  内部像素 (255,255,255)，而它背后的页面是 (194,210,224)。玻璃把颜色全
+  吃掉了，卡片于是塌成一张白卡片，看上去跟普通界面毫无区别。所以浅色的
+  `brightness` 取 0.78（有效值 0.87），同时底色本身要够饱和——接近白的底色
+  一被提亮就截断。
+- **玻璃底下必须有光**：纯色页面折射不出任何质感。`GlassBackdrop` 给了柔光色块
+  加一层点阵（点阵边缘被弯折时玻璃感才立得住）。关键在**光斑要比玻璃面小**
+  （几百像素级）：一块玻璃横跨一道明显的明暗渐变，边缘的高光才有东西可折射；
+  光斑比玻璃面大，每张卡里就只剩一小段几乎不变的色，糊出来还是一块平色板。
+- **径向与线性渐变各管一段**：径向光斑能做出"一团光"，但亮核贴近容器边缘时
+  会被圆角切出硬边；线性渐变跨过整个容器、不会被切，却只能做方向性明暗。
+  页面底色用「线性大 wash + 几个小径向光斑」；矮胖的输入台（780×115）只用
+  线性渐变——径向光斑在那么矮的盒子里必然被切。
+- **背景层与玻璃面共用圆角**：背景层是玻璃面的**兄弟节点**（不是子节点），
+  玻璃面的圆角裁不到它。不给同样的圆角，四个角上就会漏出方形的色块，
+  浅色主题下尤其明显。
+- **环境底色全应用共用一片**（`GlassBackdrop` 的 `shell` 形态）：固定在视口
+  最底层，顶栏与内容区共用同一片光，两者才接得上。**z-index 必须是 0 而
+  不是 -1**：body 有不透明底色，而 body 的背景属于常规流内容，画在负层级
+  之后——负层级的固定层会被它整个盖住。
+- **顶栏的材质要"薄"**：内容从它底下滑过去时必须看得见糊掉的形状，填充
+  太实（opacity 接近 1）就退化成一条不透明的色带，玻璃感全无。
+- **聚焦不用描边**：玻璃面的聚焦由**材质自己**表达——边缘变亮、面板抬起
+  （调 `--ogui-glass-rim/lensing/highlight/opacity`）。在玻璃外面画一圈线
+  既"贴纸"，又会盖住玻璃自己那条受光边；画一圈彩色柔光同样落了下乘，
+  焦点不该给界面加一个色。输入框的焦点提示是文本光标（MUI 把输入元素的
+  `outline` 归零了，光标就是提示）。
+  注意材质把这些系数以**内联自定义属性**写在元素上，样式表要盖过内联值
+  必须带 `!important`。
+- **卡片的悬停描边**：这条是保留的（玻璃面本身没有"悬停"状态），颜色由
+  主题边界下发的 `--lg-hover-ring` 决定。**变量必须真的下发**：写成
+  `var(--lg-hover-ring, <兜底色>)` 时，变量一缺失就用兜底色——深色下是一条
+  几乎看不见的暗环。
+- **无障碍是库负责的**：`prefers-reduced-transparency`、`forced-colors`、
+  `prefers-reduced-motion` 都是设计好的状态，不用再手写一份。
 
 ## 12. 性能设计
 
@@ -848,7 +923,8 @@ Raggi/
 │  ├─ src/                      # 前端源码（唯一需编辑处，React + MUI）
 │  │  ├─ main.tsx  App.tsx  theme.ts
 │  │  ├─ views/                 # 路由级视图（KbList/KbDocs/KbChunks/DocView/KbSettings/Search/Settings/ApiDoc/Jobs）
-│  │  ├─ ui/                    # AnswerPanel · CommandPalette · KeysPanel · DataPanel · WorkspaceTabs · toast
+│  │  ├─ ui/                    # SearchComposer · SearchFilters · EvidenceList · ChatThread
+│  │  │                         #   CommandPalette · KeysPanel · DataPanel · WorkspaceTabs · toast
 │  │  ├─ lib/                   # api · router · store · dialog · ops · selection · dom · types
 │  │  │                         #   jobs · jobcancel · searchparams · source · format · nav · sse
 │  │  ├─ data/apidoc.ts         # API 文档数据
@@ -888,22 +964,23 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 ## 15. 测试与验收
 
-当前 **625 个测试通过**（另加 6 条 Playwright E2E；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑；含 perf 共 626 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
+当前 **628 个测试通过**（另加 7 条 Playwright E2E；另有 1 条延迟门槛带 `perf` 标记，由 `addopts = ["-m", "not perf"]` 排除在默认套件外，手动 `pytest -m perf` 跑；含 perf 共 629 条）。计数链与每轮加减什么在 [ARCH-AUDIT §0](./ARCH-AUDIT-2026-10-06.md)。
 > 最近一次全量架构审计：[ARCH-AUDIT-2026-10-06.md](./ARCH-AUDIT-2026-10-06.md)
 > ——四个严重缺陷（都属「默认路径上静默出错」这一类）在其中列了现象/证据/影响/建议，
 > 并已修；尚未处理的结构性债按 A/M/C/P 编号排了优先级。
 
 - **默认套件的边界**：`addopts = ["-m", "not perf"]` 把绝对延迟门槛关在默认套件外。此前只声明了 `markers = [...]`——那只是允许这个标记名，**不会**排除它，于是 `test_latency_budgets`（断言 `p50 < 150ms`）一直每天在默认套件里跑，而它自己的 docstring 第一行写着「只在 `pytest -m perf` 下跑」。注释与行为现在由 addopts 对齐；两条命令都验过（默认 547 passed / 1 deselected；`-m perf` 单跑通过）。
 - **隔离**：`tests/conftest.py` 把 `RAG_DATA_DIR` 指向临时目录。必须如此——`Settings()` 会读 `{data_dir}/config.toml`，测试若不隔离就会读到开发机上的生产配置（实测：本地开启 `features.answer` 后，断言"默认关闭"的测试立刻失败）。
-- **静态守卫**（`test_frontend_wiring.py`，54 条，全部针对 React `.tsx/.ts`）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、加载三态、分页后端 total、多选单实现、异步任务有人等、设置分节判脏、API 文档 URL 同源、无原始 HTML 注入。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
+- **静态守卫**（`test_frontend_wiring.py`，57 条，全部针对 React `.tsx/.ts`）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、加载三态、分页后端 total、多选单实现、异步任务有人等、设置分节判脏、API 文档 URL 同源、无原始 HTML 注入。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
   > import 可解析与 DOM id 存在由 TypeScript / Vite 构建接管，不重复测；Svelte 时代的守卫已全部翻译到 React（2026-10-10），未保留 skip。
 - **浏览器 E2E**（`e2e/app.spec.ts`，`npm run test:e2e`）：临时数据目录 + 桩 embedding 起独立实例，
-  覆盖首页→库→文档、原文按需展开与 `?chunk=` 深链、检索参数草稿与应用、API 文档过滤/选中、主题持久化，
+  覆盖首页→库→文档、原文按需展开与 `?chunk=` 深链、检索空态居中输入/发送后下沉/条件草稿与应用、
+  对话两栏布局/多轮历史/引用跳回证据（SSE 用拦截桩，不调用真实 LLM）、API 文档过滤/选中、主题持久化，
   以及 **CSP 下 Emotion 样式带 nonce 且实际生效**；失败保留 trace/screenshot。需要系统 Chrome（`PW_CHANNEL` 可换）。
-- **交互回归**（`test_architecture.py` / `test_doc_viewer.py`）：服务端分页每页 20 行（不再是窗口化长列表）、分块编辑/删除/批量启停、独立分块范围（`only_standalone=true`）、知识库/文档两级方案编辑、文档重命名、MUI 对话框挂载、异步重解析/重切分入口、流式问答前端（`lib/sse.ts` 四事件齐全 + `AnswerPanel` 真中断）、取消入口（`lib/jobcancel.ts`，文档列表与入库面板共用）、批量操作确实走批量端点。
+- **交互回归**（`test_architecture.py` / `test_doc_viewer.py`）：服务端分页每页 20 行（不再是窗口化长列表）、分块编辑/删除/批量启停、独立分块范围（`only_standalone=true`）、知识库/文档两级方案编辑、文档重命名、MUI 对话框挂载、异步重解析/重切分入口、流式对话前端（`lib/sse.ts` 四事件齐全 + `Search.tsx` 真中断 + 多轮 history）、取消入口（`lib/jobcancel.ts`，文档列表与入库面板共用）、批量操作确实走批量端点。
   > 知识库/文档/分块三组动作集中在 `lib/ops.tsx`——列表页与详情页共用同一套文案与队列语义，测试断言指向模块而不是某个视图。
 - **契约守卫**（`test_openapi_contract.py`，14 项）：每个 /api 操作的 200 响应都有 schema、非 JSON 端点（字节流 / Markdown 报告 / SSE 事件流）声明媒体类型、安全方案存在且每个操作都声明 security、tag 分组齐全且只用声明过的 tag、错误契约（401/403/404/503/422）出现在对应操作上、`global` 字段别名不漂移、契约里只有 `/api/v1` 而旧前缀行为一致且同样受鉴权；另有两项用真实请求确认错误体就是 `{"detail": str}`。
-- **批量与流式**（`test_batch_ops.py` 11 项 / `test_answer_stream.py` 7 项）：批量启停的原子性与去重（不做部分成功）、批量删除级联分块且不留孤儿、`skipped` 如实回报；SSE 事件顺序 **sources → delta\* → done**（引用必须先于正文）、与非流式共享同一套引用、列表形态 content 的归一化、空结果/空输出/error 三种边界都给出明确事件而非断连。
+- **批量与流式**（`test_batch_ops.py` 11 项 / `test_answer_stream.py` 9 项）：批量启停的原子性与去重（不做部分成功）、批量删除级联分块且不留孤儿、`skipped` 如实回报；SSE 事件顺序 **sources → delta\* → done**（引用必须先于正文）、与非流式共享同一套引用、列表形态 content 的归一化、空结果/空输出/error 三种边界都给出明确事件而非断连。
 - **任务取消与归属**（`test_job_cancel.py` 11 项）：排队中是真取消（撤销后不产出文档）、运行中是协作式取消（阶段边界退出、旧分块完好、文档不被误标 failed）、已终态幂等、取消后不再出现在活动任务列表、任务行记录 kb_id 且列表/单条都带 terminal、jobs 表补列幂等。
 - **写入安全**（`test_concurrency.py` 8 项 / `test_idempotency.py` 13 项）：基于旧版本的分块编辑返回 409 且**不覆盖**已提交的内容，重读新版本后可正常提交，不带版本时沿用「最后写入者胜」以兼容旧客户端；仓储层返回是否真的更新了行。幂等键同键重试回放首次结果（带 `idempotent_replay` 标记）、不同键互不干扰、键按端点作用域、失败不缓存、条目按 TTL 与上限回收；上传端点的幂等检查发生在**读文件之前**，重试不会把大文件再读一遍。
 - **可运维性**（`test_rate_limit.py` 21 项）：请求 ID 贯穿每个响应（含错误路径与鉴权失败），上游传入的 ID 会被沿用、不可信值被替换；限流默认关闭，写操作限流而检索与幂等入库豁免，429 带 Retry-After，按调用方分桶、匀速恢复、长期不用的桶会被回收。

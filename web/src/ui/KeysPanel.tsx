@@ -3,7 +3,7 @@ import Alert from "@mui/material/Alert";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "./glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
@@ -31,6 +31,7 @@ import { toast } from "./toast";
  * 自己刚签发的密钥。
  */
 export default function KeysPanel(): React.ReactElement {
+  const look = useGlassLook("card");
   const [list, setList] = useState<ApiKeyList | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -162,7 +163,7 @@ export default function KeysPanel(): React.ReactElement {
 
   return (
     <Stack spacing={2}>
-      <Paper variant="outlined" sx={{ p: 3 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>API 密钥</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           对外调用本服务时使用的凭据，形如 <code>rg_xxxxxxxx…</code>。
@@ -250,9 +251,9 @@ export default function KeysPanel(): React.ReactElement {
 
         <Divider sx={{ my: 2 }} />
         <Button variant="contained" onClick={() => void createKey()}>签发新密钥</Button>
-      </Paper>
+      </GlassPanel>
 
-      <Paper variant="outlined" sx={{ p: 3 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>本机凭据</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           浏览器调用本服务时携带的凭据，保存在本机 localStorage。
@@ -274,7 +275,7 @@ export default function KeysPanel(): React.ReactElement {
           <Button onClick={clearLocal}>清除</Button>
           <Button variant="contained" onClick={saveLocal}>保存并重试</Button>
         </Stack>
-      </Paper>
+      </GlassPanel>
     </Stack>
   );
 }

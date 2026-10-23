@@ -3,7 +3,6 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
-import Paper from "@mui/material/Paper";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -11,6 +10,7 @@ import Typography from "@mui/material/Typography";
 import { api } from "../lib/api";
 import { fmtBytes } from "../lib/format";
 import type { Stats } from "../lib/types";
+import { GlassPanel, useGlassLook } from "./glass";
 
 /**
  * 存储：容量、目录占用、磁盘剩余与已建索引。
@@ -20,6 +20,7 @@ import type { Stats } from "../lib/types";
  * 只剩只读统计。
  */
 export default function DataPanel(): React.ReactElement {
+  const look = useGlassLook("card");
   const [stats, setStats] = useState<Stats | null>(null);
   const [phase, setPhase] = useState<"initial" | "ready" | "failed">("initial");
   const [error, setError] = useState("");
@@ -45,7 +46,7 @@ export default function DataPanel(): React.ReactElement {
   useEffect(() => { void load(); }, [load]);
 
   return (
-    <Paper variant="outlined" sx={{ p: 3 }}>
+    <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
         <Box sx={{ flex: 1 }}>
           <Typography variant="h6" sx={{ fontSize: 16 }}>容量</Typography>
@@ -114,6 +115,6 @@ export default function DataPanel(): React.ReactElement {
           )}
         </>
       )}
-    </Paper>
+    </GlassPanel>
   );
 }

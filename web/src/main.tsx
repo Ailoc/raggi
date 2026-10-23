@@ -9,6 +9,7 @@ import App from "./App";
 import { DialogHost } from "./lib/dialog";
 import { buildTheme } from "./theme";
 import { useStore } from "./lib/store";
+import { GlassProvider } from "./ui/glass";
 
 /**
  * 入口：挂载 React 根，主题随 `data-theme` 切换。
@@ -39,8 +40,11 @@ function Root(): React.ReactElement {
     <CacheProvider value={emotionCache}>
       <ThemeProvider theme={muiTheme}>
         <CssBaseline />
-        <App />
-        <DialogHost />
+        {/* 玻璃系统的主题边界：明暗两套材质 token 跟着应用主题走 */}
+        <GlassProvider>
+          <App />
+          <DialogHost />
+        </GlassProvider>
       </ThemeProvider>
     </CacheProvider>
   );

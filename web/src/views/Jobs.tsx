@@ -8,7 +8,7 @@ import Divider from "@mui/material/Divider";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import LinearProgress from "@mui/material/LinearProgress";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
@@ -27,6 +27,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { fmtSpan, fmtTimeShort } from "../lib/format";
 import { setCrumbs, track, useQueue } from "../lib/store";
 import { cancelJob } from "../lib/jobcancel";
@@ -51,6 +52,7 @@ const STAGE_COLOR: Record<string, "default" | "info" | "success" | "error" | "wa
  * 是拿本机数据库的读放大换心理安慰（这条判断在 Svelte 版就写下了）。
  */
 export default function Jobs(): React.ReactElement {
+  const look = useGlassLook("card");
   const queue = useQueue();
   const [items, setItems] = useState<Job[]>([]);
   const [total, setTotal] = useState(0);
@@ -147,7 +149,7 @@ export default function Jobs(): React.ReactElement {
   }
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="h5" sx={{ fontWeight: 500, flex: 1 }}>
           任务
@@ -198,7 +200,7 @@ export default function Jobs(): React.ReactElement {
                 : "还没有任务记录。"}
             </Alert>
           ) : (
-            <Paper variant="outlined">
+            <GlassPanel radius={12} look={look}>
               <TableContainer>
                 <Table size="small" aria-label="任务列表">
                   <TableHead>
@@ -297,7 +299,7 @@ export default function Jobs(): React.ReactElement {
                 labelDisplayedRows={({ from, to, count }) => `${from}–${to} / 共 ${count} 个任务`}
                 onPageChange={(_e, p) => turnPage(p)}
               />
-            </Paper>
+            </GlassPanel>
           )}
         </>
       )}

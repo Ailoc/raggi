@@ -180,12 +180,16 @@ export const GROUPS: Group[] = [
         notes: [
           "默认关闭（features.answer=false），未开启时返回 503。",
           "上下文取命中分块的**全文**（非 snippet），答案按 [n] 标注引用。",
+          "支持多轮历史：`history` 最多 12 条，只用于理解指代；事实仍来自本轮检索。",
           "会调用 LLM；未检索到内容时不调用模型，直接返回「（未检索到相关内容）」。",
         ],
         params: [
           { name: "q", in: "body", type: "string", required: true, desc: "问题" },
-          { name: "top_k", in: "body", type: "int|null", desc: "召回条数" },
+          { name: "top_k", in: "body", type: "int|null", desc: "召回条数（上限 50）" },
+          { name: "mode", in: "body", type: "string|null", desc: "hybrid / vector / fts" },
           { name: "kb_id", in: "body", type: "string|null", desc: "限定知识库" },
+          { name: "history", in: "body", type: "ChatTurn[]", desc: "最近对话 [{role, content}]，最多 12 条" },
+          { name: "filters", in: "body", type: "object", desc: "与检索端点相同的过滤条件" },
         ],
         example: { q: "逆变器的额定电压是多少？", top_k: 5 },
         fields: [
@@ -208,12 +212,15 @@ export const GROUPS: Group[] = [
           "出错时推 `error` 事件（{message, hint}）而不是断连：" +
             "断连会让前端只剩一个永久的 loading，用户无从判断发生了什么。",
           "响应头带 X-Accel-Buffering: no——反向代理下不关缓冲，事件会被攒着一起发。",
-          "参数与非流式端点完全一致。",
+          "参数与非流式端点完全一致；多轮对话用 history 传最近几轮。",
         ],
         params: [
           { name: "q", in: "body", type: "string", required: true, desc: "问题" },
-          { name: "top_k", in: "body", type: "int|null", desc: "召回条数" },
+          { name: "top_k", in: "body", type: "int|null", desc: "召回条数（上限 50）" },
+          { name: "mode", in: "body", type: "string|null", desc: "hybrid / vector / fts" },
           { name: "kb_id", in: "body", type: "string|null", desc: "限定知识库" },
+          { name: "history", in: "body", type: "ChatTurn[]", desc: "最近对话 [{role, content}]，最多 12 条" },
+          { name: "filters", in: "body", type: "object", desc: "与检索端点相同的过滤条件" },
         ],
         example: { q: "逆变器的额定电压是多少？", top_k: 5 },
         raw: "event: sources\ndata: {\"citations\": [{\"index\": 1, \"chunk_id\": \"c1\", \"title\": \"逆变器技术手册\", \"score\": 0.61}]}\n\nevent: delta\ndata: {\"text\": \"变频器额定电压为 \"}\n\nevent: delta\ndata: {\"text\": \"380V，允许波动 ±10%。[1]\"}\n\nevent: done\ndata: {\"took_ms\": 1180.4, \"mode\": \"hybrid\", \"degraded_reason\": null}\n",

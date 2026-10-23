@@ -82,46 +82,13 @@ function legacyRedirect(route: Route): string | null {
   return null;
 }
 
-/**
- * 记住最后一次「有内容」的检索。
- *
- * 顶栏的「检索」是 `<a href="#/search">`：点击不经过 go()，若不留记忆，
- * 用户刚调好的关键词与过滤条件会被清空，而他以为只是切了个页面。
- * 存在 sessionStorage 而不是内存：刷新后仍能回到上次检索。
- */
-const LAST_SEARCH = "raggi.lastSearch";
-
-export function rememberSearch(hash: string): void {
-  try { sessionStorage.setItem(LAST_SEARCH, hash); } catch { /* 隐私模式 */ }
-}
-
-export function lastSearch(): string {
-  try { return sessionStorage.getItem(LAST_SEARCH) ?? ""; } catch { return ""; }
-}
-
 export function readRoute(): Route {
-  const raw = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
-  // 裸 #/search 且上次有检索 → 换成那次检索再解析。必须放在这条
-  // hashchange 的收口上：`<a href>` 的点击不经过 go()。
-  if (raw === "/search" || raw === "/search?") {
-    const prev = lastSearch();
-    if (prev && prev !== location.hash) {
-      // replace 不留历史：否则后退一格又被恢复成同一次检索，退不出去
-      location.replace(prev);
-      return parseHash(prev);
-    }
-  }
-
   const route = parseHash(location.hash);
   const redirect = legacyRedirect(route);
   if (redirect) {
     // replace 不留历史：用户按后退不该被弹回旧地址再转一次
     location.replace("#" + redirect.replace(/^#/, ""));
     return parseHash(redirect);
-  }
-  // URL 是检索的唯一事实来源；每次经过这里都记下最近一次有查询词的检索。
-  if (route.name === "search" && (route.query.get("q") ?? "").trim()) {
-    rememberSearch(location.hash);
   }
   return route;
 }

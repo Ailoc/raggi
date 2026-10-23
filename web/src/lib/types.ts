@@ -241,6 +241,32 @@ export interface Citation {
   snippet: Snippet;
 }
 
+export interface AnswerHistoryTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export type ChatTurnStatus = "searching" | "streaming" | "done" | "error" | "stopped";
+
+/** 对话模式下的一轮问答：回答、引用与该轮证据放在一起，便于回看。 */
+export interface ChatTurn {
+  id: string;
+  question: string;
+  answer: string;
+  citations: Citation[];
+  hits: SearchHit[];
+  status: ChatTurnStatus;
+  /** 右侧证据请求是否仍在进行，避免回答先到时误报“没有证据” */
+  evidenceLoading?: boolean;
+  error?: string;
+  searchError?: string;
+  searchTookMs?: number;
+  tookMs?: number;
+  mode?: string;
+  scoreKind?: string;
+  degradedReason?: string | null;
+}
+
 export interface AnswerReq {
   q: string;
   top_k?: number | null;
@@ -248,6 +274,17 @@ export interface AnswerReq {
   kb_id?: string | null;
   window?: number | null;
   filters?: Record<string, unknown>;
+  /** 最近几轮对话，服务端会再做条数与长度上限 */
+  history?: AnswerHistoryTurn[];
+  score_threshold?: number | null;
+  group_by_doc?: boolean;
+  candidate_k?: number | null;
+  nprobes?: number | null;
+  refine_factor?: number | null;
+  k_rrf?: number | null;
+  rerank?: boolean | null;
+  snippet_chars?: number | null;
+  highlight?: boolean;
 }
 
 /** SSE 的 done 事件载荷（rag/retrieval/answer.py 的事件序列）。 */

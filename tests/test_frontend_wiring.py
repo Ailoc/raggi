@@ -293,12 +293,13 @@ def test_kb_card_actions_are_outside_the_card_link():
 def test_search_draft_cannot_diverge_from_results():
     """参数改动先进草稿，提交才写 URL——面板与结果集不能各说各话。"""
     view = read(VIEWS / "Search.tsx")
+    filters = read(UI / "SearchFilters.tsx")
     assert "const [draft, setDraft]" in view, "参数没有暂存区"
-    assert "应用并检索" in view and "丢弃修改" in view, "缺少应用/放弃入口"
-    assert "dirty" in view, "参数改动没有可见提示"
-    assert view.count("go(searchUrl(") >= 2, "提交入口没有统一走 searchUrl"
-    assert "withParam" not in read(LIB / "searchparams.ts"), \
-        "withParam 的旧路径会重新引入参数与结果脱节"
+    assert "应用筛选" in filters and "撤销修改" in filters, "缺少应用/撤销入口"
+    assert "dirty" in view and "dirty" in filters, "参数改动没有可见提示"
+    assert "setApplied(" in view, "应用动作没有写回本地参数"
+    assert "searchUrl" not in view and "withParam" not in read(LIB / "searchparams.ts"), \
+        "检索参数仍在写 URL"
     assert 'val("kb_id")' not in view, "结果元信息读了未生效的参数"
 
 
@@ -309,21 +310,16 @@ def test_export_goes_through_api():
     assert 'fetch("/api/search/report"' not in view, "导出仍在裸用 fetch"
 
 
-def test_last_search_restore_sits_on_the_hashchange_path():
-    """恢复上次检索必须写在每一条 hashchange 都经过的读路由里。
-
-    回归防护：导航项是 `<a href>`，点击不经过 go()；恢复逻辑写在 go()
-    里时对真实点击路径一直是死的。
-    """
+def test_bare_search_lands_on_empty_composer():
+    """裸 #/search 必须是空态输入台；上次查询只存在于用户显式打开链接时。"""
     router = read(LIB / "router.ts")
-    assert "rememberSearch" in router and "lastSearch()" in router
-    assert 'raw === "/search" || raw === "/search?"' in router, \
-        "未同时判断两种裸 #/search 形态"
-    assert "location.replace(prev)" in router, "恢复必须 replace，否则后退退不出去"
-    assert "location.hash = prev" not in router
+    assert "rememberSearch" not in router and "lastSearch" not in router, \
+        "路由层仍在恢复上次检索"
+    assert "location.replace(prev)" not in router
     view = read(VIEWS / "Search.tsx")
-    assert "rememberSearch(location.hash)" not in view, \
-        "恢复逻辑不该散落在视图里——路由收口点才是所有路径的必经之地"
+    assert "qFromUrl" not in view, "检索词仍在读 URL"
+    assert 'query.trim() !== ""' in view, "空态判断没有基于本地查询词"
+    assert "newSearch" in view and "raggi:newSearch" in view, "缺少回到空态的入口"
 
 
 def test_settings_subpages_have_one_entry_list():
@@ -363,6 +359,20 @@ def test_apidoc_copy_has_fallback_and_live_region():
     assert "已选中，按 Ctrl+C 复制" in page
     dom = read(LIB / "dom.ts")
     assert "selectNodeContents" in dom, "兜底实现里不再真的选中文本"
+
+
+def test_api_code_cards_are_flat_glass():
+    """API 文档的代码卡与路径条用平面玻璃，不带材质投影。
+
+    回归防护：库给每块玻璃挂了 `0 16px 48px -8px` 的大范围暗影。代码卡
+    上下紧挨着排，上一张的阴影会压到下一张的顶边，看起来像连成一片。
+    """
+    page = read(VIEWS / "ApiDoc.tsx")
+    assert page.count("<GlassPanel flat") >= 2, \
+        "代码卡 / 路径条又带上了材质投影"
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert ".lg-glass-flat" in css, "缺少平面玻璃变体"
+    assert "box-shadow: none !important" in css, "平面玻璃没有真正去掉投影"
 
 
 def test_amber_aliases_stay_retired():
@@ -519,12 +529,14 @@ def test_row_selection_lives_in_one_place():
 # ---- 壳层 / 命令面板 / 上传 --------------------------------------------
 
 def test_command_palette_wiring():
-    """命令面板：⌘K、跳转走 href/queryString、提交任务后 poke 队列。"""
+    """命令面板：⌘K、跳转走 href、检索意图经 searchintent 交接。"""
     app = read(SRC / "App.tsx")
     assert "raggi:palette" in app and "CommandPalette" in app, "壳层没有接入命令面板"
     assert '(e.key === "k" || e.key === "K")' in app, "⌘K 未注册"
     pal = read(UI / "CommandPalette.tsx")
-    assert "href(" in pal and "queryString(" in pal, "面板跳转没有走 router 的构造器"
+    assert "href(" in pal, "面板跳转没有走 router 的构造器"
+    assert "setPendingSearch(" in pal and "raggi:search" in pal, \
+        "面板发起检索没有走 searchintent（检索词不再写 URL）"
     assert 'href("kb", d.kb_id' in pal, "文档跳转缺 kb_id"
 
     docs = read(VIEWS / "KbDocs.tsx")
@@ -619,7 +631,7 @@ def test_chunk_pane_is_bounded_not_stretched():
     view = read(VIEWS / "DocView.tsx")
     assert "DataGrid" not in view, "重度表格又回来了（面板会被撑成一屏空白）"
     assert 'aria-label="分块列表"' in view and 'aria-label="原文"' in view
-    assert re.search(r'<Paper\s+variant="outlined"\s+aria-label="分块列表"', view)
+    assert re.search(r'<GlassPanel[^>]*aria-label="分块列表"', view)
     assert "height: \"100%\"" not in view.split('aria-label="分块列表"')[1][:400]
 
 
@@ -648,12 +660,11 @@ def test_no_raw_html_injection_of_server_data():
 
 def test_snippet_renders_marks_natively():
     """高亮必须是原生 <mark>，而不是拼 HTML 字符串。"""
-    search = read(VIEWS / "Search.tsx")
-    assert "<mark" in search, "检索片段未用 <mark> 渲染高亮"
-    assert "snippet.marks" in search, "未使用后端返回的高亮区间"
-    for name in ("Search.tsx", "AnswerPanel.tsx"):
-        path = VIEWS / name if name == "Search.tsx" else UI / name
-        assert "escapeHtml" not in read(path), f"{name} 仍在手工转义 snippet"
+    evidence = read(UI / "EvidenceList.tsx")
+    assert "<mark" in evidence, "检索片段未用 <mark> 渲染高亮"
+    assert "snippet.marks" in evidence, "未使用后端返回的高亮区间"
+    for path in (VIEWS / "Search.tsx", UI / "EvidenceList.tsx", UI / "ChatThread.tsx"):
+        assert "escapeHtml" not in read(path), f"{path.name} 仍在手工转义 snippet"
 
 
 def test_apidoc_inline_markup_is_safe_by_construction():
@@ -696,15 +707,15 @@ def test_document_detail_omits_unused_chunk_index():
     """文档详情不再传输前端用不到的分块索引（大文档会成倍放大响应体）。"""
     doc = read(VIEWS / "DocView.tsx")
     assert "include_chunks=false" in doc, "文档工作台仍在拉取未使用的分块索引"
-    search = read(VIEWS / "Search.tsx")
-    assert "include_chunks=false" in search, "原文检视仍在拉取未使用的分块索引"
+    evidence = read(UI / "EvidenceList.tsx")
+    assert "include_chunks=false" in evidence, "原文检视仍在拉取未使用的分块索引"
 
 
 def test_search_requests_are_cancellable_and_sequenced():
     """快速改参数/后退时，旧检索结果不能覆盖新结果。"""
     view = read(VIEWS / "Search.tsx")
     assert "AbortController" in view and "signal," in view, "检索请求不可取消"
-    assert "reqSeq.current" in view, "缺少请求序号，慢的旧响应仍可能覆盖新结果"
+    assert "searchSeq.current" in view, "缺少请求序号，慢的旧响应仍可能覆盖新结果"
     assert "ctrl.abort()" in view, "URL 变化时没有中止上一发请求"
 
 
@@ -724,15 +735,183 @@ def test_jobs_filter_and_pagination_are_server_side():
 
 
 def test_answer_entry_respects_feature_flag():
-    """问答按钮必须依据 /api/models 的 features.answer 禁用。"""
-    code = read(VIEWS / "Search.tsx")
-    assert "features?.answer" in code
-    assert "disabled={!answerEnabled}" in code
-    assert "features.answer=true" in code, "未启用时没有给出可行动说明"
+    """对话入口必须依据 /api/models 的 features.answer 禁用。"""
+    page = read(VIEWS / "Search.tsx")
+    composer = read(UI / "SearchComposer.tsx")
+    assert "features?.answer" in page
+    assert "disabled={!answerEnabled}" in composer
+    assert "features.answer=true" in composer, "未启用时没有给出可行动说明"
 
 
 def test_search_shows_candidate_total_not_just_page_size():
     """检索结果条要区分“显示条数”和“候选总数”，否则 8 条看起来像全部。"""
     code = read(VIEWS / "Search.tsx")
     assert "total_candidates" in code
-    assert "显示 {resp.results.length} 条" in code
+    assert "显示 {searchResp.results.length} 条" in code
+
+
+# ---- 液态玻璃 ------------------------------------------------------------
+
+def test_glass_material_does_not_require_webgpu():
+    """玻璃材质不得依赖 WebGPU。
+
+    回归防护：上一版用 liquid-glass 的真折射——折射场要由 vgpu/WGSL 渲染，
+    没有 WebGPU 的机器上库里一个玻璃面都不画（贴图就绪前还是
+    `visibility:hidden`，卡片会整个消失）。open-glass-ui 的默认渲染器是
+    纯 CSS，Linux/无 GPU 的机器上照样是玻璃。
+    """
+    assert "liquid-glass" not in PKG, "又引回了依赖 WebGPU 的 liquid-glass"
+    assert "vgpu" not in PKG, "又引回了 WebGPU 运行时"
+    engine = read(UI / "glass.tsx")
+    assert 'renderer="auto"' in engine, \
+        "玻璃渲染器没有锁定为 auto（auto 才是纯 CSS，且不会偷偷升级）"
+    assert "navigator.gpu" not in engine, "玻璃路径里还有 WebGPU 能力判定"
+
+
+def test_glass_theme_follows_the_app_theme():
+    """玻璃系统的明暗必须跟着应用主题走。
+
+    没有主题边界时库的 token 默认按深色算：浅色用户会拿到一块深色玻璃。
+    """
+    engine = read(UI / "glass.tsx")
+    assert "appearance: theme" in engine, "玻璃系统没有跟随应用主题"
+    main = read(SRC / "main.tsx")
+    assert "GlassProvider" in main, "入口没有挂载玻璃系统的主题边界"
+    assert re.search(r"style:\s*\{[^}]*height", engine), \
+        "玻璃系统的主题边界没有接管高度，壳层的高度链会多一层"
+
+
+def test_dialogs_menus_and_tooltips_use_glass():
+    """所有浮层都要有玻璃语言：对话框、菜单、下拉、Popover、Tooltip。"""
+    engine = read(UI / "glass.tsx")
+    theme = (SRC / "theme.ts").read_text(encoding="utf-8")
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert "GlassDialogPaper" in engine, "没有为 MUI Dialog 提供玻璃纸面"
+    assert "PaperComponent: GlassDialogPaper" in theme, \
+        "对话框没有全局换用玻璃纸面"
+    assert ".lg-dialog-paper" in css, "对话框纸面缺少玻璃材质的收尾样式"
+    for cls in (
+        ".MuiMenu-paper",
+        ".MuiPopover-paper",
+        ".MuiAutocomplete-paper",
+        ".MuiTooltip-tooltip",
+    ):
+        assert cls in css, f"{cls} 没有玻璃样式"
+
+
+def test_topbar_is_glass_and_has_no_search_entry():
+    """顶栏是玻璃面，且不再挂「搜索与跳转」按钮。
+
+    回归防护：顶栏从 AppBar 换成玻璃面后，入口按钮一度被顺手留下；
+    命令面板本身没删（⌘K 仍然可用），删掉的只是顶栏上那个按钮。
+    """
+    app = read(SRC / "App.tsx")
+    assert "<GlassPanel" in app, "顶栏不是玻璃面"
+    assert "搜索与跳转" not in app, "顶栏仍有「搜索与跳转」按钮"
+    assert "raggi:palette" in app, "⌘K 命令面板入口丢了"
+
+
+def test_glass_focus_state_does_not_draw_a_ring():
+    """玻璃面的聚焦不许画描边。
+
+    回归防护（两次返工）：
+    - 先是 `outline: 2px solid var(--lg-focus, currentColor)`——变量缺失，
+      退回正文**字色**，浅色下是一圈黑框（实测 outline-color
+      rgb(17,19,21)）；
+    - 换成主色后变成一圈蓝色线条，又不是想要的风格。
+    现在的做法是让**材质自己**反应（边缘变亮、面板抬起），不画描边、
+    不加颜色。输入框的焦点提示是文本光标（MUI 把输入元素的 outline
+    归零了，光标就是提示）。
+    """
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    rule = css[css.index(".lg-composer:focus-within"):]
+    rule = rule[:rule.index("}")]
+    assert "outline" not in rule, "玻璃面的聚焦又画上了描边"
+    assert "--ogui-glass-rim" in rule, "聚焦没有用材质系数表达"
+
+
+def test_glass_card_hover_ring_color_is_defined():
+    """卡片悬停描边的颜色必须真的下发。
+
+    回归防护：样式表里写 `var(--lg-hover-ring, <兜底色>)`，变量一旦缺失
+    就用兜底色——深色下是一条几乎看不见的暗环。
+    """
+    engine = read(UI / "glass.tsx")
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert '"--lg-hover-ring"' in engine, "悬停描边颜色变量没有下发到主题边界"
+    assert "var(--lg-hover-ring" in css, "悬停描边没有用主题下发的颜色变量"
+
+
+def test_light_glass_look_does_not_clip_the_backdrop_to_white():
+    """浅色玻璃的 brightness 必须小于 1。
+
+    回归防护：材质在浅色下的基准是 `brightness(1.12)`，而应用的白底是
+    `#fafafa`（250/250/250）——1.12 乘上去三个通道全部越过 255 被**截断**，
+    玻璃里透出来的背景变成纯白，卡片塌成一张白卡片（实测卡片内部像素
+    (255,255,255)，而它背后的页面是 (194,210,224)）。玻璃看上去跟普通
+    界面没有区别。
+    """
+    engine = read(UI / "glass.tsx")
+    m = re.search(r"const LIGHT_BRIGHTNESS = ([0-9.]+)", engine)
+    assert m, "浅色玻璃没有单独的亮度常量"
+    assert float(m.group(1)) < 1, \
+        f"浅色玻璃的 brightness={m.group(1)} 会把背景截断成纯白，玻璃就白做了"
+
+
+def test_composer_is_one_glass_surface_without_a_colored_backdrop():
+    """检索输入台只有一层玻璃，且不再自带局部彩色底。
+
+    回归防护：曾经在玻璃面板背后叠了一层 `GlassBackdrop variant="panel"`
+    （蓝紫渐变），输入框看起来像"自带背景色"，与页面其他玻璃面不一致；
+    而且兄弟背景层的圆角必须与面板成对维护。现在背景交给壳层统一环境光，
+    输入台只保留玻璃本身。
+    """
+    composer = read(UI / "SearchComposer.tsx")
+    assert "COMPOSER_RADIUS" in composer, "输入台的圆角常量丢了"
+    assert composer.count("radius={COMPOSER_RADIUS}") == 1, \
+        "输入台又铺了兄弟背景层（会带来色偏与圆角维护成本）"
+    assert "<GlassBackdrop" not in composer, "输入台又自带了一层局部底色"
+
+
+def test_cards_and_composer_go_through_the_glass_engine():
+    """知识库卡片与检索输入台必须走玻璃材质。
+
+    知识库卡片与检索输入台的环境底色都由壳层统一提供（`App.tsx` 的
+    shell 形态），页面自己不再铺局部背景层——两片光叠在一起，顶栏和
+    页面就接不上；输入台还会多出一块"自带背景色"的色偏。
+    """
+    kbs = read(VIEWS / "KbList.tsx")
+    assert "<GlassPanel" in kbs, "知识库卡片没有走玻璃材质"
+    assert "<Card " not in kbs, "知识库卡片又退回了普通 Paper 卡片"
+    composer = read(UI / "SearchComposer.tsx")
+    assert "<GlassPanel" in composer, "检索输入台没有走玻璃材质"
+    assert "<GlassBackdrop" not in composer, \
+        "检索输入台又铺了带颜色的局部底色：应只保留玻璃，背景交给壳层环境光"
+
+
+def test_shell_provides_the_shared_ambient_backdrop():
+    """环境底色由壳层统一提供，顶栏与内容区共用同一片光。
+
+    回归防护：底色曾经各视图自己铺一层，结果顶栏与页面之间出现断层，
+    而且同一片光叠了两遍（颜色被叠加得更艳）。
+    """
+    app = read(SRC / "App.tsx")
+    assert 'variant="shell"' in app, "壳层没有提供共用的环境底色"
+    for name in ("KbList.tsx", "Search.tsx"):
+        code = read(VIEWS / name)
+        assert 'variant="shell"' not in code, f"{name} 又自己铺了一层环境底色"
+        assert 'variant="page"' not in code, f"{name} 还在用旧的页面底色形态"
+
+
+def test_ambient_backdrop_drifts_slowly_and_can_be_stopped():
+    """环境光要有缓慢漂移，且尊重"减少动态"偏好。
+
+    只允许动 transform（合成层）：动 background-position 会让整屏渐变
+    每帧重绘，背景一动态风扇就转起来。
+    """
+    engine = read(UI / "glass.tsx")
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert "lg-aurora-blob" in engine, "壳层没有渲染动态光斑"
+    assert css.count("@keyframes lg-aurora-drift-") >= 3, "光斑动画周期不足三套"
+    assert "will-change: transform" in css, "光斑没有走合成层"
+    assert "prefers-reduced-motion: reduce" in css, "缺少减少动态偏好的停用规则"

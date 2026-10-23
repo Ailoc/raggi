@@ -135,6 +135,40 @@ def test_stream_emits_sources_then_deltas_then_done(env):
     assert "took_ms" in done
 
 
+def test_stream_includes_bounded_history_in_prompt(env):
+    """多轮对话必须把历史真正交给模型，而不是只在前端摆消息气泡。"""
+    client, _ = env
+    _seed(client)
+    chat = _FakeChat(["允许 ±10% 的波动。"])
+    client.use_chat(chat)
+
+    r = client.post("/api/v1/answer/stream", json={
+        "q": "它允许多大波动？",
+        "top_k": 2,
+        "history": [
+            {"role": "user", "content": "额定电压是多少？"},
+            {"role": "assistant", "content": "额定电压为 380V。"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    prompt = chat.prompts[-1]
+    assert "【对话历史】" in prompt, "历史没有进入提示词"
+    assert "用户：额定电压是多少？" in prompt
+    assert "助手：额定电压为 380V。" in prompt
+    assert "它允许多大波动？" in prompt
+
+
+def test_history_is_bounded(env):
+    """历史不能无限长：超过 12 条直接 422，而不是把内存撑爆。"""
+    client, _ = env
+    _seed(client)
+    client.use_chat(_FakeChat(["答案"]))
+    history = [{"role": "user", "content": f"问题{i}"} for i in range(13)]
+    r = client.post("/api/v1/answer/stream",
+                    json={"q": "额定电压", "history": history})
+    assert r.status_code == 422
+
+
 def test_stream_and_nonstream_share_citations(env):
     """两条路径的引用必须一致。
 

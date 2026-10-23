@@ -29,6 +29,38 @@ _PROMPT = """基于以下检索到的上下文回答问题。若上下文不足�
 【问题】
 {question}"""
 
+_PROMPT_WITH_HISTORY = """基于以下检索到的上下文回答问题。若上下文不足以回答，请明确说明"上下文不足"，不要编造。
+回答时在每条依据后标注引用编号 [n]，n 对应下方【上下文】的编号。
+【对话历史】只用于理解指代和追问；其中的引用编号属于过去的轮次，不代表本轮编号。
+
+【对话历史】
+{history}
+
+【上下文】
+{context}
+
+【问题】
+{question}"""
+
+
+def _history_text(history: list[dict] | list | None) -> str:
+    """把最近几轮折算成可读文本。
+
+    历史只用于理解指代和追问；回答的事实依据仍然只能来自本轮
+    检索到的上下文，提示词里也明确写了这一点。
+    """
+    lines: list[str] = []
+    for turn in history or []:
+        role = turn.get("role") if isinstance(turn, dict) else getattr(turn, "role", None)
+        content = turn.get("content") if isinstance(turn, dict) else getattr(turn, "content", None)
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        lines.append(f"{'用户' if role == 'user' else '助手'}：{text}")
+    return "\n\n".join(lines)
+
 
 async def prepare(
     store: LanceStore,
@@ -38,14 +70,18 @@ async def prepare(
     cfg: RetrieveConfig,
     filters: dict | None = None,
     top_k: int | None = None,
+    *,
+    history: list | None = None,
+    search_opts: dict | None = None,
 ) -> dict:
     """检索并构造提示词，返回 {prompt, citations, res}。
 
     抽出来是为了让 answer / answer_stream 共用：流式与非流式的差异只应
     存在于「怎么吐字」，不该存在于「喂给模型什么」。
     """
+    opts = dict(search_opts or {})
     res = await asyncio.to_thread(
-        search, store, embedder, reranker, q, cfg, filters, top_k)
+        search, store, embedder, reranker, q, cfg, filters, top_k, **opts)
     results = res["results"]
     if not results:
         return {
@@ -85,9 +121,12 @@ async def prepare(
             "snippet": r["snippet"],
         })
 
+    context = "\n\n".join(context_parts)
+    history_text = _history_text(history)
+    prompt = (_PROMPT_WITH_HISTORY if history_text else _PROMPT).format(
+        history=history_text, context=context, question=q)
     return {
-        "prompt": _PROMPT.format(
-            context="\n\n".join(context_parts), question=q),
+        "prompt": prompt,
         "citations": citations,
         "res": res,
         "empty_text": None,
@@ -103,10 +142,14 @@ async def answer(
     cfg: RetrieveConfig,
     filters: dict | None = None,
     top_k: int | None = None,
+    *,
+    history: list | None = None,
+    search_opts: dict | None = None,
 ) -> dict:
     """返回 {answer, citations, took_ms, mode, degraded_reason}。"""
     prepared = await prepare(store, embedder, reranker, q, cfg,
-                             filters, top_k)
+                             filters, top_k, history=history,
+                             search_opts=search_opts)
     res = prepared["res"]
     if prepared["empty_text"]:
         return {
@@ -139,6 +182,9 @@ async def answer_stream(
     cfg: RetrieveConfig,
     filters: dict | None = None,
     top_k: int | None = None,
+    *,
+    history: list | None = None,
+    search_opts: dict | None = None,
 ) -> AsyncIterator[dict]:
     """逐段产出答案，事件形状 {event, data}。
 
@@ -153,7 +199,8 @@ async def answer_stream(
     而依据在生成之前就已确定。
     """
     prepared = await prepare(store, embedder, reranker, q, cfg,
-                             filters, top_k)
+                             filters, top_k, history=history,
+                             search_opts=search_opts)
     res = prepared["res"]
     if prepared["empty_text"]:
         # 契约是 sources → delta* → done，即使没有命中也要先发空的

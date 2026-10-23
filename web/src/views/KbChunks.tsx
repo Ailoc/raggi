@@ -7,7 +7,7 @@ import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Divider from "@mui/material/Divider";
 import IconButton from "@mui/material/IconButton";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
@@ -29,6 +29,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { go, href } from "../lib/router";
 import { usePicks } from "../lib/selection";
 import { kbName, setCrumbs, track, useStore } from "../lib/store";
@@ -52,6 +53,7 @@ export default function KbChunks({
   kbId: string;
   scope?: string;
 }): React.ReactElement {
+  const look = useGlassLook("card");
   const { kbsLoaded } = useStore();
   const standalone = scope === "standalone";
   const [items, setItems] = useState<Chunk[]>([]);
@@ -145,7 +147,7 @@ export default function KbChunks({
   const pickedChunks = items.filter((c) => picks.has(c.chunk_id));
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Stack direction="row" spacing={2} alignItems="flex-start" sx={{ mb: 2 }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
@@ -243,7 +245,7 @@ export default function KbChunks({
       )}
 
       {phase === "ready" && items.length > 0 && (
-        <Paper variant="outlined">
+        <GlassPanel radius={12} look={look}>
           <TableContainer>
             <Table size="small" aria-label="分块列表">
               <TableHead>
@@ -338,7 +340,7 @@ export default function KbChunks({
             labelDisplayedRows={({ from, to, count }) => `${from}–${to} / 共 ${count} 块`}
             onPageChange={(_e, p) => { setPage(p); picks.clear(); void load(p, q, standalone); }}
           />
-        </Paper>
+        </GlassPanel>
       )}
     </Box>
   );

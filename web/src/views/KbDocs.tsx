@@ -14,7 +14,7 @@ import IconButton from "@mui/material/IconButton";
 import Link from "@mui/material/Link";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
@@ -39,6 +39,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 
 import { api, apiUpload, ApiError } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { confirmDialog } from "../lib/dialog";
 import { fmtTime } from "../lib/format";
 import { cancelJob } from "../lib/jobcancel";
@@ -79,6 +80,7 @@ interface PlanState {
  * - 方案列区分「需重切」：入库快照与当前方案不同时，只有重新切分才生效。
  */
 export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
+  const look = useGlassLook("card");
   const { kbsLoaded } = useStore();
   const [kb, setKb] = useState<Kb | null>(null);
   const [items, setItems] = useState<Document[]>([]);
@@ -306,7 +308,7 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
   const somePicked = picks.some(items.map((d) => d.doc_id));
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Stack direction="row" alignItems="flex-start" spacing={2} sx={{ mb: 2 }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
@@ -433,7 +435,7 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
             </Stack>
           )}
 
-          <Paper variant="outlined">
+          <GlassPanel radius={12} look={look}>
             <TableContainer>
               <Table size="small" aria-label="文档列表">
                 <TableHead>
@@ -574,7 +576,7 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
               labelDisplayedRows={({ from, to, count }) => `${from}–${to} / 共 ${count} 篇`}
               onPageChange={(_e, p) => turnPage(p)}
             />
-          </Paper>
+          </GlassPanel>
         </>
       )}
 
@@ -653,6 +655,7 @@ function ComposeDialog({
   onClose: () => void;
   onDone: () => void;
 }): React.ReactElement {
+  const look = useGlassLook("card");
   const [tab, setTab] = useState<"file" | "text" | "url">("file");
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("");
@@ -905,7 +908,7 @@ function ComposeDialog({
             </Box>
 
             {files.length > 0 && (
-              <Paper variant="outlined" sx={{ p: 1 }}>
+              <GlassPanel radius={12} look={look} sx={{ p: 1 }}>
                 <Typography variant="body2" color="text.secondary" sx={{ px: 1, py: 0.5 }}>
                   待上传 {files.length} 个文件
                 </Typography>
@@ -927,7 +930,7 @@ function ComposeDialog({
                     </Stack>
                   ))}
                 </Stack>
-              </Paper>
+              </GlassPanel>
             )}
 
             <Typography variant="caption" color="text.secondary">

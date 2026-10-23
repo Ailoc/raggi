@@ -8,7 +8,7 @@ import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
 import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
@@ -20,6 +20,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { confirmDialog } from "../lib/dialog";
 import { fmtMs, fmtTime } from "../lib/format";
 import { setCrumbs, track } from "../lib/store";
@@ -46,7 +47,7 @@ export default function Settings({ tab }: { tab: string }): React.ReactElement {
   }, []);
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1200, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Typography variant="h5" sx={{ fontWeight: 500 }}>设置</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
         模型热切换、访问密钥、运行状况与存储占用。
@@ -75,6 +76,7 @@ type ModelKind = "embed" | "llm" | "rerank";
 type TestKind = "embedding" | "llm" | "rerank";
 
 function ModelsPanel(): React.ReactElement {
+  const look = useGlassLook("card");
   const [models, setModels] = useState<ModelsConfig | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState("");
   const [origDim, setOrigDim] = useState(0);
@@ -229,7 +231,7 @@ function ModelsPanel(): React.ReactElement {
           gridTemplateColumns: { xs: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
         }}
       >
-        <Paper variant="outlined" sx={{ p: 3 }}>
+        <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ fontSize: 16 }}>Embedding</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             决定向量维度与语义召回质量。
@@ -258,9 +260,9 @@ function ModelsPanel(): React.ReactElement {
             </Button>
             <TestResult result={results.embedding} />
           </Stack>
-        </Paper>
+        </GlassPanel>
 
-        <Paper variant="outlined" sx={{ p: 3 }}>
+        <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ fontSize: 16 }}>LLM</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             用于问答生成，可热切换。
@@ -284,9 +286,9 @@ function ModelsPanel(): React.ReactElement {
             </Button>
             <TestResult result={results.llm} />
           </Stack>
-        </Paper>
+        </GlassPanel>
 
-        <Paper variant="outlined" sx={{ p: 3, gridColumn: { lg: "1 / -1" } }}>
+        <GlassPanel radius={16} look={look} style={{ gridColumn: "1 / -1" }} sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ fontSize: 16 }}>Rerank</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             对候选分块重排序；未启用时按融合分数排序。
@@ -319,14 +321,14 @@ function ModelsPanel(): React.ReactElement {
             </Button>
             <TestResult result={results.rerank} />
           </Stack>
-        </Paper>
+        </GlassPanel>
       </Box>
 
-      <Paper
-        variant="outlined"
+      <GlassPanel
+        radius={16} look={look}
+        style={{ position: "sticky", bottom: 0, zIndex: 5, marginTop: 16 }}
         sx={{
-          position: "sticky", bottom: 0, zIndex: 5, mt: 2, p: 2,
-          bgcolor: "background.paper", display: "flex", gap: 2,
+          p: 2, display: "flex", gap: 2,
           alignItems: "center", flexWrap: "wrap",
         }}
       >
@@ -342,7 +344,7 @@ function ModelsPanel(): React.ReactElement {
         <Button type="submit" variant="contained" disabled={!dirty || saving}>
           {saving ? "保存中…" : "保存并热切换"}
         </Button>
-      </Paper>
+      </GlassPanel>
     </Box>
   );
 }
@@ -391,6 +393,7 @@ function TestResult({ result }: { result?: Record<string, unknown> }): React.Rea
 // ---- 健康 -----------------------------------------------------------------
 
 function HealthPanel(): React.ReactElement {
+  const look = useGlassLook("card");
   const [health, setHealth] = useState<Health | null>(null);
   const [phase, setPhase] = useState<"initial" | "ready" | "failed">("initial");
   const [error, setError] = useState("");
@@ -444,7 +447,7 @@ function HealthPanel(): React.ReactElement {
 
   return (
     <Stack spacing={2}>
-      <Paper variant="outlined" sx={{ p: 3 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="h6" sx={{ fontSize: 16 }}>运行状况</Typography>
           <Chip
@@ -514,9 +517,9 @@ function HealthPanel(): React.ReactElement {
           </Button>
           <Button variant="contained" onClick={() => void load(true)}>重新检测</Button>
         </Stack>
-      </Paper>
+      </GlassPanel>
 
-      <Paper variant="outlined" sx={{ p: 2 }}>
+      <GlassPanel radius={16} look={look} sx={{ p: 2 }}>
         <Box component="details">
           <Box component="summary" sx={{ cursor: "pointer", fontSize: 13, color: "text.secondary" }}>
             原始响应（排障用）
@@ -531,7 +534,7 @@ function HealthPanel(): React.ReactElement {
             {JSON.stringify(health, null, 2)}
           </Box>
         </Box>
-      </Paper>
+      </GlassPanel>
     </Stack>
   );
 }

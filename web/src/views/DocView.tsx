@@ -9,7 +9,7 @@ import Divider from "@mui/material/Divider";
 import IconButton from "@mui/material/IconButton";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
 import Table from "@mui/material/Table";
@@ -34,6 +34,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { stageLabel, waitForJob } from "../lib/jobs";
 import {
   addChunkDialog, batchSetEnabled, deleteChunk, deleteDocDialog,
@@ -66,6 +67,7 @@ export default function DocView({
   kbId: string;
   docId: string;
 }): React.ReactElement {
+  const look = useGlassLook("card");
   const route = useRoute();
   const { kbsLoaded } = useStore();
 
@@ -362,7 +364,7 @@ export default function DocView({
     && selected.char_end > selected.char_start;
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1600, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 2, flexWrap: "wrap", gap: 1 }}>
         <DescriptionIcon color="primary" />
         <Typography variant="h6" sx={{ fontWeight: 500, minWidth: 0 }} noWrap title={doc.title}>
@@ -483,7 +485,7 @@ export default function DocView({
           alignItems: "start",
         }}
       >
-        <Paper variant="outlined" aria-label="分块列表">
+        <GlassPanel radius={12} look={look} aria-label="分块列表">
           {chunks.length === 0 ? (
             <Alert
               severity={qRef.current ? "warning" : "info"}
@@ -631,13 +633,16 @@ export default function DocView({
               />
             </>
           )}
-        </Paper>
+        </GlassPanel>
 
         {showSrc && (
-          <Paper
-            variant="outlined"
+          <GlassPanel
+            radius={12} look={look}
             aria-label="原文"
-            sx={{ position: "sticky", top: 0, maxHeight: "calc(100vh - 220px)", display: "flex", flexDirection: "column" }}
+            style={{
+              position: "sticky", top: 0, maxHeight: "calc(100vh - 220px)",
+              display: "flex", flexDirection: "column",
+            }}
           >
             <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
               <Typography variant="body2" sx={{ flex: 1 }}>原文</Typography>
@@ -707,7 +712,7 @@ export default function DocView({
                 </Alert>
               )}
             </Box>
-          </Paper>
+          </GlassPanel>
         )}
       </Box>
     </Box>

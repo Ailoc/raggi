@@ -273,8 +273,8 @@ def test_report_is_clean_markdown(client):
 def test_topbar_has_no_param_controls():
     """检索参数不得留在顶栏：顶栏是全局 chrome，放不下参数面板。
 
-    顶栏保留「搜索与跳转」入口是允许的——它是入口，不是参数区。
-    主导航必须是原生链接（中键新开 / 复制链接 / 状态栏预览）。
+    顶栏是全局导航与状态位（品牌 / 主导航 / 队列 / 主题）；检索参数一律
+    在检索工作台里。主导航必须是原生链接（中键新开 / 复制链接 / 状态栏预览）。
     """
     src = (SRC / "App.tsx").read_text(encoding="utf-8")
     for pid in ("pTopK", "pMode", "pKb", "pCandidate", "paramsPanel"):
@@ -286,10 +286,15 @@ def test_topbar_has_no_param_controls():
 
 
 def test_search_view_has_query_and_params():
-    """检索页必须自带查询区与参数面板。"""
+    """检索页必须有输入台，并有覆盖全部参数的条件抽屉。"""
     src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
-    assert 'p.group === "base"' in src, "检索页缺常用参数区"
-    assert "过滤与高级参数" in src, "检索页缺高级参数面板"
+    composer = (SRC / "ui" / "SearchComposer.tsx").read_text(encoding="utf-8")
+    filters = (SRC / "ui" / "SearchFilters.tsx").read_text(encoding="utf-8")
+    assert "SearchComposer" in src and "SearchFilters" in src, "检索页未装配输入台/条件抽屉"
+    assert "InputBase" in composer and "检索或对话输入" in composer, "输入台缺查询输入"
+    assert "PARAM_GROUPS" in filters and "<Drawer" in filters, "缺完整条件抽屉"
+    for section in ("范围", "结果形态", "召回与排序", "证据呈现"):
+        assert section in filters, f"条件抽屉缺少分组：{section}"
 
 
 @pytest.mark.parametrize("pid", [
@@ -303,25 +308,41 @@ def test_param_controls_exist(pid):
     回归防护：重写时曾只移植了 2 个参数，把另外 15 个弄丢了——
     后端支持、界面没有，等于功能不存在。
     """
-    src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
+    src = (SRC / "ui" / "SearchFilters.tsx").read_text(encoding="utf-8")
     assert "id={p.id}" in src, "控件没有从规格表取 id"
     spec = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
     assert f'id: "{pid}"' in spec, f"参数规格表缺少 {pid}"
 
 
-def test_url_is_param_source_of_truth():
-    """参数写进 URL：刷新/收藏/分享都能复现同一次检索。
+def test_search_state_is_local_not_in_url():
+    """检索词与参数不写 URL：进入/刷新永远是空态输入台。
 
-    阶段 5 起 URL 只描述**已生效**的参数；控件改动进草稿，提交才写 URL。
+    2026-10-22 产品决策：上一版把查询写进 `#/search?q=`，导致刷新、
+    恢复标签或书签进入时直接复现旧结果；现在查询与参数都是本地状态，
+    URL 不再承载检索，深链分享能力一并取消。
     """
     src = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
-    assert "toBody" in src, "缺 URL→请求体的序列化"
-    assert "searchUrl" in src, "缺参数→URL 的回写"
-    assert "export function withParam" not in src, \
-        "withParam 是「改一个参数就立刻改写 URL」的旧路径，会重新引入参数与结果脱节"
-    assert "URLSearchParams" in src and "DEFAULTS" in src
+    assert "paramsToBody" in src, "缺参数→请求体的序列化"
+    assert "defaultParams" in src, "缺本地参数默认值"
+    assert "export function searchUrl" not in src, "searchUrl 仍在把检索写进 URL"
+    assert "export function withParam" not in src
+    assert "URLSearchParams" not in src, "参数表仍在依赖 URL 查询串"
     view = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
-    assert "route.query.get(" in view, "视图必须从 URL 读参数，而不是本地状态"
+    assert "const [query, setQuery]" in view, "检索词不是本地状态"
+    assert "paramsToBody(query, applied)" in view, "检索请求未使用本地参数"
+    assert "qFromUrl" not in view, "视图仍在从 URL 读检索词"
+
+
+def test_filter_params_are_nested_for_api():
+    """origin/parser_engine/mime 必须放进 filters。
+
+    它们曾以顶层字段发给 SearchReq；Pydantic 默认忽略未知字段，
+    结果就是「界面能选过滤条件，检索却完全不过滤」。
+    """
+    spec = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
+    assert "FILTER_KEYS" in spec, "过滤参数没有单独分组"
+    assert "body.filters = filters" in spec, "过滤参数没有包进 filters"
+    assert "filtersFromParams" in spec
 
 
 def test_search_degradation_is_visible():
@@ -354,7 +375,7 @@ def test_param_kind_matches_control_type():
     bool 处理——读写都落到 .checked 上，结果 select 永远提交默认值。
     """
     spec = (SRC / "lib" / "searchparams.ts").read_text(encoding="utf-8")
-    view = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
+    view = (SRC / "ui" / "SearchFilters.tsx").read_text(encoding="utf-8")
 
     kinds = dict(re.findall(r'id: "(p[A-Za-z]+)",\s*kind: "(\w+)"', spec))
     assert kinds, "未解析到 kind 声明"

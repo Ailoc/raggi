@@ -223,6 +223,16 @@ class ChunkBatchEditReq(BaseModel):
     edits: list[ChunkEditItem] = Field(default_factory=list, max_length=200)
 
 
+class ChatTurn(BaseModel):
+    """多轮问答的历史消息。
+
+    只接受 user/assistant 两种角色；单条与总条数都有上限，避免历史
+    无限增长把提示词和内存撑爆。
+    """
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
 class AnswerReq(BaseModel):
     q: str = Field(min_length=1, max_length=2000)
     # 上限必须与 SearchReq.top_k 对齐：这里会一次性把命中块的**全文**
@@ -232,6 +242,19 @@ class AnswerReq(BaseModel):
     filters: dict = Field(default_factory=dict)
     window: Optional[int] = Field(default=None, ge=0, le=10)
     kb_id: Optional[_ID] = None    # 按知识库问答（原先缺失）
+    # 多轮上下文：前端只传最近几轮，这里再做一次硬上限。
+    history: list[ChatTurn] = Field(default_factory=list, max_length=12)
+    # 与检索页共用召回/返回层开关，避免对话右侧的证据与左侧回答
+    # 来自两套不同参数。
+    score_threshold: Optional[float] = Field(default=None, ge=-100.0, le=100.0)
+    group_by_doc: bool = False
+    candidate_k: Optional[int] = Field(default=None, ge=1, le=1000)
+    nprobes: Optional[int] = Field(default=None, ge=1, le=1024)
+    refine_factor: Optional[int] = Field(default=None, ge=1, le=100)
+    k_rrf: Optional[int] = Field(default=None, ge=1, le=1000)
+    rerank: Optional[bool] = None
+    snippet_chars: Optional[int] = Field(default=None, ge=50, le=2000)
+    highlight: bool = True
 
 
 class EmbedReq(BaseModel):

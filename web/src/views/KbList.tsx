@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Card from "@mui/material/Card";
 import CardActionArea from "@mui/material/CardActionArea";
 import CardActions from "@mui/material/CardActions";
 import CardContent from "@mui/material/CardContent";
@@ -24,17 +23,20 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import SettingsIcon from "@mui/icons-material/Settings";
 
 import { api } from "../lib/api";
+import { CONTENT_MAX } from "../lib/layout";
 import { href, go } from "../lib/router";
 import { invalidateKbs, loadKbs, setCrumbs, useStore } from "../lib/store";
 import { fmtTime } from "../lib/format";
 import type { Kb } from "../lib/types";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import { toast } from "../ui/toast";
 
 /**
- * 知识库总览：卡片网格 + 新建。
+ * 知识库总览：玻璃卡片网格 + 新建。
  *
- * 卡片是 outlined 变体（1px 分隔线、无阴影）而不是 elevation —— 一屏
- * 3~5 张卡全带阴影会"像贴了一墙便利贴"；MUI 自己的仪表盘模板同样这么做。
+ * 卡片是**液态玻璃**：材质来自 ui/glass.tsx（open-glass-ui 的 CSS 材质）。
+ * 玻璃要有东西可弯，所以整页铺了一层极光背景（GlassBackdrop）——它同时
+ * 是卡片底下被模糊、被折射的那层内容。
  *
  * 卡片上没有删除：删除需要展示影响面（N 篇文档 / M 个分块）并要求输入
  * 库名确认，属于设置页的职责。总览页只做"进入"。
@@ -63,7 +65,7 @@ export default function KbList(): React.ReactElement {
   }, []);
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
       <Stack direction="row" alignItems="flex-start" spacing={2} sx={{ mb: 3 }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
@@ -106,6 +108,7 @@ export default function KbList(): React.ReactElement {
         </Alert>
       )}
 
+      {/* 骨架屏与卡片共用同一层背景，加载完成时极光不会"跳"一下 */}
       {!kbsLoaded && !error && (
         <Box
           sx={{
@@ -114,7 +117,7 @@ export default function KbList(): React.ReactElement {
           }}
         >
           {[0, 1, 2].map((i) => (
-            <Skeleton key={i} variant="rounded" height={148} />
+            <Skeleton key={i} variant="rounded" height={148} sx={{ borderRadius: 5 }} />
           ))}
         </Box>
       )}
@@ -143,12 +146,30 @@ export default function KbList(): React.ReactElement {
   );
 }
 
+/**
+ * 卡片的艺术指导：比默认更透一点、边缘更亮一点。
+ *
+ * 玻璃底下是极光背景，卡片要"浮"出来就得比背景更亮——`opacity` 压低
+ * 让底下的颜色透上来，`rim`/`lensing` 拉高让边缘读出厚度。
+ */
 function KbCard({ kb }: { kb: Kb }): React.ReactElement {
+  const look = useGlassLook("card");
   return (
-    <Card variant="outlined" sx={{ display: "flex", flexDirection: "column" }}>
+    <GlassPanel radius={20} className="lg-kb-card" look={look}>
       <CardActionArea
         onClick={() => go(href("kb", kb.kb_id, "docs"))}
-        sx={{ flex: 1, alignItems: "stretch" }}
+        sx={{
+          flex: 1,
+          alignItems: "stretch",
+          // MUI 的悬停遮罩只覆盖 CardActionArea（上半张卡），下方的
+          // CardActions 不在里面——悬停时于是只有上半截变深。关掉
+          // 这块局部遮罩，整卡的悬停提示交给 .lg-kb-card::before。
+          "&:hover .MuiCardActionArea-focusHighlight": { opacity: 0 },
+          // 键盘焦点仍要可见，不能被上面的悬停规则一起吃掉。
+          "&.Mui-focusVisible .MuiCardActionArea-focusHighlight": {
+            opacity: (t) => t.palette.action.focusOpacity,
+          },
+        }}
       >
         <CardContent sx={{ pb: 1 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -198,7 +219,7 @@ function KbCard({ kb }: { kb: Kb }): React.ReactElement {
           </IconButton>
         </Tooltip>
       </CardActions>
-    </Card>
+    </GlassPanel>
   );
 }
 

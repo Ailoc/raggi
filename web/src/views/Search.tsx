@@ -1,95 +1,267 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import Accordion from "@mui/material/Accordion";
-import AccordionDetails from "@mui/material/AccordionDetails";
-import AccordionSummary from "@mui/material/AccordionSummary";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import ButtonBase from "@mui/material/ButtonBase";
-import Chip from "@mui/material/Chip";
-import CircularProgress from "@mui/material/CircularProgress";
-import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
-import InputAdornment from "@mui/material/InputAdornment";
-import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
+import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
-import Switch from "@mui/material/Switch";
-import TextField from "@mui/material/TextField";
+import Tab from "@mui/material/Tab";
+import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
-import CloseIcon from "@mui/icons-material/Close";
+import { alpha } from "@mui/material/styles";
 import DownloadIcon from "@mui/icons-material/Download";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import QuestionAnswerIcon from "@mui/icons-material/QuestionAnswer";
-import SearchIcon from "@mui/icons-material/Search";
-import TuneIcon from "@mui/icons-material/Tune";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
 
 import { api, apiText } from "../lib/api";
-import { go, href, useRoute } from "../lib/router";
+import { CONTENT_MAX } from "../lib/layout";
+import { GlassPanel, useGlassLook } from "../ui/glass";
 import { setCrumbs, useStore } from "../lib/store";
-import { DEFAULTS, PARAMS, searchUrl, toBody } from "../lib/searchparams";
-import type { Document, ModelsConfig, SearchHit, SearchResponse, Snippet } from "../lib/types";
-import AnswerPanel from "../ui/AnswerPanel";
+import { streamPost } from "../lib/sse";
+import type { StreamHandle } from "../lib/sse";
+import {
+  DEFAULTS, MODE_OPTIONS, PARAMS, defaultParams, paramsToBody,
+} from "../lib/searchparams";
+import { takePendingSearch } from "../lib/searchintent";
+import type {
+  AnswerHistoryTurn, ChatTurn, Citation, ModelsConfig, SearchResponse,
+} from "../lib/types";
+import ChatThread from "../ui/ChatThread";
+import EvidenceList from "../ui/EvidenceList";
+import SearchComposer from "../ui/SearchComposer";
+import type { ComposerChip, SearchMode } from "../ui/SearchComposer";
+import SearchFilters, { HINTS } from "../ui/SearchFilters";
 import { toast } from "../ui/toast";
 
+type MobilePane = "chat" | "evidence";
+
+const CHAT_STATE_KEY = "raggi.chatState.v1";
+
+interface StoredChat {
+  turns: ChatTurn[];
+  params: Record<string, string>;
+  activeTurnId: string | null;
+}
+
+function isStoredTurn(value: unknown): value is ChatTurn {
+  if (!value || typeof value !== "object") return false;
+  const t = value as Partial<ChatTurn>;
+  const statuses = new Set(["searching", "streaming", "done", "error", "stopped"]);
+  return typeof t.id === "string"
+    && typeof t.question === "string"
+    && typeof t.answer === "string"
+    && typeof t.status === "string"
+    && statuses.has(t.status)
+    && Array.isArray(t.citations)
+    && Array.isArray(t.hits);
+}
+
+/** 只恢复终态轮次；保存时没写完的轮次在加载时标记为已停止。 */
+function loadChatState(): StoredChat | null {
+  try {
+    const raw = sessionStorage.getItem(CHAT_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredChat>;
+    if (!parsed || !Array.isArray(parsed.turns)) return null;
+    const turns = parsed.turns.filter(isStoredTurn).map((turn) => ({
+      ...turn,
+      evidenceLoading: false,
+      status: turn.status === "searching" || turn.status === "streaming"
+        ? "stopped" as const
+        : turn.status,
+    })).slice(-10);
+    if (turns.length === 0) return null;
+    const params = {
+      ...defaultParams(),
+      ...(parsed.params && typeof parsed.params === "object" ? parsed.params : {}),
+    };
+    const active = typeof parsed.activeTurnId === "string"
+      && turns.some((t) => t.id === parsed.activeTurnId)
+      ? parsed.activeTurnId
+      : turns[turns.length - 1]!.id;
+    return { turns, params, activeTurnId: active };
+  } catch {
+    return null;
+  }
+}
+
+function saveChatState(
+  turns: ChatTurn[], params: Record<string, string>, activeTurnId: string | null,
+): void {
+  try {
+    sessionStorage.setItem(CHAT_STATE_KEY, JSON.stringify({
+      turns: turns.slice(-10),
+      params,
+      activeTurnId,
+    }));
+  } catch {
+    // 配额/隐私模式：聊天仍在内存里，不因持久化失败打断交互
+  }
+}
+
+function chipLabel(key: string, value: string): string {
+  if (key === "origin") return `来源：${value === "manual" ? "手工块" : "解析入库"}`;
+  if (key === "group_by_doc") return "按文档去重";
+  if (key === "include_disabled") return "含已停用";
+  if (key === "highlight") return value === "true" ? "高亮" : "关闭高亮";
+  if (key === "rerank") return `精排：${value === "true" ? "强制开" : "强制关"}`;
+  const p = PARAMS.find((x) => x.key === key);
+  return `${p?.label ?? key}：${value}`;
+}
+
+function historyFrom(turns: ChatTurn[]): AnswerHistoryTurn[] {
+  const out: AnswerHistoryTurn[] = [];
+  for (const turn of turns) {
+    if (!turn.question.trim()) continue;
+    out.push({ role: "user", content: turn.question.slice(0, 2000) });
+    if (turn.answer.trim()) {
+      // 服务端单条历史上限 4000；长回答必须截断，否则下一轮会被 422 拒绝。
+      out.push({ role: "assistant", content: turn.answer.slice(0, 3900) });
+    }
+  }
+  return out.slice(-8);
+}
+
+function modeLabel(mode: string | undefined): string {
+  if (!mode) return "";
+  return MODE_OPTIONS.find((m) => m.value === mode)?.label ?? mode;
+}
+
+function makeTurnId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
 /**
- * 检索页：查询为主角 + 参数面板（草稿/应用两态）+ 结果 + 原文检视 + 导出 + 问答。
+ * 智能体工作台。
  *
- * URL 是唯一事实来源：查询词与**已应用**的参数都在 URL 上，改 URL 触发检索。
- * 参数面板持有草稿（draft），点「应用」才写进 URL——这条边界是守住的
- * 不变量：面板显示的参数必须与结果的来源一致，否则用户会以为"改了参数
- * 但结果没变"（或者更糟：以为结果来自旧参数）。
+ * 空态只有一个居中的输入台；发送后输入台下移：
+ * - 检索：结果占据上方滚动区，输入台固定在底部；
+ * - 对话：左侧是带多轮历史的消息流，右侧是本轮证据，输入台在消息流底部。
+ *
+ * 检索模式下 URL 仍是唯一事实来源；对话模式不共享 URL 状态，避免每轮
+ * 追问都改写历史。两种模式共用同一份参数解释与同一套证据渲染。
  */
 export default function Search(): React.ReactElement {
-  const route = useRoute();
+  const look = useGlassLook("card");
   const { kbs } = useStore();
-  const qFromUrl = route.query.get("q") ?? "";
+  // 命令面板可能在本页挂载前就发起了检索，初始化时先取走它的意图。
+  const initialSearch = useMemo(takePendingSearch, []);
+  const restoredChat = useMemo(loadChatState, []);
 
-  const [q, setQ] = useState(qFromUrl);
-  useEffect(() => setQ(qFromUrl), [qFromUrl]);
-  const [resp, setResp] = useState<SearchResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [selected, setSelected] = useState<SearchHit | null>(null);
-  const [answerOpen, setAnswerOpen] = useState(false);
-  const [paramsOpen, setParamsOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<SearchMode>("search");
+  const [query, setQuery] = useState(initialSearch);
+  const [searchDraft, setSearchDraft] = useState(initialSearch);
+  const [applied, setApplied] = useState<Record<string, string>>(defaultParams);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatParams, setChatParams] = useState<Record<string, string>>(
+    () => restoredChat?.params ?? defaultParams(),
+  );
+
+  const [searchResp, setSearchResp] = useState<SearchResponse | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchExpanded, setSearchExpanded] = useState<string | null>(null);
+
+  const [chatTurns, setChatTurns] = useState<ChatTurn[]>(() => restoredChat?.turns ?? []);
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(
+    () => restoredChat?.activeTurnId ?? null,
+  );
+  const [chatExpanded, setChatExpanded] = useState<string | null>(null);
+  const [chatRunningId, setChatRunningId] = useState<string | null>(null);
+  const [focusChunk, setFocusChunk] = useState<string | null>(null);
+  const [mobilePane, setMobilePane] = useState<MobilePane>("chat");
+
   const [answerEnabled, setAnswerEnabled] = useState(false);
+  const [serverDefaults, setServerDefaults] = useState<Record<string, string>>({});
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string>>(defaultParams);
+
   const inputRef = useRef<HTMLInputElement | null>(null);
-  // 请求序号 + AbortController：快速改参数/后退时，慢的旧请求不能覆盖新结果
-  const reqSeq = useRef(0);
+  const searchSeq = useRef(0);
+  const searchScrollRef = useRef<HTMLDivElement | null>(null);
 
-  /** 已应用的参数（来自 URL） */
-  const applied = useMemo(() => {
-    const out: Record<string, string> = {};
-    for (const p of PARAMS) out[p.key] = route.query.get(p.key) ?? DEFAULTS[p.key] ?? "";
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.query.toString()]);
+  const chatStream = useRef<StreamHandle | null>(null);
+  const chatSearchCtrl = useRef<AbortController | null>(null);
+  const chatBuffer = useRef("");
+  const chatRaf = useRef<number | null>(null);
+  const chatTurnRef = useRef<string | null>(null);
 
-  /** 草稿：编辑中、尚未应用 */
-  const [draft, setDraft] = useState<Record<string, string>>(applied);
-  useEffect(() => {
-    setDraft(applied);
-  }, [applied]);
+  const currentParams = viewMode === "search" ? applied : chatParams;
 
   const dirty = useMemo(
-    () => PARAMS.filter((p) => (draft[p.key] ?? "") !== (applied[p.key] ?? "")).length,
-    [draft, applied],
+    () => PARAMS.filter((p) => (draft[p.key] ?? "") !== (currentParams[p.key] ?? "")).length,
+    [draft, currentParams],
   );
+
+  const extraChips = useMemo<ComposerChip[]>(() => (
+    PARAMS
+      .filter((p) => p.key !== "kb_id" && p.key !== "mode")
+      .map((p) => [p.key, currentParams[p.key] ?? ""] as const)
+      .filter(([key, value]) => value !== "" && value !== (DEFAULTS[key] ?? ""))
+      .map(([key, value]) => ({
+        key,
+        label: chipLabel(key, value),
+        title: HINTS[key],
+      }))
+  ), [currentParams]);
+
+  const activeTurn = useMemo(() => {
+    if (chatTurns.length === 0) return null;
+    return chatTurns.find((t) => t.id === activeTurnId) ?? chatTurns[chatTurns.length - 1];
+  }, [chatTurns, activeTurnId]);
+
+  const searchActive = viewMode === "search" && query.trim() !== "";
+  const chatActive = viewMode === "chat" && chatTurns.length > 0;
+  const idle = !searchActive && !chatActive;
 
   useEffect(() => {
     setCrumbs([{ label: "检索" }]);
-    // 问答是 features.answer 控制的功能；入口必须按真实开关禁用，
-    // 而不是让用户点了「提问」才收到 503。
     void api<ModelsConfig>("/api/models")
-      .then((m) => setAnswerEnabled(m.features?.answer === true))
+      .then((m) => {
+        setAnswerEnabled(m.features?.answer === true);
+        const next: Record<string, string> = {};
+        for (const [key, value] of Object.entries(m.retrieve ?? {})) {
+          if (value !== null && value !== undefined && typeof value !== "object") {
+            next[key] = String(value);
+          }
+        }
+        setServerDefaults(next);
+      })
       .catch(() => setAnswerEnabled(false));
   }, []);
 
-  // `/` 聚焦查询框（表单控件里不接管，与旧版同口径）
+  useEffect(() => {
+    if (!answerEnabled && viewMode === "chat") setViewMode("search");
+  }, [answerEnabled, viewMode]);
+
+  // 顶栏点「检索」/命令面板打开检索：清空上一次查询，回到空态。
+  useEffect(() => {
+    const onNew = (): void => {
+      takePendingSearch();   // 丢弃未消费的旧意图，避免下次挂载被它触发
+      newSearch();
+    };
+    const onIntent = (e: Event): void => {
+      const q = (e as CustomEvent<{ q?: string }>).detail?.q ?? "";
+      takePendingSearch();   // 事件已送达，清掉兜底的 pending
+      if (!q.trim()) return;
+      setViewMode("search");
+      setSearchDraft(q);
+      setQuery(q);
+    };
+    window.addEventListener("raggi:newSearch", onNew);
+    window.addEventListener("raggi:search", onIntent);
+    return () => {
+      window.removeEventListener("raggi:newSearch", onNew);
+      window.removeEventListener("raggi:search", onIntent);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // `/` 聚焦输入台；在移动端的证据页先切回对话页。
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const t = e.target as HTMLElement | null;
@@ -97,74 +269,141 @@ export default function Search(): React.ReactElement {
       if (t && t.closest('[role="dialog"]')) return;
       if (e.key === "/" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        inputRef.current?.focus();
+        setMobilePane("chat");
+        requestAnimationFrame(() => inputRef.current?.focus());
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const run = useCallback(async (signal?: AbortSignal): Promise<void> => {
-    const seq = ++reqSeq.current;
-    if (!qFromUrl.trim()) {
-      setResp(null);
-      setSelected(null);
-      setError("");
-      setBusy(false);
+  const runSearch = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    const seq = ++searchSeq.current;
+    if (!query.trim()) {
+      setSearchResp(null);
+      setSearchExpanded(null);
+      setSearchError("");
+      setSearchBusy(false);
       return;
     }
-    setBusy(true);
-    setError("");
+    setSearchBusy(true);
+    setSearchError("");
+    setSearchResp(null);
+    setSearchExpanded(null);
     try {
       const r = await api<SearchResponse>("/api/search", {
         method: "POST",
-        body: toBody(qFromUrl, route.query),
+        body: paramsToBody(query, applied),
         signal,
       });
-      if (seq !== reqSeq.current) return;   // 更新的检索已经在飞
-      setResp(r);
-      setSelected(r.results[0] ?? null);
+      if (seq !== searchSeq.current) return;
+      setSearchResp(r);
+      requestAnimationFrame(() => searchScrollRef.current?.scrollTo({ top: 0 }));
     } catch (e) {
-      if (seq !== reqSeq.current) return;
+      if (seq !== searchSeq.current) return;
       if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setSearchError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (seq === reqSeq.current) setBusy(false);
+      if (seq === searchSeq.current) setSearchBusy(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qFromUrl, route.query.toString()]);
+  }, [query, applied]);
 
-  // URL 变化即检索（唯一数据流：改 URL → 检索）。
-  // 清理时中止上一发：否则旧参数的结果可能在新结果之后落地，
-  // 屏幕上的参数与结果集再次脱节。
   useEffect(() => {
     const ctrl = new AbortController();
-    void run(ctrl.signal);
+    void runSearch(ctrl.signal);
     return () => ctrl.abort();
-  }, [run]);
+  }, [runSearch]);
 
-  function submit(): void {
-    const text = q.trim();
-    if (!text) return;
-    // 参数是用户的设置：换查询词不该把它们清掉，只更新 q。
-    // searchUrl 会丢掉等于默认值的项，保持分享链接精简。
-    go(searchUrl(text, applied));
+  // 组件离开时断开正在进行的证据检索与生成流。
+  useEffect(() => () => {
+    chatStream.current?.stop();
+    chatSearchCtrl.current?.abort();
+    if (chatRaf.current != null) cancelAnimationFrame(chatRaf.current);
+  }, []);
+
+  // 对话历史只写本机 sessionStorage：刷新/切换页面后可恢复，但不改 URL、
+  // 不跨浏览器会话；生成中的轮次不落盘，避免恢复到半截状态。
+  useEffect(() => {
+    if (chatTurns.length === 0) {
+      try { sessionStorage.removeItem(CHAT_STATE_KEY); } catch { /* 隐私模式 */ }
+      return;
+    }
+    if (chatTurns.some((t) => t.status === "searching" || t.status === "streaming")) return;
+    const timer = setTimeout(
+      () => saveChatState(chatTurns, chatParams, activeTurnId),
+      250,
+    );
+    return () => clearTimeout(timer);
+  }, [chatTurns, chatParams, activeTurnId]);
+
+  function newSearch(): void {
+    setViewMode("search");
+    setQuery("");
+    setSearchDraft("");
+    setSearchResp(null);
+    setSearchError("");
+    setSearchExpanded(null);
+    setFilterOpen(false);
   }
 
-  function applyParams(): void {
-    const clean: Record<string, string> = {};
-    for (const p of PARAMS) {
-      const v = draft[p.key] ?? "";
-      if (v !== (DEFAULTS[p.key] ?? "")) clean[p.key] = v;
+  function submitSearch(): void {
+    const text = searchDraft.trim();
+    if (!text) return;
+    if (text === query) {
+      // 同一个问题再按一次：原地重查，而不是被状态相等吃掉。
+      void runSearch();
+      return;
     }
-    go(searchUrl(qFromUrl, clean));
+    setQuery(text);
+  }
+
+  function changeMode(next: SearchMode): void {
+    if (next === viewMode) return;
+    if (next === "chat" && !answerEnabled) return;
+    if (chatRunningId) stopChat();
+    if (next === "chat") {
+      if (chatTurns.length === 0) {
+        setChatParams({ ...applied });
+        if (!chatDraft && query) setChatDraft(query);
+      }
+      setMobilePane("chat");
+    }
+    setViewMode(next);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function updateParam(key: string, value: string): void {
+    if (viewMode === "search") {
+      setApplied((prev) => ({ ...prev, [key]: value }));
+      return;
+    }
+    setChatParams((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function removeChip(key: string): void {
+    updateParam(key, DEFAULTS[key] ?? "");
+  }
+
+  function openFilters(): void {
+    setDraft({ ...currentParams });
+    setFilterOpen(true);
+  }
+
+  function applyFilters(): void {
+    if (viewMode === "search") {
+      setApplied({ ...draft });
+    } else {
+      setChatParams({ ...draft });
+      if (chatTurns.length > 0) toast("检索条件已更新，下一条消息生效");
+    }
+    setFilterOpen(false);
   }
 
   async function exportReport(): Promise<void> {
     try {
       const md = await apiText("/api/search/report", {
         method: "POST",
-        body: toBody(qFromUrl, route.query),
+        body: paramsToBody(query, applied),
       });
       const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
       const a = document.createElement("a");
@@ -178,432 +417,591 @@ export default function Search(): React.ReactElement {
     }
   }
 
-  return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: "auto" }}>
-      {/* ---- 查询区 ---- */}
-      <Paper
-        variant="outlined"
-        sx={{ p: 2, mb: 2, position: "sticky", top: 0, zIndex: 5, bgcolor: "background.paper" }}
-      >
-        <Stack direction="row" spacing={1} alignItems="center">
-          <TextField
-            inputRef={inputRef}
-            fullWidth
-            placeholder="输入查询词，回车检索（按 / 聚焦）"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            slotProps={{
-              input: {
-                startAdornment: (
-                  <InputAdornment position="start"><SearchIcon /></InputAdornment>
-                ),
-              },
-              htmlInput: { "aria-label": "检索查询词" },
-            }}
-          />
-          <Button variant="contained" onClick={submit} disabled={!q.trim() || busy}>
-            检索
-          </Button>
-          <Tooltip title="参数（17 项，含过滤与高级）">
-            <Button
-              variant={paramsOpen ? "contained" : "outlined"}
-              color="inherit"
-              startIcon={<TuneIcon />}
-              sx={{ whiteSpace: "nowrap" }}
-              onClick={() => setParamsOpen((v) => !v)}
-            >
-              参数{dirty > 0 ? ` (${dirty})` : ""}
-            </Button>
-          </Tooltip>
-          <Tooltip
-            title={answerEnabled
-              ? "基于检索结果生成回答（SSE 流式）"
-              : "生成式问答未启用：在配置中设置 features.answer=true 后重启"}
-          >
-            <span>
-              <Button
-                variant={answerOpen ? "contained" : "outlined"}
-                color="inherit"
-                startIcon={<QuestionAnswerIcon />}
-                sx={{ whiteSpace: "nowrap" }}
-                disabled={!answerEnabled}
-                onClick={() => setAnswerOpen((v) => !v)}
-              >
-                问答
-              </Button>
-            </span>
-          </Tooltip>
-        </Stack>
-
-        {/* 生效参数摘要（有非默认项时显示，点 × 清除） */}
-        <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: appliedChips(applied).length ? 1.5 : 0 }}>
-          {appliedChips(applied).map(([k, v]) => (
-            <Chip
-              key={k}
-              size="small"
-              variant="outlined"
-              label={`${PARAMS.find((p) => p.key === k)?.label ?? k}: ${v}`}
-              onDelete={() => {
-                const next = { ...applied };
-                delete next[k];
-                go(searchUrl(qFromUrl, next));
-              }}
-            />
-          ))}
-        </Stack>
-      </Paper>
-
-      {/* ---- 参数面板 ---- */}
-      {paramsOpen && (
-        <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
-          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" sx={{ flex: 1 }}>
-              参数面板{dirty > 0 && ` · ${dirty} 项未应用`}
-            </Typography>
-            <Button size="small" onClick={() => setDraft(applied)} disabled={dirty === 0}>
-              丢弃修改
-            </Button>
-            <Button size="small" variant="contained" onClick={applyParams} disabled={dirty === 0}>
-              应用并检索
-            </Button>
-          </Stack>
-          <Stack direction={{ xs: "column", md: "row" }} spacing={2} flexWrap="wrap" useFlexGap>
-            {PARAMS.filter((p) => p.group === "base").map((p) => (
-              <ParamControl key={p.key} p={p} value={draft[p.key] ?? ""} kbs={kbs}
-                onChange={(v) => setDraft((d) => ({ ...d, [p.key]: v }))} />
-            ))}
-          </Stack>
-          <Accordion disableGutters elevation={0} sx={{ mt: 1, "&:before": { display: "none" } }}>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-              <Typography variant="body2" color="text.secondary">
-                过滤与高级参数（{PARAMS.filter((p) => p.group !== "base").length} 项）
-              </Typography>
-            </AccordionSummary>
-            <AccordionDetails>
-              <Stack direction={{ xs: "column", md: "row" }} spacing={2} flexWrap="wrap" useFlexGap>
-                {PARAMS.filter((p) => p.group !== "base").map((p) => (
-                  <ParamControl key={p.key} p={p} value={draft[p.key] ?? ""} kbs={kbs}
-                    onChange={(v) => setDraft((d) => ({ ...d, [p.key]: v }))} />
-                ))}
-              </Stack>
-            </AccordionDetails>
-          </Accordion>
-        </Paper>
-      )}
-
-      {/* ---- 问答面板 ---- */}
-      {answerOpen && (
-        <Box sx={{ mb: 2 }}>
-          <AnswerPanel defaultQuestion={qFromUrl} kbId={applied.kb_id ?? ""} />
-        </Box>
-      )}
-
-      {/* ---- 结果区 ---- */}
-      {error && (
-        <Alert
-          severity="error"
-          sx={{ mb: 2 }}
-          action={<Button color="inherit" size="small" onClick={() => void run()}>重试</Button>}
-        >
-          {error}
-        </Alert>
-      )}
-
-      {busy && (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-          <CircularProgress size={16} />
-          <Typography variant="body2" color="text.secondary">检索中…</Typography>
-        </Stack>
-      )}
-
-      {resp && !busy && (
-        <>
-          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1.5 }}>
-            <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
-              「{resp.query}」 · 显示 {resp.results.length} 条
-              {resp.total_candidates > resp.results.length
-                ? `（候选 ${resp.total_candidates} 条，可调大「返回条数」查看更多）`
-                : ""}
-              {" · "}{resp.took_ms}ms · {resp.mode}
-              {resp.degraded_reason && ` · 已降级（${resp.degraded_reason}）`}
-            </Typography>
-            <Button size="small" startIcon={<DownloadIcon />} onClick={() => void exportReport()}>
-              导出报告
-            </Button>
-          </Stack>
-
-          {resp.results.length === 0 && (
-            <Alert severity="warning">
-              没有匹配的结果。试试去掉过滤条件、放宽分数阈值，或换成更短的关键词。
-            </Alert>
-          )}
-
-          <Box
-            sx={{
-              display: "grid", gap: 2,
-              gridTemplateColumns: { xs: "1fr", lg: selected ? "minmax(0,1.1fr) minmax(0,1fr)" : "1fr" },
-              alignItems: "start",
-            }}
-          >
-            <Stack spacing={1}>
-              {resp.results.map((h) => (
-                <ResultCard
-                  key={h.chunk_id}
-                  hit={h}
-                  active={selected?.chunk_id === h.chunk_id}
-                  onClick={() => setSelected(h)}
-                />
-              ))}
-            </Stack>
-
-            {selected && (
-              <DocPeek hit={selected} onClose={() => setSelected(null)} />
-            )}
-          </Box>
-        </>
-      )}
-
-      {!resp && !busy && !error && (
-        <Alert severity="info">
-          输入查询词后回车。检索在知识库之上执行：混合（向量 + 全文）、纯向量、纯全文三种模式，
-          参数面板里可以调过滤与高级选项。
-        </Alert>
-      )}
-    </Box>
-  );
-}
-
-/** 已应用的非默认参数（用于 chip 摘要） */
-function appliedChips(applied: Record<string, string>): Array<[string, string]> {
-  return Object.entries(applied).filter(
-    ([k, v]) => v && v !== (DEFAULTS[k] ?? ""),
-  );
-}
-
-/** 参数控件：按 kind 映射到 MUI 控件（规格表是唯一来源，见 searchparams.ts） */
-function ParamControl({
-  p, value, kbs, onChange,
-}: {
-  p: (typeof PARAMS)[number];
-  value: string;
-  kbs: Array<{ kb_id: string; name: string }>;
-  onChange: (v: string) => void;
-}): React.ReactElement {
-  if (p.key === "kb_id") {
-    return (
-      <TextField id={p.id} select size="small" label={p.label} value={value}
-        onChange={(e) => onChange(e.target.value)} sx={{ minWidth: 180 }}>
-        <MenuItem value="">全部知识库</MenuItem>
-        {kbs.map((k) => <MenuItem key={k.kb_id} value={k.kb_id}>{k.name}</MenuItem>)}
-      </TextField>
-    );
+  function patchTurn(id: string, patch: Partial<ChatTurn>): void {
+    setChatTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }
-  if (p.key === "mode") {
-    return (
-      <TextField id={p.id} select size="small" label={p.label} value={value || "hybrid"}
-        onChange={(e) => onChange(e.target.value)} sx={{ minWidth: 150 }}>
-        <MenuItem value="hybrid">混合（向量 + 全文）</MenuItem>
-        <MenuItem value="vector">纯向量</MenuItem>
-        <MenuItem value="fts">纯全文</MenuItem>
-      </TextField>
-    );
+
+  function flushChatAnswer(): void {
+    if (chatRaf.current != null) return;
+    chatRaf.current = requestAnimationFrame(() => {
+      chatRaf.current = null;
+      const id = chatTurnRef.current;
+      if (!id) return;
+      patchTurn(id, { answer: chatBuffer.current });
+    });
   }
-  if (p.key === "group_by_doc") {
-    return (
-      <TextField id={p.id} select size="small" label={p.label} value={value || "false"}
-        onChange={(e) => onChange(e.target.value)} sx={{ minWidth: 140 }}>
-        <MenuItem value="false">否</MenuItem>
-        <MenuItem value="true">是（每篇文档留最优块）</MenuItem>
-      </TextField>
-    );
-  }
-  if (p.kind === "bool") {
-    return (
-      <FormControlLabel
-        sx={{ minWidth: 140 }}
-        control={
-          <Switch
-            id={p.id}
-            checked={value === "true"}
-            onChange={(e) => onChange(e.target.checked ? "true" : "false")}
-          />
+
+  function runTurn(
+    turnId: string,
+    question: string,
+    history: AnswerHistoryTurn[],
+  ): void {
+    chatSearchCtrl.current?.abort();
+    const searchCtrl = new AbortController();
+    chatSearchCtrl.current = searchCtrl;
+
+    chatBuffer.current = "";
+    chatTurnRef.current = turnId;
+    setChatRunningId(turnId);
+
+    const params = { ...chatParams };
+    const baseBody = paramsToBody(question, params);
+    const searchBody = { ...baseBody };
+    const answerBody = {
+      ...baseBody,
+      // 问答接口的 top_k 上限是 50（会把命中全文拼进提示词），
+      // 检索接口允许更大；对话里同时受两者约束。
+      top_k: Math.min(50, Number(params.top_k) || 8),
+      history,
+    };
+
+    void api<SearchResponse>("/api/search", {
+      method: "POST",
+      body: searchBody,
+      signal: searchCtrl.signal,
+    })
+      .then((r) => {
+        if (searchCtrl.signal.aborted) return;
+        patchTurn(turnId, {
+          hits: r.results,
+          searchTookMs: r.took_ms,
+          mode: r.mode,
+          scoreKind: r.score_kind,
+          degradedReason: r.degraded_reason,
+          searchError: undefined,
+          evidenceLoading: false,
+        });
+      })
+      .catch((e) => {
+        if (searchCtrl.signal.aborted) return;
+        patchTurn(turnId, {
+          searchError: e instanceof Error ? e.message : String(e),
+          evidenceLoading: false,
+        });
+      })
+      .finally(() => {
+        if (chatSearchCtrl.current === searchCtrl) chatSearchCtrl.current = null;
+        patchTurn(turnId, { evidenceLoading: false });
+      });
+
+    chatStream.current = streamPost("/api/answer/stream", answerBody, {
+      onSources: (items) => {
+        patchTurn(turnId, { citations: items as Citation[] });
+      },
+      onDelta: (text) => {
+        chatBuffer.current += text;
+        setChatTurns((prev) => prev.map((t) => (
+          t.id === turnId && t.status === "searching" ? { ...t, status: "streaming" } : t
+        )));
+        flushChatAnswer();
+      },
+      onDone: (done) => {
+        if (chatRaf.current != null) {
+          cancelAnimationFrame(chatRaf.current);
+          chatRaf.current = null;
         }
-        label={p.label}
-      />
-    );
+        patchTurn(turnId, {
+          answer: chatBuffer.current,
+          status: "done",
+          tookMs: done.took_ms,
+          mode: done.mode || undefined,
+          degradedReason: done.degraded_reason,
+        });
+        chatTurnRef.current = null;
+        chatStream.current = null;
+        setChatRunningId(null);
+      },
+      onError: (message, hint) => {
+        if (chatRaf.current != null) {
+          cancelAnimationFrame(chatRaf.current);
+          chatRaf.current = null;
+        }
+        patchTurn(turnId, {
+          answer: chatBuffer.current,
+          status: "error",
+          error: hint ? `${message}（${hint}）` : message,
+        });
+        chatTurnRef.current = null;
+        chatStream.current = null;
+        setChatRunningId(null);
+      },
+    });
   }
-  if (p.kind === "num") {
-    return (
-      <TextField
-        id={p.id}
-        size="small" type="number" label={p.label} value={value}
-        onChange={(e) => onChange(e.target.value)} sx={{ width: 150 }}
-      />
-    );
+
+  function sendChat(): void {
+    const text = chatDraft.trim();
+    if (!text || !answerEnabled || chatRunningId) return;
+    const id = makeTurnId();
+    const history = historyFrom(chatTurns);
+    const turn: ChatTurn = {
+      id,
+      question: text,
+      answer: "",
+      citations: [],
+      hits: [],
+      status: "searching",
+      evidenceLoading: true,
+    };
+    setChatTurns((prev) => [...prev, turn]);
+    setActiveTurnId(id);
+    setChatExpanded(null);
+    setFocusChunk(null);
+    setChatDraft("");
+    setMobilePane("chat");
+    runTurn(id, text, history);
   }
-  return (
-    <TextField
-      id={p.id}
-      size="small" label={p.label} value={value}
-      onChange={(e) => onChange(e.target.value)} sx={{ width: 180 }}
+
+  function retryTurn(turnId: string): void {
+    if (chatRunningId) return;
+    const index = chatTurns.findIndex((t) => t.id === turnId);
+    if (index < 0) return;
+    const turn = chatTurns[index]!;
+    const history = historyFrom(chatTurns.slice(0, index));
+    patchTurn(turnId, {
+      answer: "",
+      citations: [],
+      hits: [],
+      status: "searching",
+      evidenceLoading: true,
+      error: undefined,
+      searchError: undefined,
+      searchTookMs: undefined,
+      tookMs: undefined,
+      scoreKind: undefined,
+      degradedReason: undefined,
+    });
+    setActiveTurnId(turnId);
+    setChatExpanded(null);
+    setFocusChunk(null);
+    runTurn(turnId, turn.question, history);
+  }
+
+  function stopChat(): void {
+    chatStream.current?.stop();
+    chatStream.current = null;
+    chatSearchCtrl.current?.abort();
+    chatSearchCtrl.current = null;
+    if (chatRaf.current != null) {
+      cancelAnimationFrame(chatRaf.current);
+      chatRaf.current = null;
+    }
+    const id = chatTurnRef.current ?? chatRunningId;
+    if (id) {
+      patchTurn(id, {
+        answer: chatBuffer.current,
+        status: "stopped",
+        evidenceLoading: false,
+      });
+    }
+    chatTurnRef.current = null;
+    setChatRunningId(null);
+  }
+
+  function newChat(): void {
+    if (chatRunningId) stopChat();
+    setChatTurns([]);
+    setActiveTurnId(null);
+    setChatExpanded(null);
+    setChatDraft("");
+    setFocusChunk(null);
+    setMobilePane("chat");
+    try { sessionStorage.removeItem(CHAT_STATE_KEY); } catch { /* 隐私模式 */ }
+  }
+
+  function selectTurn(turnId: string): void {
+    setActiveTurnId(turnId);
+    if (turnId !== activeTurnId) setChatExpanded(null);
+    setFocusChunk(null);
+    setMobilePane("evidence");
+  }
+
+  function revealCitation(turnId: string, citation: Citation): void {
+    const turn = chatTurns.find((t) => t.id === turnId);
+    if (turn && !turn.evidenceLoading && !turn.hits.some((h) => h.chunk_id === citation.chunk_id)) {
+      toast("该引用不在本轮证据列表中", "err");
+    }
+    setViewMode("chat");
+    setActiveTurnId(turnId);
+    setChatExpanded(citation.chunk_id);
+    setFocusChunk(citation.chunk_id);
+    setMobilePane("evidence");
+  }
+
+  const handleFocusHandled = useCallback(() => setFocusChunk(null), []);
+
+  const filtersDrawer = (
+    <SearchFilters
+      open={filterOpen}
+      onClose={() => setFilterOpen(false)}
+      draft={draft}
+      kbs={kbs}
+      serverDefaults={serverDefaults}
+      dirty={dirty}
+      mode={viewMode}
+      onChange={(key, value) => setDraft((prev) => ({ ...prev, [key]: value }))}
+      onReset={() => setDraft({ ...DEFAULTS })}
+      onRevert={() => setDraft({ ...currentParams })}
+      onApply={applyFilters}
     />
   );
-}
 
-/** 检索片段：纯文本 + 高亮区间（**纯插值**，不注入 HTML） */
-function SnippetText({ snippet }: { snippet: Snippet }): React.ReactElement {
-  const parts: ReactNode[] = [];
-  let cur = 0;
-  for (const [s, e] of snippet.marks) {
-    if (s > cur) parts.push(snippet.text.slice(cur, s));
-    parts.push(<mark key={`${s}-${e}`}>{snippet.text.slice(s, e)}</mark>);
-    cur = e;
-  }
-  parts.push(snippet.text.slice(cur));
-  return <>{parts}</>;
-}
-
-function ResultCard({
-  hit, active, onClick,
-}: {
-  hit: SearchHit;
-  active: boolean;
-  onClick: () => void;
-}): React.ReactElement {
-  return (
-    <Paper
-      variant="outlined"
-      sx={{
-        borderColor: active ? "primary.main" : "divider",
-        bgcolor: active ? "action.selected" : "background.paper",
-        "&:hover": { bgcolor: "action.hover" },
-      }}
-    >
-      <ButtonBase
-        onClick={onClick}
-        sx={{ display: "block", width: "100%", textAlign: "left", p: 1.5 }}
-      >
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
-        <Chip size="small" color="primary" variant="outlined"
-          label={hit.score.toFixed(3)} title={`相关性（${hit.score_kind}，越大越相关）`} />
-        <Typography variant="body2" sx={{ fontWeight: 500, flex: 1, minWidth: 0 }}
-          noWrap title={hit.title || "（独立分块）"}>
-          {hit.title || "（独立分块）"}
-        </Typography>
-        {hit.page != null && <Chip size="small" label={`第 ${hit.page} 页`} variant="outlined" />}
-        {!hit.enabled && <Chip size="small" color="error" label="已停用" variant="outlined" />}
-      </Stack>
-      {hit.heading_path && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}
-          noWrap>
-          {hit.heading_path}
-        </Typography>
-      )}
-      <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.7 }}>
-        <SnippetText snippet={hit.snippet} />
-      </Typography>
-      </ButtonBase>
-    </Paper>
+  const composer = (compact: boolean): React.ReactElement => (
+    <SearchComposer
+      mode={viewMode}
+      onModeChange={changeMode}
+      value={viewMode === "search" ? searchDraft : chatDraft}
+      onValueChange={viewMode === "search" ? setSearchDraft : setChatDraft}
+      onSend={viewMode === "search" ? submitSearch : sendChat}
+      onStop={viewMode === "chat" && chatRunningId ? stopChat : undefined}
+      running={viewMode === "search" ? searchBusy : chatRunningId != null}
+      compact={compact}
+      answerEnabled={answerEnabled}
+      kbId={currentParams.kb_id ?? ""}
+      retrievalMode={currentParams.mode || "hybrid"}
+      onKbChange={(id) => updateParam("kb_id", id)}
+      onRetrievalModeChange={(mode) => updateParam("mode", mode)}
+      onOpenFilters={openFilters}
+      onNewChat={viewMode === "chat" && chatTurns.length > 0 ? newChat : undefined}
+      chips={extraChips}
+      onRemoveChip={removeChip}
+      kbs={kbs}
+      inputRef={inputRef}
+    />
   );
-}
 
-/** 原文检视：按命中偏移在全文里高亮（偏移失效时如实降级为不定位） */
-function DocPeek({ hit, onClose }: { hit: SearchHit; onClose: () => void }): React.ReactElement {
-  const [doc, setDoc] = useState<Document | null>(null);
-  const [error, setError] = useState("");
-  const [retry, setRetry] = useState(0);
+  // ---- 空态：页面中央只有输入台 ----
+  if (idle) {
+    return (
+      <>
+        <Box
+          sx={{
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            px: { xs: 2, md: 4 },
+            py: 4,
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          {/*
+            底色由壳层统一提供（`ui/glass` 的 shell 形态），这里不再
+            自己铺一层——两片光叠在一起，顶栏和页面就接不上了。
+          */}
+          <Box sx={{ width: "100%", maxWidth: 780, position: "relative" }}>
+            {composer(false)}
+          </Box>
+        </Box>
+        {filtersDrawer}
+      </>
+    );
+  }
 
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setDoc(null);
-    setError("");
-    if (!hit.doc_id) return () => ctrl.abort();
-    void api<Document>(
-      `/api/documents/${encodeURIComponent(hit.doc_id)}?include_chunks=false`,
-      { signal: ctrl.signal },
-    )
-      .then(setDoc)
-      .catch((e) => {
-        if (ctrl.signal.aborted) return;
-        setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => ctrl.abort();
-  }, [hit.doc_id, retry]);
+  // ---- 检索：结果在上，输入台固定在底部 ----
+  if (searchActive) {
+    return (
+      <>
+      <Box
+        sx={{
+          height: "100%",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          backgroundImage: (t) => `radial-gradient(1000px 360px at 50% -120px, `
+            + `${alpha(t.palette.primary.main, 0.08)}, transparent 70%)`,
+          backgroundRepeat: "no-repeat",
+        }}
+      >
+        <Box ref={searchScrollRef} sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+          <Box sx={{ maxWidth: CONTENT_MAX, mx: "auto", px: { xs: 2, md: 3 }, py: { xs: 2, md: 3 } }}>
+            <Stack
+              direction="row"
+              spacing={2}
+              alignItems="flex-start"
+              sx={{ mb: 1.5 }}
+            >
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography variant="subtitle2" color="text.secondary">
+                  检索结果
+                </Typography>
+                <Typography variant="h5" sx={{ fontWeight: 650, mt: 0.25, wordBreak: "break-word" }}>
+                  “{query}”
+                </Typography>
+                {searchResp && (
+                  <Typography variant="body2" color="text.secondary" aria-live="polite">
+                    显示 {searchResp.results.length} 条 · 候选 {searchResp.total_candidates} 条
+                    {" · "}{searchResp.took_ms}ms · {modeLabel(searchResp.mode)} · {searchResp.score_kind}
+                  </Typography>
+                )}
+              </Box>
+              <Button
+                size="small"
+                startIcon={<RestartAltIcon fontSize="small" />}
+                onClick={newSearch}
+                sx={{ borderRadius: 999, color: "text.secondary" }}
+              >
+                新检索
+              </Button>
+              <Tooltip title="导出 Markdown 检索报告">
+                <span>
+                  <IconButton
+                    aria-label="导出检索报告"
+                    onClick={() => void exportReport()}
+                    disabled={!searchResp || searchResp.results.length === 0}
+                  >
+                    <DownloadIcon />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Stack>
 
-  const body = doc?.text ?? "";
-  const canLocate = doc != null && hit.offset_valid
-    && hit.char_start >= 0 && hit.char_end <= body.length && hit.char_end > hit.char_start;
-
-  return (
-    <Paper variant="outlined" sx={{ position: "sticky", top: 84, maxHeight: "72vh", display: "flex", flexDirection: "column" }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ p: 1.5, borderBottom: 1, borderColor: "divider" }}>
-        <Typography variant="body2" sx={{ fontWeight: 500, flex: 1, minWidth: 0 }} noWrap>
-          {hit.title || "（独立分块）"}
-        </Typography>
-        {hit.doc_id && (
-          <Tooltip title="在文档工作台打开">
-            <Button size="small" endIcon={<OpenInNewIcon />}
-              href={href("kb", hit.kb_id, "doc", hit.doc_id)}>
-              打开
-            </Button>
-          </Tooltip>
-        )}
-        <IconButton size="small" aria-label="关闭原文检视" onClick={onClose}>
-          <CloseIcon fontSize="small" />
-        </IconButton>
-      </Stack>
-      <Box sx={{ p: 2, overflowY: "auto", flex: 1 }}>
-        {error && (
-          <Alert
-            severity="error"
-            action={<Button color="inherit" size="small" onClick={() => setRetry((n) => n + 1)}>重试</Button>}
-          >
-            {error}
-          </Alert>
-        )}
-        {/* 独立分块没有文档可加载：直接呈现片段本身。
-            早先把这一支写在 `doc &&` 里面，于是它永远不显示——
-            而 loading 转圈也永远停不下来（doc 永远是 null）。 */}
-        {!error && !hit.doc_id && (
-          <Alert severity="info">
-            这是独立分块（不属于任何文档），显示其内容：
-            <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
-              {hit.snippet.text}
-            </Typography>
-          </Alert>
-        )}
-        {!error && hit.doc_id && !doc && <CircularProgress size={18} />}
-        {!error && hit.doc_id && doc && (
-          <>
-            {!hit.offset_valid && (
-              <Alert severity="info" sx={{ mb: 1 }}>
-                该分块被编辑过，偏移已失效——下面是全文，不再定位。
+            {searchError && (
+              <Alert
+                severity="error"
+                action={<Button color="inherit" size="small" onClick={() => void runSearch()}>重试</Button>}
+              >
+                {searchError}
               </Alert>
             )}
-            {(
-              <Typography
-                variant="body2"
-                component="pre"
+
+            {!searchResp && !searchError && (
+              <Stack spacing={1.5} aria-label="正在检索">
+                <Typography variant="body2" color="text.secondary">正在检索…</Typography>
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton key={i} variant="rounded" height={i === 0 ? 92 : 78} sx={{ borderRadius: 2 }} />
+                ))}
+              </Stack>
+            )}
+
+            {searchResp?.degraded_reason && (
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                检索已降级：{searchResp.degraded_reason}
+              </Alert>
+            )}
+
+            {searchResp?.results.length === 0 && (
+              <GlassPanel
+                radius={16} look={look}
                 sx={{
-                  whiteSpace: "pre-wrap", wordBreak: "break-word",
-                  fontFamily: "inherit", lineHeight: 1.8, m: 0,
+                  px: { xs: 2.5, md: 4 },
+                  py: { xs: 3, md: 5 },
                 }}
               >
-                {canLocate ? (
-                  <>
-                    {body.slice(0, hit.char_start)}
-                    <mark>{body.slice(hit.char_start, hit.char_end)}</mark>
-                    {body.slice(hit.char_end)}
-                  </>
-                ) : (
-                  body
-                )}
-              </Typography>
+                <Typography variant="h6" sx={{ fontWeight: 550 }}>
+                  没有找到直接匹配的证据
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1, maxWidth: 620 }}>
+                  先确认范围是否过窄，再尝试更短的词组、同义表述，或调低分数阈值。
+                </Typography>
+                <Button variant="outlined" size="small" onClick={openFilters} sx={{ mt: 2.5 }}>
+                  调整条件
+                </Button>
+              </GlassPanel>
             )}
-          </>
-        )}
+ 
+            {searchResp && searchResp.results.length > 0 && (
+              <>
+                <Stack
+                  direction="row"
+                  justifyContent="space-between"
+                  alignItems="center"
+                  sx={{ mb: 0.5, gap: 2, flexWrap: "wrap" }}
+                >
+                  <Typography variant="caption" color="text.secondary">
+                    点击任意一条展开证据；↑ ↓ 切换，Enter 展开，Esc 收起
+                  </Typography>
+                  {searchResp.has_more && (
+                    <Button size="small" onClick={openFilters} sx={{ minWidth: 0 }}>
+                      还有更多候选 · 调整返回条数
+                    </Button>
+                  )}
+                </Stack>
+                <EvidenceList
+                  hits={searchResp.results}
+                  expanded={searchExpanded}
+                  onToggle={(id) => setSearchExpanded((cur) => (cur === id ? null : id))}
+                />
+              </>
+            )}
+          </Box>
+        </Box>
+
+        <Box
+          sx={{
+            flex: "none",
+            px: { xs: 2, md: 4 },
+            pt: 1,
+            pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: 1.5 },
+            backgroundImage: (t) => `linear-gradient(180deg, `
+              + `${alpha(t.palette.background.default, 0)}, `
+              + `${t.palette.background.default} 55%)`,
+          }}
+        >
+          <Box sx={{ maxWidth: 900, mx: "auto" }}>{composer(true)}</Box>
+        </Box>
       </Box>
-    </Paper>
+      {filtersDrawer}
+      </>
+    );
+  }
+
+  // ---- 对话：左侧消息流，右侧本轮证据，输入台在左侧底部 ----
+  const activeHits = activeTurn?.hits ?? [];
+  return (
+    <>
+    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <Tabs
+        value={mobilePane}
+        onChange={(_e, value: MobilePane) => setMobilePane(value)}
+        variant="fullWidth"
+        sx={{
+          display: { xs: "flex", lg: "none" },
+          borderBottom: 1,
+          borderColor: "divider",
+          minHeight: 44,
+        }}
+      >
+        <Tab value="chat" label="对话" sx={{ minHeight: 44 }} />
+        <Tab
+          value="evidence"
+          label={`证据${activeHits.length > 0 ? ` (${activeHits.length})` : ""}`}
+          sx={{ minHeight: 44 }}
+        />
+      </Tabs>
+
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          width: "100%",
+          maxWidth: CONTENT_MAX,
+          mx: "auto",
+          display: "grid",
+          gridTemplateColumns: { xs: "minmax(0,1fr)", lg: "minmax(0,1.08fr) minmax(0,.92fr)" },
+        }}
+      >
+        <Box
+          sx={{
+            minHeight: 0,
+            display: { xs: mobilePane === "chat" ? "flex" : "none", lg: "flex" },
+            flexDirection: "column",
+            borderRight: { lg: 1 },
+            borderColor: "divider",
+          }}
+        >
+          <Box sx={{ flex: 1, minHeight: 0 }}>
+            <ChatThread
+              turns={chatTurns}
+              activeTurnId={activeTurn?.id ?? null}
+              runningTurnId={chatRunningId}
+              onSelectTurn={selectTurn}
+              onStop={stopChat}
+              onRetry={retryTurn}
+              onCitation={revealCitation}
+            />
+          </Box>
+          <Box
+            sx={{
+              flex: "none",
+              px: { xs: 1.5, sm: 2.5 },
+              pt: 1,
+              pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: 1.5 },
+              backgroundImage: (t) => `linear-gradient(180deg, `
+                + `${alpha(t.palette.background.default, 0)}, `
+                + `${t.palette.background.default} 60%)`,
+            }}
+          >
+            {composer(true)}
+          </Box>
+        </Box>
+
+        <Box
+          sx={{
+            minHeight: 0,
+            overflowY: "auto",
+            display: { xs: mobilePane === "evidence" ? "block" : "none", lg: "block" },
+            bgcolor: (t) => alpha(t.palette.primary.main, 0.02),
+            borderLeft: { lg: 1 },
+            borderColor: "divider",
+          }}
+        >
+          <Box sx={{ px: { xs: 2, md: 2.5 }, py: 2.5 }}>
+            <Typography variant="subtitle2" color="text.secondary">
+              本轮证据
+            </Typography>
+            <Typography variant="h6" sx={{ fontWeight: 600, mt: 0.25, wordBreak: "break-word" }}>
+              {activeTurn?.question ?? ""}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" aria-live="polite">
+              {activeTurn?.evidenceLoading && activeHits.length === 0
+                ? "正在检索…"
+                : `${activeHits.length} 条证据`
+                  + (activeTurn?.searchTookMs != null ? ` · ${activeTurn.searchTookMs}ms` : "")
+                  + (activeTurn?.mode ? ` · ${modeLabel(activeTurn.mode)}` : "")
+                  + (activeTurn?.scoreKind ? ` · ${activeTurn.scoreKind}` : "")}
+            </Typography>
+
+            {activeTurn?.searchError && (
+              <Alert severity="warning" sx={{ mt: 1.5 }}>
+                证据检索失败：{activeTurn.searchError}
+              </Alert>
+            )}
+
+            {activeTurn?.evidenceLoading && activeHits.length === 0 && (
+              <Stack spacing={1.25} sx={{ mt: 2 }}>
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} variant="rounded" height={84} sx={{ borderRadius: 2 }} />
+                ))}
+              </Stack>
+            )}
+
+            {activeTurn && activeHits.length === 0
+              && !activeTurn.evidenceLoading
+              && !activeTurn.searchError && (
+                <Box sx={{ mt: 2, py: 3 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    {activeTurn.status === "stopped"
+                      ? "已停止生成，证据检索也已被取消。"
+                      : "这一轮没有检索到证据，回答可能缺少依据。"}
+                  </Typography>
+                </Box>
+              )}
+
+            {activeHits.length > 0 && (
+              <Box sx={{ mt: 1.5 }}>
+                <EvidenceList
+                  hits={activeHits}
+                  compact
+                  expanded={chatExpanded}
+                  onToggle={(id) => setChatExpanded((cur) => (cur === id ? null : id))}
+                  focusChunk={focusChunk}
+                  onFocusHandled={handleFocusHandled}
+                  ariaLabel="本轮证据"
+                />
+              </Box>
+            )}
+
+            {!activeTurn && (
+              <GlassPanel
+                radius={12} look={look}
+                sx={{
+                  mt: 2,
+                  px: 2.5,
+                  py: 4,
+                  textAlign: "center",
+                }}
+              >
+                <Typography variant="body2" color="text.disabled">
+                  发送消息后，本轮检索到的证据会出现在这里。
+                </Typography>
+              </GlassPanel>
+            )}
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+    {filtersDrawer}
+    </>
   );
 }
