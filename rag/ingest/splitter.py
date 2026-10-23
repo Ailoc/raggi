@@ -79,6 +79,10 @@ def heading_path_for(headings: list[tuple[int, str, int]],
     """按 chunk 起始偏移取最近前置标题路径（面包屑）。
 
     规则：高级别标题重置路径，同级标题覆盖前一同级。
+
+    单个块的参考实现。批量路径（split_document）用
+    `_heading_paths_in_order` 单次扫描，不要在循环里调这个函数——
+    它是 O(标题数)，块一多就是二次方（见该函数的说明）。
     """
     path: list[str] = []
     for level, title, offset in headings:
@@ -87,6 +91,26 @@ def heading_path_for(headings: list[tuple[int, str, int]],
         path = path[:level - 1]
         path.append(title)
     return " > ".join(path)
+
+
+def _heading_paths_in_order(headings: list[tuple[int, str, int]],
+                            starts):
+    """按**升序**块起点批量计算面包屑，标题指针只前进一次。
+
+    改前 split_document 对每个块调一次 heading_path_for：5000 个标题 ×
+    5000 个块实测 5.3s（O(n²)），因为每个块都要从头遍历全部前置标题。
+    块由 _merge_small 保序返回，所以这里可以边扫描边推进标题指针，
+    总成本是一次线性扫描。
+    """
+    path: list[str] = []
+    hi = 0
+    for start in starts:
+        while hi < len(headings) and headings[hi][2] <= start:
+            level, title, _offset = headings[hi]
+            path = path[:level - 1]
+            path.append(title)
+            hi += 1
+        yield " > ".join(path)
 
 
 def _line_spans(text: str, start: int = 0,
@@ -383,12 +407,15 @@ def split_document(text: str, chunk_size: int = 512, chunk_overlap: int = 64,
     merged = _merge_small(spans, {off for _l, _t, off in heads},
                           merge_threshold)
     out: list[Span] = []
-    for s, e in merged:
+    # merged 保序（_merge_small 只做相邻合并），面包屑因此可以单次扫描；
+    # 逐块调用 heading_path_for 会让大文档的入库时间呈二次增长。
+    paths = _heading_paths_in_order(heads, (s for s, _e in merged))
+    for (s, e), heading_path in zip(merged, paths):
         if e <= s:
             continue
         out.append(Span(
             start=s, end=e, text=text[s:e],
-            heading_path=heading_path_for(heads, s),
+            heading_path=heading_path,
             offset_valid=True,
         ))
     return out

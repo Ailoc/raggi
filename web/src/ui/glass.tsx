@@ -4,10 +4,10 @@ import Box from "@mui/material/Box";
 import type { Theme } from "@mui/material/styles";
 import type { SxProps } from "@mui/material/styles";
 import { alpha, useTheme } from "@mui/material/styles";
-import { Glass, GlassSystemProvider } from "open-glass-ui";
+import { Glass, GlassSystemProvider, resolveGlassLook } from "open-glass-ui";
 import type { GlassLookInput, MaterialPresetName } from "open-glass-ui";
 
-import { useStore } from "../lib/store";
+import { useStoreSelect } from "../lib/store";
 
 import "open-glass-ui/styles.css";
 import "./glass.css";
@@ -41,7 +41,7 @@ import "./glass.css";
  * 但浏览器差异大，且这里都是文字密集的面板，CSS 已经够用。
  */
 export function GlassProvider({ children }: { children: ReactNode }): React.ReactElement {
-  const { theme } = useStore();
+  const theme = useStoreSelect((s) => s.theme);
   const muiTheme = useTheme();
   // 卡片悬停描边用主题主色。必须在这里**下发**成 CSS 变量：样式表里
   // var(--lg-hover-ring, <兜底>) 一旦变量缺失就会用兜底色——深色下是一条
@@ -166,8 +166,31 @@ export function glassLook(
 
 /** 按当前主题取艺术指导。 */
 export function useGlassLook(kind: GlassSurfaceKind): GlassLookInput {
-  const { theme } = useStore();
+  // 只订阅 theme：每块玻璃都跟着 busy/kbs/crumbs 重渲染是一笔纯粹的浪费。
+  const theme = useStoreSelect((s) => s.theme);
   return useMemo(() => glassLook(kind, theme), [kind, theme]);
+}
+
+/**
+ * 输入台上的浮层（知识库多选、召回模式）共用的材质。
+ *
+ * 与输入台同源（regular + composer look），只比输入台多 15% 填充、
+ * 10% 模糊：多行文字或选项列表比单行输入需要一点体量。边缘 rim/lensing
+ * 保持与输入台一致，视觉上才是同一块玻璃，而不是白色浮层。
+ *
+ * `dense` 用于叠在条件面板里的二级浮层：底下已经有表单文字，需要再
+ * 多一档填充，否则清单会和背后的字段糊在一起。
+ */
+export function usePopoverGlassLook(dense = false): GlassLookInput {
+  const base = useGlassLook("composer");
+  return useMemo(() => {
+    const resolved = resolveGlassLook(base);
+    return {
+      ...resolved,
+      opacity: (resolved.opacity ?? 1) + (dense ? 0.55 : 0.15),
+      blur: (resolved.blur ?? 1) * (dense ? 1.35 : 1.1),
+    };
+  }, [base, dense]);
 }
 
 /**
@@ -230,6 +253,33 @@ export const GlassDialogPaper = forwardRef<
       radius={20}
       look={look}
       className={`lg-dialog-paper${className ? ` ${className}` : ""}`}
+      {...rest}
+    >
+      {children}
+    </GlassPanel>
+  );
+});
+
+/**
+ * 检索条件面板的纸面。
+ *
+ * 这是一个带滚动内容与固定底栏的大面板，材质沿用输入台/浮层的
+ * regular + composer look（略厚一档），而不是对话框的 frosted：
+ * frosted 在浅色下会把 73% 的白铺满整块面板，17 个字段看起来像一张
+ * 白纸。定位、max-height 和动画仍由 MuiDialog-paper 提供。
+ */
+export const GlassFilterPaper = forwardRef<
+  HTMLElement,
+  ComponentPropsWithoutRef<"div">
+>(function GlassFilterPaper({ children, className, ...rest }, ref) {
+  const look = usePopoverGlassLook();
+  return (
+    <GlassPanel
+      ref={ref}
+      material="regular"
+      radius={24}
+      look={look}
+      className={`lg-dialog-paper lg-filter-panel${className ? ` ${className}` : ""}`}
       {...rest}
     >
       {children}

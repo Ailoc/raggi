@@ -274,3 +274,57 @@ def test_split_attaches_heading_path():
     docs = split_text(text, chunk_size=60, chunk_overlap=5)
     assert any("章节标题" in d.metadata.get("heading_path", "")
                for d in docs), "分块未继承 heading_path"
+
+def test_split_heading_paths_match_the_reference_implementation():
+    """批量面包屑扫描（单次指针推进）必须与逐块参考实现逐字一致。
+
+    split_document 改成了「标题指针只前进一次」；任何边界（块起点正好
+    落在标题上、跨级跳变、块落在标题之间）都必须和 heading_path_for
+    给出同一个结果，否则检索结果的面包屑会静默指错章节。
+    """
+    from rag.ingest.splitter import _headings, heading_path_for, split_document
+
+    text = (
+        "# A\n\n" + "甲" * 90
+        + "\n\n## A1\n\n" + "乙" * 90
+        + "\n\n### A1a\n\n" + "丙" * 90
+        + "\n\n## A2\n\n" + "丁" * 90
+        + "\n\n# B\n\n" + "戊" * 90
+        + "\n\n## B1\n\n" + "己" * 90
+    )
+    spans = split_document(text, chunk_size=48, chunk_overlap=8,
+                           strategy="structure")
+    assert len(spans) >= 6, "样例应切出多个块，否则覆盖不到标题边界"
+    heads = _headings(text)
+    for sp in spans:
+        assert sp.heading_path == heading_path_for(heads, sp.start), (
+            f"块 @{sp.start} 的面包屑不一致：{sp.heading_path!r} vs "
+            f"{heading_path_for(heads, sp.start)!r}")
+
+
+def test_page_index_matches_the_linear_reference_scan():
+    """页码二分索引必须复刻旧的线性扫描语义（含页间缝隙与末尾之外）。"""
+    from rag.ingest.pipeline import _PageIndex
+    from rag.parsing.normalize import SourceSpan
+
+    spans = [
+        SourceSpan("x" * 10, 1, 0, 10),
+        SourceSpan("y" * 10, 2, 11, 21),   # 起点 10..11 之间是一段缝隙
+        SourceSpan("z" * 10, 3, 30, 40),
+    ]
+
+    def naive(pos):
+        if not spans:
+            return None
+        last = spans[0]
+        for sp in spans:
+            if sp.start <= pos < sp.end:
+                return sp.page
+            if pos >= sp.end:
+                last = sp
+        return last.page
+
+    index = _PageIndex(spans)
+    for pos in range(-2, 48):
+        assert index.page_of(pos) == naive(pos), f"位置 {pos} 页码不一致"
+    assert _PageIndex([]).page_of(0) is None

@@ -267,6 +267,67 @@ def test_report_is_clean_markdown(client):
     assert "分数口径" in md, "报告未标注分数口径"
 
 
+# ---- 多知识库过滤 ---------------------------------------------------------
+
+def _seed_two_kbs(client):
+    """建两个库、各放一篇可命中的文档，再放一篇未分组文档。"""
+    a = client.post("/api/kbs", json={"name": "库A"}).json()["kb_id"]
+    b = client.post("/api/kbs", json={"name": "库B"}).json()["kb_id"]
+    for kb_id, label in ((a, "甲库"), (b, "乙库")):
+        r = client.post("/api/documents/text", json={
+            "text": f"多库检索标记 {label} 逆变器参数", "title": f"{label}文档",
+            "kb_id": kb_id,
+        })
+        assert r.status_code == 200, r.text
+    r = client.post("/api/documents/text", json={
+        "text": "多库检索标记 未分组 逆变器参数", "title": "无库文档",
+    })
+    assert r.status_code == 200, r.text
+    client.store.ensure_fts_index(force=True)
+    return a, b
+
+
+def test_multi_kb_filter_returns_only_selected_kbs(client):
+    """filters.kb_ids 必须真的把范围收窄到所选库，而不是静默忽略。"""
+    a, b = _seed_two_kbs(client)
+
+    both = _search(client, q="多库检索标记", top_k=50,
+                   filters={"kb_ids": [a, b]})
+    got = {h["kb_id"] for h in both["results"]}
+    assert got == {a, b}, f"多库过滤结果应为两个库，实际 {got}"
+    assert all(h["kb_id"] in (a, b) for h in both["results"]), \
+        "多库过滤把未分组文档也带进来了"
+
+    only_a = _search(client, q="多库检索标记", top_k=50,
+                     filters={"kb_ids": [a]})
+    assert {h["kb_id"] for h in only_a["results"]} == {a}
+
+
+def test_legacy_single_kb_id_still_wins_over_kb_ids(client):
+    """旧调用方同时传 kb_id 与 kb_ids 时按单库语义执行，不做并集。"""
+    a, b = _seed_two_kbs(client)
+    res = _search(client, q="多库检索标记", top_k=50,
+                  kb_id=a, filters={"kb_ids": [b]})
+    assert {h["kb_id"] for h in res["results"]} == {a}
+
+
+def test_kb_ids_are_bounded(client):
+    """无上界的 ID 列表会被拼进一条 SQL IN——必须是 422，不是慢查询。"""
+    r = client.post("/api/search", json={
+        "q": "x", "filters": {"kb_ids": [f"kb{i}" for i in range(51)]},
+    })
+    assert r.status_code == 422
+
+
+def test_get_variant_accepts_comma_separated_kb_ids(client):
+    a, b = _seed_two_kbs(client)
+    r = client.get("/api/search", params={
+        "q": "多库检索标记", "kb_ids": f"{a},{b}", "top_k": 50,
+    })
+    assert r.status_code == 200, r.text
+    assert {h["kb_id"] for h in r.json()["results"]} == {a, b}
+
+
 # ---- 前端契约 ----------------------------------------------------------
 
 
@@ -286,15 +347,15 @@ def test_topbar_has_no_param_controls():
 
 
 def test_search_view_has_query_and_params():
-    """检索页必须有输入台，并有覆盖全部参数的条件抽屉。"""
+    """检索页必须有输入台，并有覆盖全部参数的条件面板。"""
     src = (SRC / "views" / "Search.tsx").read_text(encoding="utf-8")
     composer = (SRC / "ui" / "SearchComposer.tsx").read_text(encoding="utf-8")
     filters = (SRC / "ui" / "SearchFilters.tsx").read_text(encoding="utf-8")
     assert "SearchComposer" in src and "SearchFilters" in src, "检索页未装配输入台/条件抽屉"
     assert "InputBase" in composer and "检索或对话输入" in composer, "输入台缺查询输入"
-    assert "PARAM_GROUPS" in filters and "<Drawer" in filters, "缺完整条件抽屉"
+    assert "PARAM_GROUPS" in filters and "<Dialog" in filters, "缺完整条件面板"
     for section in ("范围", "结果形态", "召回与排序", "证据呈现"):
-        assert section in filters, f"条件抽屉缺少分组：{section}"
+        assert section in filters, f"条件面板缺少分组：{section}"
 
 
 @pytest.mark.parametrize("pid", [

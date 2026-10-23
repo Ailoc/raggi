@@ -88,7 +88,15 @@ class QueryCounter:
     异步可迭代对象，在这里 drain 它会改变消费语义（检索路径会拿到已耗尽的
     迭代器），所以那条路径只数次数、不数行 —— 「不许取全表」由
     `builder == 0` 与 `rows <= limit` 两条一起守。
+
+    `uri_prefix` 把统计范围限定到**被测 store**。全量套件里别的测试
+    可能还有后台维护线程（`schedule_maintenance`）在跑；这些类是进程级
+    patch，不限定 URI 时它们的查询会随机落进某个计数窗口，表现为
+    「同一操作两次计数不同」的假红（2026-10-23 全量运行实际遇到）。
     """
+
+    def __init__(self, uri_prefix: str | None = None):
+        self.uri_prefix = uri_prefix
 
     def __enter__(self):
         import lancedb.table as lt
@@ -104,6 +112,9 @@ class QueryCounter:
         def counting(orig, kind):
             def wrapper(self, *a, **kw):
                 r = orig(self, *a, **kw)
+                uri = getattr(self, "uri", "") or ""
+                if outer.uri_prefix and not uri.startswith(outer.uri_prefix):
+                    return r
                 outer.n += 1
                 if kind == "exec":
                     outer.builder += 1
@@ -140,7 +151,7 @@ def test_list_documents_is_count_plus_page(store):
     回退成「取全表再 Python 切片」会放大这个数：那条路径在 2000 行时
     实测 8.63ms，分页下推后 2.50ms（SQLite 路径下 0.100ms）。
     """
-    with QueryCounter() as qc:
+    with QueryCounter(store.uri) as qc:
         list_documents(store, limit=20)
     assert qc.n <= 2, f"文档列表发了 {qc.n} 次查询（上界 2）"
     assert qc.builder == 0, (
@@ -176,7 +187,7 @@ def test_list_documents_does_not_materialize_the_whole_table(store):
     只断言查询次数拦不住旧写法：它也只有 1 次查询，但那次把全部 60 行
     （生产上就是全部文档数）搬进了 Python。
     """
-    with QueryCounter() as qc:
+    with QueryCounter(store.uri) as qc:
         list_documents(store, limit=10)
     assert sum(qc.rows) <= 10, (
         f"limit=10 却 materialize 了 {sum(qc.rows)} 行（全表 {DOCS} 行）")
@@ -202,7 +213,7 @@ def test_contexts_fetch_is_a_single_query(store):
     （~33ms）。这是根因清单里 R4 的回归哨。
     """
     ranges = {f"doc-{i:04d}": (1, 3) for i in (1, 5, 9, 13)}
-    with QueryCounter() as qc:
+    with QueryCounter(store.uri) as qc:
         got = contexts_for(store, ranges)
     assert qc.n == 1, f"上下文回捞发了 {qc.n} 次查询，应为 1"
     assert set(got) == set(ranges)
@@ -223,7 +234,7 @@ def test_search_query_count_does_not_grow_with_hits(store):
     cfg = RetrieveConfig(mode="hybrid", candidate_k=10, top_k=5, window=1)
     counts = []
     for q in ("alpha1", "alpha30"):
-        with QueryCounter() as qc:
+        with QueryCounter(store.uri) as qc:
             search(store, _Stub(), None, q, cfg, {}, 5)
         counts.append(qc.n)
     assert counts[0] == counts[1], (
@@ -232,7 +243,7 @@ def test_search_query_count_does_not_grow_with_hits(store):
 
 def test_health_is_a_bounded_number_of_scans(store):
     """对账的查询次数是常数，与文档数无关。"""
-    with QueryCounter() as qc:
+    with QueryCounter(store.uri) as qc:
         h = health(store, DIM, "stub")
     assert h["doc_count"] == DOCS
     assert h["chunk_count"] == DOCS * CHUNKS_PER

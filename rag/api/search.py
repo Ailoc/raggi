@@ -52,9 +52,12 @@ def _build_req_ctx(ctx, body: SearchReq):
     # "mime = NULL"（永远不匹配）而不是「不过滤」。
     filters = (body.filters.model_dump(exclude_none=True)
                if body.filters else {})
-    # 顶层 kb_id 优先级高于 filters.kb_id（兼容旧调用方）
+    # 顶层 kb_id 优先级高于 filters.kb_id / kb_ids（兼容旧调用方）。
+    # 两个范围同时出现时不能做并集或交集——那两种解释都会改变调用方
+    # 已写死的单库语义，这里明确让旧字段胜出。
     if body.kb_id:
         filters["kb_id"] = body.kb_id
+        filters.pop("kb_ids", None)
 
     # rerank=false 时显式关闭精排；缺省沿用服务端配置的 reranker
     reranker = None if body.rerank is False else ctx.registry.reranker
@@ -97,15 +100,17 @@ async def api_search_get(
         doc_ids: str = "", origin: str = "",
         mime: str = "", parser_engine: str = "",
         include_disabled: bool = False,
-        kb_id: str = "") -> SearchOut:
+        kb_id: str = "", kb_ids: str = "") -> SearchOut:
     """GET 便捷检索（外部脚本 / curl 直接调用）。
 
     与 POST 版等价，只是把参数平铺到 query string：
-    doc_ids 逗号分隔，其余同名同义。
+    doc_ids / kb_ids 逗号分隔，其余同名同义。
     """
     filters: dict = {}
     if doc_ids:
         filters["doc_ids"] = [d for d in doc_ids.split(",") if d]
+    if kb_ids:
+        filters["kb_ids"] = [k for k in kb_ids.split(",") if k]
     if origin:
         filters["origin"] = origin
     if mime:

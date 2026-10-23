@@ -2,7 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 /**
- * 前端构建：React 19 + MUI 9 → web/dist，由 FastAPI 的 StaticFiles 托管。
+ * 前端构建：React 19 + MUI 6 → web/dist，由 FastAPI 的 StaticFiles 托管。
  *
  * 2026-10-10 从 Svelte 5 迁到 React：迁移的驱动是"要用真的 MUI 组件库"
  * （MUI 只有 React 实现）。URL 结构、后端 API 契约、深链语义一律不变——

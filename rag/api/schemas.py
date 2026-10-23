@@ -22,10 +22,14 @@ _LIST_OF_IDS = list[_ID]
 class SearchFilters(BaseModel):
     """检索过滤条件。全部可选，缺省不过滤。
 
-    kb_id / doc_ids / origin 作用在 chunks 表（下推到 SQL）；
+    kb_id / kb_ids / doc_ids / origin 作用在 chunks 表（下推到 SQL）；
     mime / parser_engine 在 documents 表，会先解析成 doc_id 集合再下推。
     """
     kb_id: Optional[_ID] = None
+    # 多知识库范围：与 kb_id 同时出现时 kb_id 优先（见 api/search.py）。
+    kb_ids: Optional[_LIST_OF_IDS] = Field(
+        default=None, max_length=50,
+        description="限定多个知识库（最多 50 个）；空列表等价于不限制")
     # 上限 500 与批量删除/批量启停一致：更大的集合应分页，而不是
     # 拼成一条几万项的 SQL IN。
     doc_ids: Optional[_LIST_OF_IDS] = Field(default=None, max_length=500)
@@ -239,7 +243,7 @@ class AnswerReq(BaseModel):
     # 全部拉进内存拼提示词，没有上限就能用构造请求打出数百 MB。
     top_k: Optional[int] = Field(default=None, ge=1, le=50)
     mode: Optional[str] = None
-    filters: dict = Field(default_factory=dict)
+    filters: Optional[SearchFilters] = None
     window: Optional[int] = Field(default=None, ge=0, le=10)
     kb_id: Optional[_ID] = None    # 按知识库问答（原先缺失）
     # 多轮上下文：前端只传最近几轮，这里再做一次硬上限。

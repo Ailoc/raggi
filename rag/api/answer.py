@@ -35,9 +35,11 @@ def _filters(body: AnswerReq) -> dict:
     kb_id 必须在这里并进 filters，否则该字段形同虚设——
     请求里写了 kb_id 却不生效，调用方会以为答的是那个库。
     """
-    filters = dict(body.filters or {})
+    filters = (body.filters.model_dump(exclude_none=True, exclude_defaults=True)
+               if body.filters else {})
     if body.kb_id:
         filters["kb_id"] = body.kb_id
+        filters.pop("kb_ids", None)
     return filters
 
 

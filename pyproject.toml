@@ -64,7 +64,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# web/ 是 Svelte/TS，data/ 是运行时数据，都不该进 Python 检查范围
+# web/ 是 React/TS，data/ 是运行时数据，都不该进 Python 检查范围
 extend-exclude = ["web", "data", "build", "dist"]
 
 [tool.ruff.lint]

@@ -44,7 +44,7 @@ import {
 import { go, href, queryString, useRoute } from "../lib/router";
 import { usePicks } from "../lib/selection";
 import { downloadUrl, pageUrl, sourceKind } from "../lib/source";
-import { invalidateKbs, kbName, loadKbs, setCrumbs, useStore } from "../lib/store";
+import { invalidateKbs, kbName, loadKbs, setCrumbs, useStoreSelect } from "../lib/store";
 import type { Chunk, ChunkList, DocPlan, Document } from "../lib/types";
 import { strategyLabel } from "../lib/types";
 import { toast } from "../ui/toast";
@@ -69,7 +69,7 @@ export default function DocView({
 }): React.ReactElement {
   const look = useGlassLook("card");
   const route = useRoute();
-  const { kbsLoaded } = useStore();
+  const kbsLoaded = useStoreSelect((s) => s.kbsLoaded);
 
   const [doc, setDoc] = useState<Document | null>(null);
   const [plan, setPlan] = useState<DocPlan | null>(null);
@@ -390,23 +390,25 @@ export default function DocView({
             icon={<CircularProgress size={12} />} label={jobNote} />
         )}
         <Box sx={{ flex: 1 }} />
-        <Button
-          variant="outlined" size="small" startIcon={<RefreshIcon />}
-          disabled={!!jobNote}
-          onClick={() => {
-            void resplitDoc(docId, (r) => { if (r.job_id) void watchJob(r.job_id, "重新切分"); });
-          }}
-        >
-          重新切分
-        </Button>
-        <Tooltip title={showSrc ? "收起原文（V）" : "展开原文对照（V）"}>
-          <Button variant={showSrc ? "contained" : "outlined"} size="small" onClick={toggleSrc}>
-            {showSrc ? "收起原文" : selected ? `对照原文（第 ${selected.ordinal ?? 0} 块）` : "显示原文"}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+          <Button
+            variant="outlined" size="small" startIcon={<RefreshIcon />}
+            disabled={!!jobNote}
+            onClick={() => {
+              void resplitDoc(docId, (r) => { if (r.job_id) void watchJob(r.job_id, "重新切分"); });
+            }}
+          >
+            重新切分
           </Button>
-        </Tooltip>
-        <IconButton size="small" aria-label="文档维护操作" onClick={(e) => setMenuEl(e.currentTarget)}>
-          <MoreVertIcon />
-        </IconButton>
+          <Tooltip title={showSrc ? "收起原文（V）" : "展开原文对照（V）"}>
+            <Button variant={showSrc ? "contained" : "outlined"} size="small" onClick={toggleSrc}>
+              {showSrc ? "收起原文" : selected ? `对照原文（第 ${selected.ordinal ?? 0} 块）` : "显示原文"}
+            </Button>
+          </Tooltip>
+          <IconButton size="small" aria-label="文档维护操作" onClick={(e) => setMenuEl(e.currentTarget)}>
+            <MoreVertIcon />
+          </IconButton>
+        </Box>
         <Menu anchorEl={menuEl} open={!!menuEl} onClose={() => setMenuEl(null)}>
           <MenuItem onClick={() => {
             setMenuEl(null);
@@ -446,7 +448,7 @@ export default function DocView({
         <TextField
           size="small" type="search" placeholder="过滤分块内容…"
           value={filter} onChange={(e) => setFilter(e.target.value)}
-          sx={{ width: 280 }}
+          sx={{ width: { xs: "100%", sm: 280 } }}
           slotProps={{ htmlInput: { "aria-label": "按内容过滤分块" } }}
         />
         <Button size="small" variant="outlined" startIcon={<AddIcon />}
@@ -485,7 +487,7 @@ export default function DocView({
           alignItems: "start",
         }}
       >
-        <GlassPanel radius={12} look={look} aria-label="分块列表">
+        <GlassPanel radius={12} look={look} aria-label="分块列表" className="lg-clip">
           {chunks.length === 0 ? (
             <Alert
               severity={qRef.current ? "warning" : "info"}
@@ -501,7 +503,7 @@ export default function DocView({
           ) : (
             <>
               <TableContainer ref={sourceScroll}>
-                <Table size="small" aria-label="分块列表">
+                <Table size="small" aria-label="分块列表" sx={{ tableLayout: "fixed" }}>
                   <TableHead>
                     <TableRow>
                       <TableCell padding="checkbox">
@@ -513,17 +515,42 @@ export default function DocView({
                           inputProps={{ "aria-label": "全选当前页" }}
                         />
                       </TableCell>
-                      <TableCell align="right" sx={{ width: 56 }}>#</TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ display: { xs: "none", sm: "table-cell" }, width: 48 }}
+                      >
+                        #
+                      </TableCell>
                       <TableCell>内容</TableCell>
-                      <TableCell align="right" sx={{ width: 64 }}>页</TableCell>
-                      <TableCell sx={{ width: 160 }}>状态</TableCell>
-                      <TableCell align="right" sx={{ width: 130 }}>
+                      <TableCell
+                        align="right"
+                        sx={{ display: { xs: "none", sm: "table-cell" }, width: 56 }}
+                      >
+                        页
+                      </TableCell>
+                      <TableCell
+                        sx={{
+                          display: { xs: "none", sm: "table-cell" },
+                          width: { sm: 120, md: 160 },
+                        }}
+                      >
+                        状态
+                      </TableCell>
+                      <TableCell align="right" sx={{ width: { xs: 120, sm: 130 } }}>
                         <span className="sr-only">操作</span>
                       </TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {chunks.map((c, i) => (
+                    {chunks.map((c, i) => {
+                      const flags = (
+                        <>
+                          {c.origin === "manual" && <Chip size="small" variant="outlined" label="手工" />}
+                          {c.edited && <Chip size="small" variant="outlined" color="warning" label="已编辑" />}
+                          {c.enabled === false && <Chip size="small" variant="outlined" color="error" label="已停用" />}
+                        </>
+                      );
+                      return (
                       <TableRow
                         key={c.chunk_id}
                         hover
@@ -555,7 +582,12 @@ export default function DocView({
                             inputProps={{ "aria-label": `选择第 ${c.ordinal ?? 0} 块` }}
                           />
                         </TableCell>
-                        <TableCell align="right">{c.ordinal ?? 0}</TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ display: { xs: "none", sm: "table-cell" } }}
+                        >
+                          {c.ordinal ?? 0}
+                        </TableCell>
                         <TableCell sx={{ maxWidth: 640 }}>
                           <Typography
                             variant="body2" title={c.text}
@@ -569,18 +601,32 @@ export default function DocView({
                             {c.text}
                           </Typography>
                           <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>
+                            <Box
+                              component="span"
+                              sx={{ display: { xs: "inline", sm: "none" } }}
+                            >
+                              #{c.ordinal ?? 0} ·{" "}
+                            </Box>
                             {c.heading_path || "无标题层级"} · {c.token_count ?? 0} tok
                             {c.offset_valid && c.char_start != null
                               ? ` · ${c.char_start}–${c.char_end}` : ""}
                           </Typography>
-                        </TableCell>
-                        <TableCell align="right">{c.page ?? "—"}</TableCell>
-                        <TableCell>
-                          <Stack direction="row" spacing={0.5}>
-                            {c.origin === "manual" && <Chip size="small" variant="outlined" label="手工" />}
-                            {c.edited && <Chip size="small" variant="outlined" color="warning" label="已编辑" />}
-                            {c.enabled === false && <Chip size="small" variant="outlined" color="error" label="已停用" />}
+                          <Stack
+                            direction="row"
+                            spacing={0.5}
+                            sx={{ mt: 0.5, display: { xs: "flex", sm: "none" } }}
+                          >
+                            {flags}
                           </Stack>
+                        </TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ display: { xs: "none", sm: "table-cell" } }}
+                        >
+                          {c.page ?? "—"}
+                        </TableCell>
+                        <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
+                          <Stack direction="row" spacing={0.5}>{flags}</Stack>
                         </TableCell>
                         <TableCell align="right">
                           <Stack direction="row" spacing={0.5} justifyContent="flex-end"
@@ -611,7 +657,8 @@ export default function DocView({
                           </Stack>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </TableContainer>
@@ -639,8 +686,12 @@ export default function DocView({
           <GlassPanel
             radius={12} look={look}
             aria-label="原文"
+            className="lg-clip"
             style={{
-              position: "sticky", top: 0, maxHeight: "calc(100vh - 220px)",
+              position: "sticky",
+              // 顶栏是 sticky 的：原文面板若贴 0 会滑到玻璃下面。
+              top: "calc(var(--shell-header-h, 164px) + 8px)",
+              maxHeight: "calc(100dvh - var(--shell-header-h, 164px) - 24px)",
               display: "flex", flexDirection: "column",
             }}
           >

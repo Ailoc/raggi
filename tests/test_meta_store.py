@@ -707,3 +707,43 @@ def test_kb_plan_reset_restores_global_strategy(tmp_path):
     assert plan["own"]["strategy"] == "structure", (
         f"恢复默认只恢复了数字，策略仍是 {plan['own']['strategy']}")
     assert plan["own"]["custom"] is False
+
+
+def test_kb_counts_are_aggregated_in_sqlite(tmp_path, monkeypatch):
+    """知识库列表的文档/分块计数必须由 SQL 聚合，而不是搬回 Python 累加。
+
+    5 万篇文档时旧写法要跨语言搬运 5 万行（实测 161ms，内存随文档线性
+    增长）；聚合后只返回「知识库数」行。同时验证两条读路径（列表与详情）
+    的计数口径仍然一致。
+    """
+    client, _store, meta = _env(tmp_path, with_meta=True)
+    a = client.post("/api/kbs", json={"name": "库A"}).json()["kb_id"]
+    b = client.post("/api/kbs", json={"name": "库B"}).json()["kb_id"]
+    for kb_id, text in ((a, "甲文档 内容"), (a, "乙文档 内容"),
+                        (b, "丙文档 内容")):
+        r = client.post("/api/documents/text", json={
+            "text": text, "title": text, "kb_id": kb_id})
+        assert r.status_code == 200, r.text
+    # 未分组文档不应计入任何库
+    r = client.post("/api/documents/text",
+                    json={"text": "无库文档 内容", "title": "无库"})
+    assert r.status_code == 200, r.text
+
+    seen: list[str] = []
+    original = meta.query
+
+    def spy(sql, params=()):
+        seen.append(sql)
+        return original(sql, params)
+
+    monkeypatch.setattr(meta, "query", spy)
+    listed = {k["kb_id"]: k for k in client.get("/api/kbs").json()}
+    assert listed[a]["doc_count"] == 2
+    assert listed[a]["chunk_count"] >= 2
+    assert listed[b]["doc_count"] == 1
+    assert any("GROUP BY kb_id" in sql for sql in seen), (
+        "知识库计数仍在取回 documents 全表后 Python 聚合")
+
+    detail = client.get(f"/api/kbs/{a}").json()
+    assert detail["doc_count"] == listed[a]["doc_count"]
+    assert detail["chunk_count"] == listed[a]["chunk_count"]

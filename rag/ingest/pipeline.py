@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import threading
 import uuid
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -199,22 +200,30 @@ def _embed_concurrently(embedder, texts: list[str], cfg) -> list[list[float]]:
     return [v for rs in results for v in rs]
 
 
-def _page_of(spans, pos: int):
-    """块起点落在哪个解析 span → 页码（跨页块归起点所在的页）。
+class _PageIndex:
+    """块起点 → 页码（跨页块归起点所在的页）。
 
     页码用于跳转与展示，起点页是用户最可能想跳到的位置；块跨越
     两页时不必逐页标注（旧实现为保证页归属而逐页硬切，页末一句
     被砍成两半、overlap 也跨不过去——这次重构取消了那个约束）。
+
+    normalize() 按顺序生成 span，因此按起点二分即可；改前每块都要
+    线性扫一遍全部页 span，5000 块 × 1000 页实测 560ms（O(块×页)）。
     """
-    if not spans:
-        return None
-    last = spans[0]
-    for sp in spans:
-        if sp.start <= pos < sp.end:
-            return sp.page
-        if pos >= sp.end:
-            last = sp
-    return last.page
+
+    def __init__(self, spans):
+        self._spans = spans
+        self._starts = [sp.start for sp in spans]
+
+    def page_of(self, pos: int):
+        if not self._spans:
+            return None
+        # i = 最后一个 start <= pos 的 span；落在页间缝隙时沿用前一页，
+        # 与旧的线性扫描语义一致。
+        i = bisect_right(self._starts, pos) - 1
+        if i < 0:
+            return self._spans[0].page
+        return self._spans[i].page
 
 
 def _contextual(title: str, heading_path: str, text: str) -> str:
@@ -246,6 +255,7 @@ def _build_chunk_rows(parsed, doc_id: str, embed_model: str,
     spans = split_document(parsed.text, split_cfg.chunk_size,
                            split_cfg.chunk_overlap, strategy=strategy,
                            embed_fn=embed_fn)
+    page_index = _PageIndex(parsed.spans)
     for ordinal, sp in enumerate(spans):
         chunk_rows.append({
             "chunk_id": str(uuid.uuid4()),
@@ -255,7 +265,7 @@ def _build_chunk_rows(parsed, doc_id: str, embed_model: str,
             "text": sp.text,
             "text_seg": "",  # 批量分词在外部填充
             "heading_path": sp.heading_path,
-            "page": _page_of(parsed.spans, sp.start),
+            "page": page_index.page_of(sp.start),
             "char_start": sp.start,
             "char_end": sp.end,
             "token_count": max(1, len(sp.text) // 4),

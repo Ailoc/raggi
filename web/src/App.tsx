@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from "react";
 import type { ReactElement } from "react";
 import Box from "@mui/material/Box";
 import Breadcrumbs from "@mui/material/Breadcrumbs";
@@ -19,16 +21,22 @@ import LightModeIcon from "@mui/icons-material/LightMode";
 import { CONTENT_MAX } from "./lib/layout";
 import { SECTIONS, sectionOf } from "./lib/nav";
 import { go, href, useRoute } from "./lib/router";
-import { loadKbs, setTheme, startQueueWatch, stopQueueWatch, useQueue, useStore } from "./lib/store";
+import {
+  loadKbs, setTheme, startQueueWatch, stopQueueWatch, useQueue, useStoreSelect,
+} from "./lib/store";
 import KbList from "./views/KbList";
-import KbDocs from "./views/KbDocs";
-import KbChunks from "./views/KbChunks";
-import KbSettings from "./views/KbSettings";
-import Jobs from "./views/Jobs";
-import Search from "./views/Search";
-import DocView from "./views/DocView";
-import Settings from "./views/Settings";
-import ApiDoc from "./views/ApiDoc";
+
+// 首页（知识库总览）随首包加载；其余视图按路由分包。
+// 改前所有视图 + 1114 行 API 文档数据都进同一个 index 块：首屏必须
+// 下载并解析用户根本还没打开的页面。默认路由是 kbs，因此 KbList 留下。
+const KbDocs = lazy(() => import("./views/KbDocs"));
+const KbChunks = lazy(() => import("./views/KbChunks"));
+const KbSettings = lazy(() => import("./views/KbSettings"));
+const Jobs = lazy(() => import("./views/Jobs"));
+const Search = lazy(() => import("./views/Search"));
+const DocView = lazy(() => import("./views/DocView"));
+const Settings = lazy(() => import("./views/Settings"));
+const ApiDoc = lazy(() => import("./views/ApiDoc"));
 import { ToastHost } from "./ui/toast";
 import CommandPalette from "./ui/CommandPalette";
 import WorkspaceTabs from "./ui/WorkspaceTabs";
@@ -62,14 +70,61 @@ function QueueChip(): ReactElement | null {
   );
 }
 
+/**
+ * busy 单独订阅：它每次 API 调用都会 +1/-1，放在 App 的订阅里会让
+ * 壳层（以及 route 之外的整棵视图树）跟着抖动。
+ */
+function BusyIndicator(): ReactElement | null {
+  const busy = useStoreSelect((s) => s.busy);
+  if (busy <= 0) return null;
+  return <CircularProgress size={16} aria-label="正在加载" />;
+}
+
+function RouteFallback(): ReactElement {
+  return (
+    <Box sx={{ display: "grid", placeItems: "center", py: 10 }}>
+      <CircularProgress size={24} aria-label="正在加载页面" />
+    </Box>
+  );
+}
+
 export default function App(): ReactElement {
   const route = useRoute();
-  const { theme, busy, crumbs } = useStore();
+  const theme = useStoreSelect((s) => s.theme);
+  const crumbs = useStoreSelect((s) => s.crumbs);
   const section = sectionOf(route);
   const barLook = useGlassLook("bar");
   // 页面在顶部时顶栏完全透明，和页面融为一体；开始滚动后才浮出玻璃。
   const [scrolled, setScrolled] = useState(false);
   const mainRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+
+  /*
+   * 把顶栏实测高度写进 CSS 变量，供需要“填满剩余视口”的视图使用。
+   *
+   * 顶栏高度不是常数：面包屑、工作区标签会让它从 84 长到 164，
+   * 滚动后顶部留白收起又少 20px，小屏是另一套值。检索工作台和 API
+   * 文档如果按 100% 或 100vh-84 算高度，就会比可用空间多出正好一个
+   * 顶栏——输入台被挤出视口、页面多出一条无意义的纵向滚动。
+   */
+  useLayoutEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const root = document.documentElement;
+    const sync = (): void => {
+      root.style.setProperty(
+        "--shell-header-h",
+        `${Math.ceil(el.getBoundingClientRect().height)}px`,
+      );
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty("--shell-header-h");
+    };
+  }, []);
 
   // 换页回到顶部：上一页的滚动位置不该带进新页面（API 页尤其依赖
   // 顶栏处于"未滚动"状态来计算三栏的可用高度）。
@@ -109,8 +164,17 @@ export default function App(): ReactElement {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // 路由出口只在 route 变化时重建：App 因 crumbs/theme 重渲染时，
+  // React 会跳过整棵视图子树（context 更新仍会穿透到消费者）。
+  const view = useMemo(() => (
+    <Suspense fallback={<RouteFallback />}>
+      <View route={route} />
+    </Suspense>
+  ), [route]);
+
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* 内容区只依赖 route：顶栏滚动/主题/crumbs 变化时不必让整页重渲染。 */}
       {/*
         环境底色：固定在视口最底层，顶栏与内容区共用同一片光。
         顶栏的玻璃糊的是这层底色，与下面的页面才接得上。
@@ -135,6 +199,7 @@ export default function App(): ReactElement {
         */}
         <Box
           component="header"
+          ref={headerRef}
           sx={{
             position: "sticky", top: 0, zIndex: 20, pb: 1,
             // 顶栏与正文同宽（全站统一的 CONTENT_MAX）+ 同样的内边距。
@@ -161,7 +226,7 @@ export default function App(): ReactElement {
             <Toolbar
               disableGutters
               variant="dense"
-              sx={{ gap: 2, minHeight: 56, px: { xs: 1, md: 2 } }}
+              sx={{ gap: { xs: 1, sm: 2 }, minHeight: 56, px: { xs: 1, md: 2 } }}
             >
               <Box
                 component="a"
@@ -170,6 +235,9 @@ export default function App(): ReactElement {
                   display: "flex", alignItems: "center", gap: 1.25,
                   color: "inherit", textDecoration: "none", flex: "none",
                   borderRadius: 999, pr: 0.5,
+                  // 320px 级窄屏：品牌图标也要让位，否则五个分区只能
+                  // 靠横向滑动才能点到 API。
+                  "@media (max-width: 359px)": { display: "none" },
                 }}
               >
                 <Box
@@ -182,7 +250,15 @@ export default function App(): ReactElement {
                 >
                   <LayersIcon color="primary" sx={{ fontSize: 18 }} />
                 </Box>
-                <Typography variant="subtitle1" sx={{ fontWeight: 600, letterSpacing: ".01em" }}>
+                {/* 小屏只留图标：五个分区在 360px 下要全部可见，品牌文字
+                    和每个 Tab 的内边距都得让位。 */}
+                <Typography
+                  variant="subtitle1"
+                  sx={{
+                    fontWeight: 600, letterSpacing: ".01em",
+                    display: { xs: "none", sm: "block" },
+                  }}
+                >
                   Raggi
                 </Typography>
               </Box>
@@ -207,9 +283,10 @@ export default function App(): ReactElement {
                   "& .MuiTabs-indicator": { display: "none" },
                   "& .MuiTab-root": {
                     minHeight: 36,
-                    minWidth: 72,
-                    px: 2,
+                    minWidth: { xs: 0, sm: 72 },
+                    px: { xs: 0.9, sm: 2 },
                     mx: 0.25,
+                    fontSize: { xs: 12.5, sm: 14 },
                     borderRadius: 999,
                     transition: "background-color .18s ease, color .18s ease",
                   },
@@ -235,7 +312,7 @@ export default function App(): ReactElement {
 
               <Box sx={{ flex: 1 }} />
 
-              {busy > 0 && <CircularProgress size={16} aria-label="正在加载" />}
+              <BusyIndicator />
               <QueueChip />
 
               <Tooltip title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}>
@@ -302,7 +379,7 @@ export default function App(): ReactElement {
           </Box>
         </Box>
 
-        <View route={route} />
+        {view}
       </Box>
 
       <ToastHost />

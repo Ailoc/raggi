@@ -32,7 +32,7 @@ import { api } from "../lib/api";
 import { CONTENT_MAX } from "../lib/layout";
 import { go, href } from "../lib/router";
 import { usePicks } from "../lib/selection";
-import { kbName, setCrumbs, track, useStore } from "../lib/store";
+import { kbName, setCrumbs, track, useStoreSelect } from "../lib/store";
 import {
   addChunkDialog, batchSetEnabled, deleteChunk, editChunkDialog, setChunkEnabled,
 } from "../lib/ops";
@@ -54,7 +54,7 @@ export default function KbChunks({
   scope?: string;
 }): React.ReactElement {
   const look = useGlassLook("card");
-  const { kbsLoaded } = useStore();
+  const kbsLoaded = useStoreSelect((s) => s.kbsLoaded);
   const standalone = scope === "standalone";
   const [items, setItems] = useState<Chunk[]>([]);
   const [total, setTotal] = useState(0);
@@ -148,8 +148,13 @@ export default function KbChunks({
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
-      <Stack direction="row" spacing={2} alignItems="flex-start" sx={{ mb: 2 }}>
-        <Box sx={{ flex: 1, minWidth: 0 }}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={2}
+        alignItems={{ xs: "stretch", sm: "flex-start" }}
+        sx={{ mb: 2 }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
             {standalone ? "独立分块" : "全部分块"}
           </Typography>
@@ -160,35 +165,43 @@ export default function KbChunks({
             {q ? "" : ` · 共 ${total} 块`}
           </Typography>
         </Box>
-        <ToggleButtonGroup
-          size="small"
-          exclusive
-          value={standalone ? "standalone" : "all"}
-          onChange={(_e, v: string | null) => { if (v) setScope(v === "standalone" ? "standalone" : ""); }}
-          aria-label="分块范围"
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          flexWrap="wrap"
+          sx={{ flexShrink: 0, alignSelf: { xs: "flex-end", sm: "flex-start" } }}
         >
-          <ToggleButton value="all">全部</ToggleButton>
-          <ToggleButton value="standalone">仅独立块</ToggleButton>
-        </ToggleButtonGroup>
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={() => {
-            void addChunkDialog({ kbId }).then((ok) => { if (ok) void afterChange(); });
-          }}
-        >
-          新增独立分块
-        </Button>
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={standalone ? "standalone" : "all"}
+            onChange={(_e, v: string | null) => { if (v) setScope(v === "standalone" ? "standalone" : ""); }}
+            aria-label="分块范围"
+          >
+            <ToggleButton value="all">全部</ToggleButton>
+            <ToggleButton value="standalone">仅独立块</ToggleButton>
+          </ToggleButtonGroup>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => {
+              void addChunkDialog({ kbId }).then((ok) => { if (ok) void afterChange(); });
+            }}
+          >
+            新增独立分块
+          </Button>
+        </Stack>
       </Stack>
 
-      <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
+      <Stack direction="row" spacing={2} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
         <TextField
           size="small"
           type="search"
           placeholder="过滤分块内容…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          sx={{ width: 320 }}
+          sx={{ width: { xs: "100%", sm: 320 } }}
           slotProps={{ htmlInput: { "aria-label": "按内容过滤分块" } }}
         />
         {refreshing && <CircularProgress size={14} aria-label="正在刷新" />}
@@ -245,9 +258,9 @@ export default function KbChunks({
       )}
 
       {phase === "ready" && items.length > 0 && (
-        <GlassPanel radius={12} look={look}>
+        <GlassPanel radius={12} look={look} className="lg-clip">
           <TableContainer>
-            <Table size="small" aria-label="分块列表">
+            <Table size="small" aria-label="分块列表" sx={{ tableLayout: "fixed" }}>
               <TableHead>
                 <TableRow>
                   <TableCell padding="checkbox">
@@ -259,17 +272,39 @@ export default function KbChunks({
                       inputProps={{ "aria-label": "全选当前页" }}
                     />
                   </TableCell>
-                  <TableCell align="right" sx={{ width: 56 }}>#</TableCell>
+                  <TableCell
+                    align="right"
+                    sx={{ display: { xs: "none", sm: "table-cell" }, width: 48 }}
+                  >
+                    #
+                  </TableCell>
                   <TableCell>内容</TableCell>
-                  <TableCell align="right" sx={{ width: 64 }}>页</TableCell>
-                  <TableCell sx={{ width: 140 }}>状态</TableCell>
-                  <TableCell align="right" sx={{ width: 130 }}>
+                  <TableCell
+                    align="right"
+                    sx={{ display: { xs: "none", sm: "table-cell" }, width: 56 }}
+                  >
+                    页
+                  </TableCell>
+                  <TableCell
+                    sx={{ display: { xs: "none", sm: "table-cell" }, width: { sm: 120, md: 140 } }}
+                  >
+                    状态
+                  </TableCell>
+                  <TableCell align="right" sx={{ width: { xs: 120, sm: 130 } }}>
                     <span className="sr-only">操作</span>
                   </TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {items.map((c) => (
+                {items.map((c) => {
+                  const flags = (
+                    <>
+                      {c.origin === "manual" && <Chip size="small" label="手工" variant="outlined" />}
+                      {c.edited && <Chip size="small" color="warning" label="已编辑" variant="outlined" />}
+                      {!isOn(c) && <Chip size="small" color="error" label="已停用" variant="outlined" />}
+                    </>
+                  );
+                  return (
                   <TableRow key={c.chunk_id} hover>
                     <TableCell padding="checkbox">
                       <Checkbox
@@ -279,7 +314,12 @@ export default function KbChunks({
                         inputProps={{ "aria-label": `选择第 ${c.ordinal ?? 0} 块` }}
                       />
                     </TableCell>
-                    <TableCell align="right">{c.ordinal ?? 0}</TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ display: { xs: "none", sm: "table-cell" } }}
+                    >
+                      {c.ordinal ?? 0}
+                    </TableCell>
                     <TableCell sx={{ maxWidth: 640 }}>
                       <Typography
                         variant="body2"
@@ -292,14 +332,22 @@ export default function KbChunks({
                       >
                         {c.text}
                       </Typography>
-                    </TableCell>
-                    <TableCell align="right">{c.page ?? "—"}</TableCell>
-                    <TableCell>
-                      <Stack direction="row" spacing={0.5}>
-                        {c.origin === "manual" && <Chip size="small" label="手工" variant="outlined" />}
-                        {c.edited && <Chip size="small" color="warning" label="已编辑" variant="outlined" />}
-                        {!isOn(c) && <Chip size="small" color="error" label="已停用" variant="outlined" />}
+                      <Stack
+                        direction="row"
+                        spacing={0.5}
+                        sx={{ mt: 0.5, display: { xs: "flex", sm: "none" } }}
+                      >
+                        {flags}
                       </Stack>
+                    </TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ display: { xs: "none", sm: "table-cell" } }}
+                    >
+                      {c.page ?? "—"}
+                    </TableCell>
+                    <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
+                      <Stack direction="row" spacing={0.5}>{flags}</Stack>
                     </TableCell>
                     <TableCell align="right">
                       <Stack direction="row" spacing={0.5} justifyContent="flex-end">
@@ -325,7 +373,8 @@ export default function KbChunks({
                       </Stack>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>

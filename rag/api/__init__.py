@@ -177,7 +177,7 @@ def _finalize_response(response, rid: str, started: float):
 
 
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
-# 源码在 web/src/（Svelte 5 + Vite），产物在 web/dist/。
+# 源码在 web/src/（React 19 + MUI 6 + Vite），产物在 web/dist/。
 # 分成两棵树：构建只写 dist，清空产物时不可能误删源码。
 WEB_SRC_DIR = WEB_DIR / "src"
 WEB_DIST_DIR = WEB_DIR / "dist"

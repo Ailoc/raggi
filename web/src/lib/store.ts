@@ -55,6 +55,20 @@ export function useStore(): State {
   return useSyncExternalStore(subscribe, getState);
 }
 
+/**
+ * 只订阅一个切片。
+ *
+ * 用 `useStore()` 的组件会在**任何**全局变化时重渲染——包括每次 API
+ * 调用的 busy 计数、crumbs、kbs 重新加载。玻璃面板与检索工作台因此
+ * 会为一次无关的 busy+1 各跑一遍 MUI/emotion，长列表上很贵。
+ *
+ * selector 必须返回原始值或稳定引用（如 state.kbs、state.crumbs）：
+ * 每次返回新对象会让 useSyncExternalStore 认为快照一直在变。
+ */
+export function useStoreSelect<T>(selector: (s: State) => T): T {
+  return useSyncExternalStore(subscribe, () => selector(state));
+}
+
 // ---- 主题 ----------------------------------------------------------------
 
 export function setTheme(theme: "dark" | "light"): void {

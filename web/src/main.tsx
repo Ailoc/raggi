@@ -8,7 +8,7 @@ import { ThemeProvider } from "@mui/material/styles";
 import App from "./App";
 import { DialogHost } from "./lib/dialog";
 import { buildTheme } from "./theme";
-import { useStore } from "./lib/store";
+import { useStoreSelect } from "./lib/store";
 import { GlassProvider } from "./ui/glass";
 
 /**
@@ -27,7 +27,7 @@ const emotionCache = createCache({
 });
 
 function Root(): React.ReactElement {
-  const { theme } = useStore();
+  const theme = useStoreSelect((s) => s.theme);
   const muiTheme = useMemo(() => buildTheme(theme), [theme]);
 
   // MUI 的 prefers-color-scheme 与我们的 data-theme 可能不一致：

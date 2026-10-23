@@ -915,3 +915,184 @@ def test_ambient_backdrop_drifts_slowly_and_can_be_stopped():
     assert css.count("@keyframes lg-aurora-drift-") >= 3, "光斑动画周期不足三套"
     assert "will-change: transform" in css, "光斑没有走合成层"
     assert "prefers-reduced-motion: reduce" in css, "缺少减少动态偏好的停用规则"
+
+
+# ---- 响应式布局 ---------------------------------------------------------
+
+def test_viewport_filling_views_subtract_the_measured_shell_header():
+    """填满视口的视图必须用壳层实测顶栏高度，而不是 100% / 100vh-84。
+
+    回归防护：顶栏在滚动区内部且高度随面包屑、工作区标签变化。写死值
+    会让检索页多出一个顶栏的高度——底部输入台正好被挤出屏幕，对话页
+    的输入台也一起消失；页面还会多出一条无意义的纵向滚动。
+    """
+    app = read(SRC / "App.tsx")
+    assert "--shell-header-h" in app, "壳层没有下发顶栏实测高度"
+    assert "ResizeObserver" in app, "顶栏高度变化（面包屑/滚动）不会同步"
+
+    search = read(VIEWS / "Search.tsx")
+    assert "calc(100% - var(--shell-header-h" in search, \
+        "检索工作台没有按剩余视口定高"
+    assert 'height: "100%"' not in search, \
+        "检索页又直接按 100% 定高，输入台会被顶出屏幕"
+
+    api = read(VIEWS / "ApiDoc.tsx")
+    assert "calc(100% - var(--shell-header-h" in api, \
+        "API 文档没有按剩余视口定高"
+    assert "100vh - 84px" not in api, "API 文档又写死了顶栏高度"
+
+
+def test_scrollable_tables_clip_inside_the_glass_panel():
+    """宽表必须裁在玻璃面板内并固定表格布局。
+
+    回归防护：TableContainer 自己会横向滚动，但 Chrome 仍把子内容的
+    scrollWidth 算进 main。不裁边时 430px 视口能横向拖动整页、表头跟着
+    跑；不固定布局时，小屏几列一起把表格撑到 687px。
+    """
+    for name in ("KbDocs.tsx", "KbChunks.tsx", "DocView.tsx", "Jobs.tsx"):
+        view = read(VIEWS / name)
+        assert 'className="lg-clip"' in view, f"{name} 的表格面板没有裁边"
+        assert 'tableLayout: "fixed"' in view, f"{name} 宽表未固定布局，窄屏会撑破面板"
+    keys = read(UI / "KeysPanel.tsx")
+    assert 'className="lg-clip"' in keys and 'tableLayout: "fixed"' in keys
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert ".lg-clip" in css and "overflow: hidden" in css
+
+
+def test_topbar_keeps_every_section_reachable_on_narrow_screens():
+    """360px 下五个分区要全部可见，不能靠横向滑动才发现设置/API。"""
+    app = read(SRC / "App.tsx")
+    assert 'display: { xs: "none", sm: "block" }' in app, \
+        "小屏品牌文字没有让位，导航会被挤出容器"
+    assert 'minWidth: { xs: 0, sm: 72 }' in app, \
+        "小屏 Tab 仍保留 72px 最小宽度"
+
+
+def test_filter_panel_is_a_glass_dialog_not_a_sidebar():
+    """完整条件必须是浮动玻璃面板，不能退回右侧 Drawer。
+
+    17 个字段在笔记本高度下塞不进一个窄下拉；居中面板 + 分类纵向分区 +
+    组内多列控件既保住功能，也避免侧边栏挤压主内容。纸面必须复用
+    GlassFilterPaper（真玻璃），而不是 MUI 默认 Paper。
+    """
+    filters = read(UI / "SearchFilters.tsx")
+    assert "<Dialog" in filters and "Drawer" not in filters, \
+        "条件面板又变回侧边栏/抽屉"
+    assert "PaperComponent={GlassFilterPaper}" in filters, \
+        "条件面板没有使用玻璃纸面"
+    glass = read(UI / "glass.tsx")
+    assert "GlassFilterPaper" in glass and "usePopoverGlassLook" in glass, \
+        "条件面板材质没有和输入台/浮层统一"
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert ".lg-filter-panel" in css and "overflow: hidden" in css, \
+        "玻璃纸面没有裁圆角，头尾会跟着内容滚动"
+    assert "应用后写入地址" not in filters, \
+        "参数不再写 URL，面板副标题还在说“写入地址”"
+
+
+def test_kb_scope_picker_is_multi_select_searchable_and_glass():
+    """知识库范围必须是一个可搜索的多选浮层，而不是单值下拉。
+
+    回归防护：后端只认单库时，界面上的“多选”会看起来选了两个库、
+    实际只查一个。范围以 filters.kb_ids 数组下发，且入口只有一份，
+    输入台与条件抽屉共用，避免两处对已选范围的解释漂移。
+    """
+    picker = read(UI / "KbMultiSelect.tsx")
+    for token in (
+        "搜索知识库名称或描述",
+        'role="listbox"',
+        'aria-multiselectable="true"',
+        "Checkbox",
+        "全部知识库",
+        "lg-kb-picker",
+    ):
+        assert token in picker, f"多选浮层缺少：{token}"
+
+    composer = read(UI / "SearchComposer.tsx")
+    filters = read(UI / "SearchFilters.tsx")
+    assert "<KbMultiSelect" in composer, "输入台没有接入多选浮层"
+    assert "<KbMultiSelect" in filters, "条件抽屉没有接入同一个多选浮层"
+
+    params = read(LIB / "searchparams.ts")
+    assert "kbIdsFromValue" in params and "filters.kb_ids = kbIds" in params, \
+        "多选范围没有折成 filters.kb_ids"
+    assert "GlassPanel" in picker and 'material="regular"' in picker, \
+        "多选浮层没有走 open-glass-ui 的玻璃材质，又退回 CSS 白板"
+    assert "usePopoverGlassLook" in picker, \
+        "多选浮层与输入台用了两套材质，透明度/模糊会明显不一致"
+    css = (UI / "glass.css").read_text(encoding="utf-8")
+    assert ".lg-glass-popover-paper" in css and "transparent" in css, \
+        "Popover 纸面没有让位给玻璃材质，实色背景会盖住玻璃"
+
+
+def test_retrieval_mode_picker_uses_glass_icons_and_keyboard():
+    """召回模式浮层必须与知识库浮层同材质，且每个模式带独立图标。"""
+    mode = read(UI / "RetrievalModeSelect.tsx")
+    for token in (
+        "GlassPanel",
+        'material="regular"',
+        "usePopoverGlassLook",
+        "lg-glass-popover",
+        "HubIcon",
+        "ScatterPlotIcon",
+        "TextSnippetIcon",
+        'role="listbox"',
+        "ArrowDown",
+    ):
+        assert token in mode, f"召回模式浮层缺少：{token}"
+    composer = read(UI / "SearchComposer.tsx")
+    assert "<RetrievalModeSelect" in composer, "输入台没有接入召回模式浮层"
+    assert "<Menu" not in composer, "召回模式又退回了普通 MUI Menu（CSS 白雾而非玻璃）"
+
+
+def test_glass_popover_material_is_shared():
+    """两个输入台浮层必须共用同一套玻璃 look，避免再次出现厚白板。"""
+    glass = read(UI / "glass.tsx")
+    assert "usePopoverGlassLook" in glass, "缺少输入台浮层的共用材质"
+    assert "0.15" in glass and "1.1" in glass,         "浮层材质没有保留“略厚于输入台”的填充/模糊补偿"
+
+
+# ---- 首包与流式渲染成本 ----------------------------------------------------
+
+def test_routes_are_code_split_and_global_state_is_scoped():
+    """路由按需加载，全局状态按切片订阅。
+
+    回归防护：改前 8 个视图与 1114 行 API 文档数据同在一个 index 块
+    （gzip 145KB）；且任何一次 `busy +1` 都会让玻璃面板与整棵壳层
+    重渲染。两者都不会报错，只会让首屏和加载期变慢。
+    """
+    app = read(SRC / "App.tsx")
+    for view in ("KbDocs", "KbChunks", "KbSettings", "Jobs", "Search",
+                 "DocView", "Settings", "ApiDoc"):
+        assert f'lazy(() => import("./views/{view}"))' in app, \
+            f"{view} 没有按路由分包（首包会重新变胖）"
+    assert "<Suspense" in app, "懒加载路由缺少 Suspense 边界"
+    assert "useStoreSelect((s) => s.theme)" in app, "壳层仍在整店订阅全局状态"
+    assert "<BusyIndicator" in app, "busy 指示器没有独立订阅"
+
+    main = read(SRC / "main.tsx")
+    assert "useStoreSelect((s) => s.theme)" in main, \
+        "根组件仍整店订阅：busy/kbs 变化会重渲染整个应用"
+    glass = read(UI / "glass.tsx")
+    assert "useStore()" not in glass, "玻璃面板仍在整店订阅（每块玻璃都跟着 busy 重渲染）"
+
+
+def test_streaming_updates_are_coalesced():
+    """流式回答每帧只更新正文，不得重建整段对话/输入台。
+
+    回归防护：delta 事件原本每个都 `map` 轮次数组（新数组 → 整页
+    重渲染），且证据列表、输入台没有 memo；一轮长回答会把整棵
+    工作台按 token 重渲染。
+    """
+    search = read(VIEWS / "Search.tsx")
+    assert 'current.status !== "searching") return prev' in search, \
+        "每个 delta 仍在重建轮次数组"
+    assert "onToggle={toggleChatExpanded}" in search, \
+        "证据列表的 onToggle 不是稳定引用，memo 会失效"
+
+    thread = read(UI / "ChatThread.tsx")
+    assert "const ChatTurnRow = memo(" in thread, "对话轮次没有 memo"
+    evidence = read(UI / "EvidenceList.tsx")
+    assert "export default memo(EvidenceList)" in evidence, "证据列表没有 memo"
+    composer = read(UI / "SearchComposer.tsx")
+    assert "export default memo(SearchComposer)" in composer, "输入台没有 memo"

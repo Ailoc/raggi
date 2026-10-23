@@ -1,12 +1,9 @@
-import { useState } from "react";
-import Box from "@mui/material/Box";
-import Button from "@mui/material/Button";
+import { memo } from "react";
+import Box from "@mui/material/Box";import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
 import InputBase from "@mui/material/InputBase";
-import Menu from "@mui/material/Menu";
-import MenuItem from "@mui/material/MenuItem";
 import Stack from "@mui/material/Stack";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
@@ -15,16 +12,14 @@ import Typography from "@mui/material/Typography";
 import AddCommentIcon from "@mui/icons-material/AddComment";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
-import CheckIcon from "@mui/icons-material/Check";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
-import HubIcon from "@mui/icons-material/Hub";
 import SearchIcon from "@mui/icons-material/Search";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 import TuneIcon from "@mui/icons-material/Tune";
 
-import { MODE_OPTIONS } from "../lib/searchparams";
+import type { Kb } from "../lib/types";
 import { GlassPanel, useGlassLook } from "./glass";
+import KbMultiSelect from "./KbMultiSelect";
+import RetrievalModeSelect from "./RetrievalModeSelect";
 
 export type SearchMode = "search" | "chat";
 
@@ -55,15 +50,15 @@ export interface SearchComposerProps {
   running: boolean;
   compact: boolean;
   answerEnabled: boolean;
-  kbId: string;
+  kbValue: string;
   retrievalMode: string;
-  onKbChange: (kbId: string) => void;
+  onKbChange: (kbValue: string) => void;
   onRetrievalModeChange: (mode: string) => void;
   onOpenFilters: () => void;
   onNewChat?: () => void;
   chips: ComposerChip[];
   onRemoveChip: (key: string) => void;
-  kbs: Array<{ kb_id: string; name: string }>;
+  kbs: Kb[];
   inputRef?: React.Ref<HTMLInputElement>;
 }
 
@@ -74,7 +69,7 @@ export interface SearchComposerProps {
  * 范围/召回/条件都用浮层菜单而不是带悬浮标签的表单控件——输入台
  * 只保留一个问题输入和一个发送动作，其余设置一眼可见、点开才展开。
  */
-export default function SearchComposer({
+function SearchComposer({
   mode,
   onModeChange,
   value,
@@ -84,7 +79,7 @@ export default function SearchComposer({
   running,
   compact,
   answerEnabled,
-  kbId,
+  kbValue,
   retrievalMode,
   onKbChange,
   onRetrievalModeChange,
@@ -95,14 +90,8 @@ export default function SearchComposer({
   kbs,
   inputRef,
 }: SearchComposerProps): React.ReactElement {
-  const [kbAnchor, setKbAnchor] = useState<HTMLElement | null>(null);
-  const [modeAnchor, setModeAnchor] = useState<HTMLElement | null>(null);
   const look = useGlassLook("composer");
 
-  const kbName = kbId
-    ? kbs.find((k) => k.kb_id === kbId)?.name ?? "知识库"
-    : "全部知识库";
-  const recallLabel = MODE_OPTIONS.find((m) => m.value === retrievalMode)?.label ?? "混合";
   const sendLabel = mode === "search" ? "检索" : "发送";
   const canSend = value.trim().length > 0 && (mode === "search" || answerEnabled);
 
@@ -234,50 +223,23 @@ export default function SearchComposer({
               </Tooltip>
             </ToggleButtonGroup>
 
-            <Button
-              size="small"
-              color="inherit"
-              startIcon={<FolderOutlinedIcon fontSize="small" />}
-              endIcon={<ExpandMoreIcon fontSize="small" />}
-              onClick={(e) => setKbAnchor(e.currentTarget)}
-              sx={{
-                borderRadius: 999,
-                px: 1.25,
-                color: "text.secondary",
-                fontWeight: 500,
-                maxWidth: { xs: 150, sm: 220 },
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                "&:hover": { bgcolor: "action.hover", color: "text.primary" },
-              }}
-            >
-              {kbName}
-            </Button>
+            <KbMultiSelect
+              value={kbValue}
+              onChange={onKbChange}
+              kbs={kbs}
+            />
 
-            <Button
-              size="small"
-              color="inherit"
-              startIcon={<HubIcon fontSize="small" />}
-              endIcon={<ExpandMoreIcon fontSize="small" />}
-              onClick={(e) => setModeAnchor(e.currentTarget)}
-              sx={{
-                borderRadius: 999,
-                px: 1.25,
-                color: "text.secondary",
-                fontWeight: 500,
-                whiteSpace: "nowrap",
-                "&:hover": { bgcolor: "action.hover", color: "text.primary" },
-              }}
-            >
-              {recallLabel}
-            </Button>
+            <RetrievalModeSelect
+              value={retrievalMode}
+              onChange={onRetrievalModeChange}
+            />
 
             <Button
               size="small"
               color="inherit"
               startIcon={<TuneIcon fontSize="small" />}
               onClick={onOpenFilters}
+              aria-haspopup="dialog"
               sx={{
                 borderRadius: 999,
                 px: 1.25,
@@ -345,56 +307,6 @@ export default function SearchComposer({
               </Tooltip>
             )}
           </Stack>
-
-          <Menu
-            anchorEl={kbAnchor}
-            open={kbAnchor != null}
-            onClose={() => setKbAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 240, maxHeight: 360 } } }}
-          >
-            <MenuItem
-              selected={!kbId}
-              onClick={() => { onKbChange(""); setKbAnchor(null); }}
-            >
-              <CheckIcon fontSize="small" sx={{ mr: 1, opacity: kbId ? 0 : 1 }} />
-              全部知识库
-            </MenuItem>
-            {kbs.map((k) => (
-              <MenuItem
-                key={k.kb_id}
-                selected={k.kb_id === kbId}
-                onClick={() => { onKbChange(k.kb_id); setKbAnchor(null); }}
-              >
-                <CheckIcon fontSize="small" sx={{ mr: 1, opacity: k.kb_id === kbId ? 1 : 0 }} />
-                {k.name}
-              </MenuItem>
-            ))}
-          </Menu>
-
-          <Menu
-            anchorEl={modeAnchor}
-            open={modeAnchor != null}
-            onClose={() => setModeAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 260 } } }}
-          >
-            {MODE_OPTIONS.map((m) => (
-              <MenuItem
-                key={m.value}
-                selected={m.value === retrievalMode}
-                onClick={() => { onRetrievalModeChange(m.value); setModeAnchor(null); }}
-                sx={{ alignItems: "flex-start", py: 1 }}
-              >
-                <CheckIcon
-                  fontSize="small"
-                  sx={{ mr: 1, mt: 0.25, opacity: m.value === retrievalMode ? 1 : 0 }}
-                />
-                <Box>
-                  <Typography variant="body2" sx={{ fontWeight: 500 }}>{m.label}</Typography>
-                  <Typography variant="caption" color="text.secondary">{m.hint}</Typography>
-                </Box>
-              </MenuItem>
-            ))}
-          </Menu>
         </GlassPanel>
       </Box>
 
@@ -410,3 +322,7 @@ export default function SearchComposer({
     </Box>
   );
 }
+
+// 流式回答每帧都会更新工作台，但输入台的 props 在此期间不变；
+// memo 让这道边界挡住整棵表单子树（含两个浮层选择器）的重渲染。
+export default memo(SearchComposer);

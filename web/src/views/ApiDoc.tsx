@@ -27,6 +27,7 @@ import type { Endpoint, Param } from "../data/apidoc";
 import { selectText } from "../lib/dom";
 import { CONTENT_MAX } from "../lib/layout";
 import { go } from "../lib/router";
+import { setCrumbs } from "../lib/store";
 
 const METHOD_COLOR: Record<string, "success" | "info" | "warning" | "secondary" | "error"> = {
   GET: "success", POST: "info", PUT: "warning", PATCH: "secondary", DELETE: "error",
@@ -87,6 +88,12 @@ export default function ApiDoc({ query }: { query: URLSearchParams }): React.Rea
   const [copied, setCopied] = useState("");
   const [live, setLive] = useState("");
   const curlPre = useRef<HTMLPreElement | null>(null);
+
+  // 与其他视图一样显式写入面包屑：否则从知识库页切过来时，
+  // 上一页的面包屑会留在 API 页顶栏里，还顺带把顶栏撑高 36px。
+  useEffect(() => {
+    setCrumbs([{ label: "API 文档" }]);
+  }, []);
 
   // URL（后退 / 手敲）→ 本地输入框
   useEffect(() => {
@@ -166,9 +173,9 @@ export default function ApiDoc({ query }: { query: URLSearchParams }): React.Rea
         py: 2,
         maxWidth: CONTENT_MAX,
         mx: "auto",
-        // 桌面端三栏各自滚动：整页不再跟着滚动，高度锁在视口里。
-        // 84px = 顶栏（顶部留白 20 + 工具条 56 + 底边距 8）。
-        height: { lg: "calc(100vh - 84px)" },
+        // 桌面端三栏各自滚动：整页不再跟着滚动，高度锁在顶栏以下的
+        // 剩余视口里。顶栏高度由壳层实测（面包屑/滚动状态会变）。
+        height: { lg: "calc(100% - var(--shell-header-h, 84px))" },
         display: { lg: "flex" },
         flexDirection: "column",
         minHeight: 0,
@@ -530,7 +537,7 @@ function CodeCard({
   const ref = preRef ?? localRef;
   const done = !!copyKey && copied === copyKey;
   return (
-    <GlassPanel flat radius={12} look={look}>
+    <GlassPanel flat radius={12} look={look} className="lg-clip">
       <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 1.5, py: 0.75, borderBottom: 1, borderColor: "divider" }}>
         {badge && <Chip size="small" color="success" variant="outlined" label={badge} sx={{ height: 20 }} />}
         <Typography variant="caption" sx={{ flex: 1, fontWeight: 600 }}>{title}</Typography>

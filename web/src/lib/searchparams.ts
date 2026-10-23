@@ -68,9 +68,24 @@ export function defaultParams(): Record<string, string> {
 
 const FILTER_KEYS = new Set(["origin", "parser_engine", "mime", "include_disabled"]);
 
+/**
+ * 知识库多选值的序列化：`params` 仍是 `Record<string,string>`，所以
+ * 多个 kb_id 用逗号连接。ID 由服务端生成（UUID），不含逗号；这里
+ * 仍按空段过滤，避免旧数据里的尾逗号变成一次空 ID 查询。
+ */
+export function kbIdsFromValue(value: string): string[] {
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export function kbValueFromIds(ids: string[]): string {
+  return [...new Set(ids.filter(Boolean))].join(",");
+}
+
 /** 过滤条件必须放进 `filters`：SearchReq 顶层没有这些字段，放外面会被静默忽略。 */
 export function filtersFromParams(values: Record<string, string>): Record<string, unknown> {
   const filters: Record<string, unknown> = {};
+  const kbIds = kbIdsFromValue(values.kb_id ?? "");
+  if (kbIds.length > 0) filters.kb_ids = kbIds;
   if (values.origin) filters.origin = values.origin;
   if (values.parser_engine) filters.parser_engine = values.parser_engine;
   if (values.mime) filters.mime = values.mime;
@@ -90,7 +105,8 @@ export function paramsToBody(
   const topK = Number(values.top_k || DEFAULTS.top_k);
   body.top_k = Number.isFinite(topK) && topK > 0 ? topK : 8;
   for (const p of PARAMS) {
-    if (p.key === "mode" || p.key === "top_k" || FILTER_KEYS.has(p.key)) continue;
+    if (p.key === "mode" || p.key === "top_k" || p.key === "kb_id"
+      || FILTER_KEYS.has(p.key)) continue;
     const raw = values[p.key] ?? "";
     if (raw === "") continue;
     body[p.key] = p.kind === "num" ? Number(raw)

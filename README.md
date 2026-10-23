@@ -181,7 +181,7 @@ tools/            bench 与 E2E 临时服务
 ## 测试
 
 ```bash
-python3 -m pytest -q       # 后端 + 前端契约（628 passed）
+python3 -m pytest -q       # 后端 + 前端契约（657 passed）
 npm run check              # tsc --noEmit
 npm run build              # Vite 构建
 npm run test:e2e           # Playwright（需要系统 Chrome）
@@ -196,6 +196,8 @@ API 文档、主题持久化与 CSP nonce 样式。
 - [架构与设计](docs/DESIGN.md) — 需求边界、选型、存储/检索/接口/前端设计
 - [全栈审计（2026-10-20）](docs/AUDIT-2026-10-20.md) — 安全、一致性、性能、
   产品逻辑问题与修复证据
+- [架构健康（2026-10-23）](docs/ARCH-HEALTH-2026-10-23.md) — 架构证据与
+  信任边界、剩余瓶颈排序、本轮入库/首包/渲染优化与验证记录
 - [UI 重构与 React/MUI 迁移](docs/UI-REWRITE-PLAN-2026-10-04.md) — 分期记录与决策
 - [并发性能审计](docs/PERF-FINAL-DECISION-2026-10-05.md) — 多进程、SQLite、索引与延迟结论
 - [早期架构审计](docs/ARCH-AUDIT-2026-10-06.md)

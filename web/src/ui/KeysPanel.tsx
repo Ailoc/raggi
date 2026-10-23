@@ -163,7 +163,7 @@ export default function KeysPanel(): React.ReactElement {
 
   return (
     <Stack spacing={2}>
-      <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
+      <GlassPanel radius={16} look={look} className="lg-clip" sx={{ p: 3 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>API 密钥</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           对外调用本服务时使用的凭据，形如 <code>rg_xxxxxxxx…</code>。
@@ -201,16 +201,24 @@ export default function KeysPanel(): React.ReactElement {
               </Alert>
             ) : (
               <TableContainer>
-                <Table size="small" aria-label="API 密钥列表">
+                <Table size="small" aria-label="API 密钥列表" sx={{ tableLayout: "fixed" }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>名称</TableCell>
-                      <TableCell>密钥</TableCell>
-                      <TableCell>权限</TableCell>
-                      <TableCell>状态</TableCell>
-                      <TableCell>最近使用</TableCell>
-                      <TableCell>过期</TableCell>
-                      <TableCell align="right"><span className="sr-only">操作</span></TableCell>
+                      <TableCell sx={{ width: { xs: 110, sm: 120 } }}>密钥</TableCell>
+                      <TableCell sx={{ display: { xs: "none", sm: "table-cell" }, width: 70 }}>
+                        权限
+                      </TableCell>
+                      <TableCell sx={{ width: { xs: 76, sm: 80 } }}>状态</TableCell>
+                      <TableCell sx={{ display: { xs: "none", md: "table-cell" }, width: 120 }}>
+                        最近使用
+                      </TableCell>
+                      <TableCell sx={{ display: { xs: "none", md: "table-cell" }, width: 120 }}>
+                        过期
+                      </TableCell>
+                      <TableCell align="right" sx={{ width: { xs: 64, sm: 72 } }}>
+                        <span className="sr-only">操作</span>
+                      </TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -220,7 +228,7 @@ export default function KeysPanel(): React.ReactElement {
                         <TableCell sx={{ fontFamily: "monospace" }}>
                           {k.prefix ? `${k.prefix}…` : "—"}
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
                           <Chip size="small" variant="outlined"
                             color={k.scope === "write" ? "warning" : "default"} label={k.scope} />
                         </TableCell>
@@ -231,8 +239,12 @@ export default function KeysPanel(): React.ReactElement {
                             label={stateLabel[k.state] ?? k.state}
                           />
                         </TableCell>
-                        <TableCell>{fmtTime(k.last_used_at)}</TableCell>
-                        <TableCell>{k.expires_at ? fmtTime(k.expires_at) : "永不过期"}</TableCell>
+                        <TableCell sx={{ display: { xs: "none", md: "table-cell" } }}>
+                          {fmtTime(k.last_used_at)}
+                        </TableCell>
+                        <TableCell sx={{ display: { xs: "none", md: "table-cell" } }}>
+                          {k.expires_at ? fmtTime(k.expires_at) : "永不过期"}
+                        </TableCell>
                         <TableCell align="right">
                           {k.state === "active" && (
                             <Button size="small" color="error" onClick={() => void revoke(k)}>
@@ -253,7 +265,7 @@ export default function KeysPanel(): React.ReactElement {
         <Button variant="contained" onClick={() => void createKey()}>签发新密钥</Button>
       </GlassPanel>
 
-      <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
+      <GlassPanel radius={16} look={look} className="lg-clip" sx={{ p: 3 }}>
         <Typography variant="h6" sx={{ fontSize: 16 }}>本机凭据</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           浏览器调用本服务时携带的凭据，保存在本机 localStorage。

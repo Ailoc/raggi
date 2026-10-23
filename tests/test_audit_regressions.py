@@ -364,6 +364,24 @@ def test_answer_kb_id_reaches_filters():
     assert merged["kb_id"] == "kb1"
 
 
+def test_answer_kb_ids_are_validated_and_merged():
+    """问答的 filters 与检索共用同一套边界，多选 kb_ids 不能绕过上限。"""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from rag.api.answer import _filters
+    from rag.api.schemas import AnswerReq
+
+    assert _filters(AnswerReq(q="q", filters={"kb_ids": ["a", "b"]})) == \
+        {"kb_ids": ["a", "b"]}
+    # 顶层单库字段仍优先，且不会把 kb_ids 带进查询
+    merged = _filters(AnswerReq(q="q", kb_id="a",
+                                filters={"kb_ids": ["b"]}))
+    assert merged == {"kb_id": "a"}
+    with _pytest.raises(ValidationError):
+        AnswerReq(q="q", filters={"kb_ids": [f"k{i}" for i in range(51)]})
+
+
 def test_answer_top_k_is_bounded():
     """AnswerReq.top_k 必须有上限（否则可拉爆内存）。"""
     import pytest as _pytest

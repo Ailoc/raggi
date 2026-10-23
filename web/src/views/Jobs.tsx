@@ -150,8 +150,11 @@ export default function Jobs(): React.ReactElement {
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
-      <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 500, flex: 1 }}>
+      <Stack direction="row" spacing={2} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+        <Typography
+          variant="h5"
+          sx={{ fontWeight: 500, flex: { xs: "1 1 100%", sm: 1 } }}
+        >
           任务
         </Typography>
         <FormControlLabel
@@ -177,7 +180,13 @@ export default function Jobs(): React.ReactElement {
           <Tabs
             value={filter}
             onChange={(_e, v: Filter) => changeFilter(v)}
-            sx={{ mb: 2, minHeight: 40 }}
+            sx={{
+              mb: 2, minHeight: 40,
+              "& .MuiTab-root": {
+                minWidth: { xs: 0, sm: 90 },
+                px: { xs: 1.25, sm: 3 },
+              },
+            }}
           >
             <Tab value="all" label="全部" />
             <Tab value="active" label={`进行中${activeCount ? ` (${activeCount})` : ""}`} />
@@ -200,18 +209,29 @@ export default function Jobs(): React.ReactElement {
                 : "还没有任务记录。"}
             </Alert>
           ) : (
-            <GlassPanel radius={12} look={look}>
+            <GlassPanel radius={12} look={look} className="lg-clip">
               <TableContainer>
-                <Table size="small" aria-label="任务列表">
+                <Table size="small" aria-label="任务列表" sx={{ tableLayout: "fixed" }}>
                   <TableHead>
                     <TableRow>
-                      <TableCell>状态</TableCell>
-                      <TableCell>阶段</TableCell>
+                      <TableCell sx={{ display: { xs: "none", sm: "table-cell" }, width: 90 }}>
+                        状态
+                      </TableCell>
+                      <TableCell sx={{ width: { xs: 120, sm: 180 } }}>阶段</TableCell>
                       <TableCell>文档</TableCell>
-                      <TableCell>引擎</TableCell>
-                      <TableCell align="right">耗时</TableCell>
-                      <TableCell>开始</TableCell>
-                      <TableCell align="right">
+                      <TableCell sx={{ display: { xs: "none", md: "table-cell" }, width: 100 }}>
+                        引擎
+                      </TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ display: { xs: "none", md: "table-cell" }, width: 90 }}
+                      >
+                        耗时
+                      </TableCell>
+                      <TableCell sx={{ display: { xs: "none", md: "table-cell" }, width: 130 }}>
+                        开始
+                      </TableCell>
+                      <TableCell align="right" sx={{ width: 40 }}>
                         <span className="sr-only">操作</span>
                       </TableCell>
                     </TableRow>
@@ -219,7 +239,7 @@ export default function Jobs(): React.ReactElement {
                   <TableBody>
                     {items.map((j) => (
                       <TableRow key={j.job_id} hover>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
                           <Chip
                             size="small"
                             variant="outlined"
@@ -227,7 +247,7 @@ export default function Jobs(): React.ReactElement {
                             label={stageLabel(j.stage)}
                           />
                         </TableCell>
-                        <TableCell sx={{ minWidth: 180 }}>
+                        <TableCell>
                           <Typography variant="body2">{stageLabel(j.stage)}</Typography>
                           {!j.terminal && j.total > 0 && (
                             <LinearProgress
@@ -262,13 +282,18 @@ export default function Jobs(): React.ReactElement {
                             {titles[j.doc_id] ?? (j.doc_id ? j.doc_id.slice(0, 8) : "—")}
                           </Typography>
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", md: "table-cell" } }}>
                           <Typography variant="body2" color="text.secondary">
                             {j.parser_engine || "—"}
                           </Typography>
                         </TableCell>
-                        <TableCell align="right">{duration(j)}</TableCell>
-                        <TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ display: { xs: "none", md: "table-cell" } }}
+                        >
+                          {duration(j)}
+                        </TableCell>
+                        <TableCell sx={{ display: { xs: "none", md: "table-cell" } }}>
                           <Typography variant="body2" color="text.secondary">
                             {j.started_at ? fmtTimeShort(j.started_at) : "—"}
                           </Typography>

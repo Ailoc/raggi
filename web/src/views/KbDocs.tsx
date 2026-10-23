@@ -51,7 +51,7 @@ import {
 } from "../lib/ops";
 import { href } from "../lib/router";
 import { usePicks } from "../lib/selection";
-import { invalidateKbs, kbName, loadKbs, pokeQueue, setCrumbs, track, useStore } from "../lib/store";
+import { invalidateKbs, kbName, loadKbs, pokeQueue, setCrumbs, track, useStoreSelect } from "../lib/store";
 import type { DocPlan, Document, DocumentList, IngestResult, Kb } from "../lib/types";
 import { toast } from "../ui/toast";
 
@@ -81,7 +81,7 @@ interface PlanState {
  */
 export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
   const look = useGlassLook("card");
-  const { kbsLoaded } = useStore();
+  const kbsLoaded = useStoreSelect((s) => s.kbsLoaded);
   const [kb, setKb] = useState<Kb | null>(null);
   const [items, setItems] = useState<Document[]>([]);
   const [total, setTotal] = useState(0);
@@ -309,8 +309,13 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
-      <Stack direction="row" alignItems="flex-start" spacing={2} sx={{ mb: 2 }}>
-        <Box sx={{ flex: 1, minWidth: 0 }}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        alignItems="flex-start"
+        spacing={2}
+        sx={{ mb: 2 }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
             {kb?.name ?? kbName(kbId)}
           </Typography>
@@ -320,28 +325,34 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
               : "正在读取知识库…"}
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<DriveFolderUploadIcon />}
-          aria-expanded={composeOpen}
-          onClick={() => setComposeOpen((v) => !v)}
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ flexShrink: 0, alignSelf: { xs: "flex-end", sm: "flex-start" } }}
         >
-          入库
-        </Button>
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => void refreshAll()}>
-          刷新
-        </Button>
+          <Button
+            variant="contained"
+            startIcon={<DriveFolderUploadIcon />}
+            aria-expanded={composeOpen}
+            onClick={() => setComposeOpen((v) => !v)}
+          >
+            入库
+          </Button>
+          <Button variant="outlined" startIcon={<RefreshIcon />} onClick={() => void refreshAll()}>
+            刷新
+          </Button>
+        </Stack>
       </Stack>
 
       {(kb?.doc_count ?? 0) > 0 || filter ? (
-        <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
+        <Stack direction="row" spacing={2} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
           <TextField
             size="small"
             type="search"
             placeholder="过滤标题…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            sx={{ width: 320 }}
+            sx={{ width: { xs: "100%", sm: 320 } }}
             slotProps={{ htmlInput: { "aria-label": "按标题过滤文档" } }}
           />
           {refreshing && <CircularProgress size={14} aria-label="正在刷新" />}
@@ -435,9 +446,9 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
             </Stack>
           )}
 
-          <GlassPanel radius={12} look={look}>
+          <GlassPanel radius={12} look={look} className="lg-clip">
             <TableContainer>
-              <Table size="small" aria-label="文档列表">
+              <Table size="small" aria-label="文档列表" sx={{ tableLayout: "fixed" }}>
                 <TableHead>
                   <TableRow>
                     <TableCell padding="checkbox">
@@ -450,12 +461,25 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
                       />
                     </TableCell>
                     <TableCell>标题</TableCell>
-                    <TableCell>分块方案</TableCell>
-                    <TableCell>引擎</TableCell>
-                    <TableCell align="right">块数</TableCell>
-                    <TableCell>状态</TableCell>
-                    <TableCell>入库时间</TableCell>
-                    <TableCell align="right">
+                    <TableCell sx={{ display: { xs: "none", sm: "table-cell" }, width: 120 }}>
+                      分块方案
+                    </TableCell>
+                    <TableCell sx={{ display: { xs: "none", lg: "table-cell" }, width: 120 }}>
+                      引擎
+                    </TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ display: { xs: "none", sm: "table-cell" }, width: 64 }}
+                    >
+                      块数
+                    </TableCell>
+                    <TableCell sx={{ display: { xs: "none", sm: "table-cell" }, width: 96 }}>
+                      状态
+                    </TableCell>
+                    <TableCell sx={{ display: { xs: "none", md: "table-cell" }, width: 140 }}>
+                      入库时间
+                    </TableCell>
+                    <TableCell align="right" sx={{ width: { xs: 80, sm: 96 } }}>
                       <span className="sr-only">操作</span>
                     </TableCell>
                   </TableRow>
@@ -464,6 +488,28 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
                   {items.map((d) => {
                     const ps = planState(d.doc_id);
                     const job = jobs[d.doc_id];
+                    const statusNode = job ? (
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Chip size="small" color="warning" variant="outlined"
+                          label={stageLabel(job.stage)} />
+                        <Tooltip title="停止这个任务">
+                          <IconButton
+                            size="small"
+                            aria-label={`停止 ${d.title} 的处理`}
+                            onClick={() => void cancelDocJob(d.doc_id)}
+                          >
+                            <StopCircleIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                    ) : (
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={d.status === "ready" ? "success" : d.status === "failed" ? "error" : "warning"}
+                        label={d.status}
+                      />
+                    );
                     return (
                       <TableRow key={d.doc_id} hover selected={picks.has(d.doc_id)}>
                         <TableCell padding="checkbox">
@@ -486,8 +532,11 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
                           >
                             {d.title}
                           </Link>
+                          <Box sx={{ mt: 0.5, display: { xs: "block", sm: "none" } }}>
+                            {statusNode}
+                          </Box>
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
                           <Chip
                             size="small"
                             variant="outlined"
@@ -496,37 +545,21 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
                             title={ps.title}
                           />
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", lg: "table-cell" } }}>
                           <Typography variant="body2" color="text.secondary">
                             {d.parser_engine || "—"}
                           </Typography>
                         </TableCell>
-                        <TableCell align="right">{d.chunk_count ?? 0}</TableCell>
-                        <TableCell>
-                          {job ? (
-                            <Stack direction="row" spacing={0.5} alignItems="center">
-                              <Chip size="small" color="warning" variant="outlined"
-                                label={stageLabel(job.stage)} />
-                              <Tooltip title="停止这个任务">
-                                <IconButton
-                                  size="small"
-                                  aria-label={`停止 ${d.title} 的处理`}
-                                  onClick={() => void cancelDocJob(d.doc_id)}
-                                >
-                                  <StopCircleIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            </Stack>
-                          ) : (
-                            <Chip
-                              size="small"
-                              variant="outlined"
-                              color={d.status === "ready" ? "success" : d.status === "failed" ? "error" : "warning"}
-                              label={d.status}
-                            />
-                          )}
+                        <TableCell
+                          align="right"
+                          sx={{ display: { xs: "none", sm: "table-cell" } }}
+                        >
+                          {d.chunk_count ?? 0}
                         </TableCell>
-                        <TableCell>
+                        <TableCell sx={{ display: { xs: "none", sm: "table-cell" } }}>
+                          {statusNode}
+                        </TableCell>
+                        <TableCell sx={{ display: { xs: "none", md: "table-cell" } }}>
                           <Typography variant="body2" color="text.secondary">
                             {d.created_at ? fmtTime(d.created_at) : "—"}
                           </Typography>
@@ -849,7 +882,17 @@ function ComposeDialog({
     <Dialog open={open} onClose={() => { if (!busy) onClose(); }} fullWidth maxWidth="sm">
       <DialogTitle>入库到「{kbName(kbId)}」</DialogTitle>
       <DialogContent>
-        <Tabs value={tab} onChange={(_e, v: "file" | "text" | "url") => setTab(v)} sx={{ mb: 2 }}>
+        <Tabs
+          value={tab}
+          onChange={(_e, v: "file" | "text" | "url") => setTab(v)}
+          sx={{
+            mb: 2,
+            "& .MuiTab-root": {
+              minWidth: { xs: 0, sm: 90 },
+              px: { xs: 0.75, sm: 3 },
+            },
+          }}
+        >
           <Tab value="file" label="上传文件" />
           <Tab value="text" label="粘贴文本" />
           <Tab value="url" label="抓取网页" />
@@ -867,7 +910,7 @@ function ComposeDialog({
             <Box
               sx={{
                 border: 2, borderStyle: "dashed", borderColor: "divider",
-                borderRadius: 1, p: 4, textAlign: "center",
+                borderRadius: 1, p: { xs: 2, sm: 4 }, textAlign: "center",
               }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
@@ -879,11 +922,11 @@ function ComposeDialog({
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                 把文件拖到这里，或选择文件（可多选）。支持 PDF / Markdown / 文本等常见格式。
               </Typography>
-              <Stack direction="row" spacing={1} justifyContent="center" alignItems="center">
+              <Stack direction="row" spacing={1} justifyContent="center" alignItems="center" useFlexGap flexWrap="wrap">
                 <TextField
                   select size="small" label="解析引擎" value={engine}
                   onChange={(e) => setEngine(e.target.value)}
-                  sx={{ width: 190 }}
+                  sx={{ flex: 1, minWidth: 130, maxWidth: 200 }}
                 >
                   <MenuItem value="auto">auto（自动）</MenuItem>
                   <MenuItem value="pymupdf4llm">pymupdf4llm</MenuItem>
@@ -891,7 +934,11 @@ function ComposeDialog({
                   <MenuItem value="docling">docling</MenuItem>
                   <MenuItem value="unstructured">unstructured</MenuItem>
                 </TextField>
-                <Button variant="outlined" disabled={busy} onClick={() => fileRef.current?.click()}>
+                <Button
+                  variant="outlined" disabled={busy}
+                  onClick={() => fileRef.current?.click()}
+                  sx={{ flexShrink: 0, whiteSpace: "nowrap" }}
+                >
                   选择文件
                 </Button>
               </Stack>

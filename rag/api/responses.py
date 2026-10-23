@@ -285,8 +285,8 @@ class SearchScoresOut(BaseModel):
 class SnippetOut(BaseModel):
     """检索片段：纯文本 + 高亮区间。
 
-    **不输出 HTML**：前端用 Svelte 原生插值渲染 `{text}`，并按 marks
-    自己套 `<mark>`，因此不需要 `{@html}`，XSS 面从根上消除。
+    **不输出 HTML**：前端用 JSX 插值渲染 `{text}`，并按 marks 自己套
+    `<mark>`，因此不需要 `dangerouslySetInnerHTML`，XSS 面从根上消除。
     """
     text: str = ""
     # [start, end) 区间列表，相对 text，已排序去重

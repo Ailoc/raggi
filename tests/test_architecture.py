@@ -412,9 +412,12 @@ def test_search_params_layered():
     view = (ROOT / "web/src/views/Search.tsx").read_text(encoding="utf-8")
     composer = (ROOT / "web/src/ui/SearchComposer.tsx").read_text(encoding="utf-8")
     filters = (ROOT / "web/src/ui/SearchFilters.tsx").read_text(encoding="utf-8")
-    assert "kbName" in composer and "全部知识库" in composer, "输入台缺知识库范围"
-    assert "recallLabel" in composer, "输入台缺召回模式"
-    assert "SearchFilters" in view and "<Drawer" in filters, "完整条件未收进抽屉"
+    picker = (ROOT / "web/src/ui/KbMultiSelect.tsx").read_text(encoding="utf-8")
+    assert "<KbMultiSelect" in composer, "输入台缺知识库范围"
+    assert "全部知识库" in picker and "kbValue" in composer, \
+        "输入台的知识库范围没有走共用选择器"
+    assert "<RetrievalModeSelect" in composer, "输入台缺召回模式选择器"
+    assert "SearchFilters" in view and "<Dialog" in filters, "完整条件未收进浮动面板"
     assert "召回与排序" in filters, "调优参数没有分组"
 
 

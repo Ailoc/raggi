@@ -18,7 +18,7 @@ import { api } from "../lib/api";
 import { SECTIONS } from "../lib/nav";
 import { go, href } from "../lib/router";
 import { setPendingSearch } from "../lib/searchintent";
-import { useStore } from "../lib/store";
+import { useStoreSelect } from "../lib/store";
 import type { DocumentList } from "../lib/types";
 
 /**
@@ -43,7 +43,7 @@ interface Cmd {
 }
 
 export default function CommandPalette(): React.ReactElement {
-  const { kbs } = useStore();
+  const kbs = useStoreSelect((s) => s.kbs);
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [active, setActive] = useState(0);

@@ -227,6 +227,8 @@ def chunk_prefilter(store: "LanceStore", filters: dict) -> str | None:
         conds.append(f"origin = '{escape_sql(filters['origin'])}'")
     if filters.get("kb_id"):
         conds.append(f"kb_id = '{escape_sql(filters['kb_id'])}'")
+    elif filters.get("kb_ids"):
+        conds.append(_in_clause("kb_id", filters["kb_ids"]))
     if filters.get("doc_ids"):
         conds.append(_in_clause("doc_id", filters["doc_ids"]))
     # DESIGN §7：mime / parser_engine 过滤。

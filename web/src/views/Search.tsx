@@ -16,7 +16,7 @@ import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import { api, apiText } from "../lib/api";
 import { CONTENT_MAX } from "../lib/layout";
 import { GlassPanel, useGlassLook } from "../ui/glass";
-import { setCrumbs, useStore } from "../lib/store";
+import { setCrumbs, useStoreSelect } from "../lib/store";
 import { streamPost } from "../lib/sse";
 import type { StreamHandle } from "../lib/sse";
 import {
@@ -36,6 +36,15 @@ import { toast } from "../ui/toast";
 type MobilePane = "chat" | "evidence";
 
 const CHAT_STATE_KEY = "raggi.chatState.v1";
+
+/**
+ * 顶栏之下的剩余视口。
+ *
+ * 壳层在 `--shell-header-h` 里给出顶栏实测高度（面包屑/工作区标签/滚动
+ * 收起都会改变它）。这里若用 100% 或 100vh，工作台会多出一个顶栏的
+ * 高度，底部输入台正好被挤出屏幕。
+ */
+const FILL_HEIGHT = "calc(100% - var(--shell-header-h, 84px))";
 
 interface StoredChat {
   turns: ChatTurn[];
@@ -147,7 +156,7 @@ function makeTurnId(): string {
  */
 export default function Search(): React.ReactElement {
   const look = useGlassLook("card");
-  const { kbs } = useStore();
+  const kbs = useStoreSelect((s) => s.kbs);
   // 命令面板可能在本页挂载前就发起了检索，初始化时先取走它的意图。
   const initialSearch = useMemo(takePendingSearch, []);
   const restoredChat = useMemo(loadChatState, []);
@@ -189,6 +198,12 @@ export default function Search(): React.ReactElement {
   const chatBuffer = useRef("");
   const chatRaf = useRef<number | null>(null);
   const chatTurnRef = useRef<string | null>(null);
+  // 表单动作在每次渲染时更新，但传给 memo 化输入台的引用保持稳定：
+  // 否则流式回答每帧都会把整个输入台（含两个浮层选择器）重渲染一遍。
+  const sendRef = useRef<() => void>(() => {});
+  const modeRef = useRef<(mode: SearchMode) => void>(() => {});
+  const stopRef = useRef<() => void>(() => {});
+  const newChatRef = useRef<() => void>(() => {});
 
   const currentParams = viewMode === "search" ? applied : chatParams;
 
@@ -372,22 +387,30 @@ export default function Search(): React.ReactElement {
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
-  function updateParam(key: string, value: string): void {
+  const updateParam = useCallback((key: string, value: string): void => {
     if (viewMode === "search") {
       setApplied((prev) => ({ ...prev, [key]: value }));
       return;
     }
     setChatParams((prev) => ({ ...prev, [key]: value }));
-  }
+  }, [viewMode]);
 
-  function removeChip(key: string): void {
+  const removeChip = useCallback((key: string): void => {
     updateParam(key, DEFAULTS[key] ?? "");
-  }
+  }, [updateParam]);
 
-  function openFilters(): void {
+  const handleKbChange = useCallback((value: string): void => {
+    updateParam("kb_id", value);
+  }, [updateParam]);
+
+  const handleRetrievalModeChange = useCallback((mode: string): void => {
+    updateParam("mode", mode);
+  }, [updateParam]);
+
+  const openFilters = useCallback((): void => {
     setDraft({ ...currentParams });
     setFilterOpen(true);
-  }
+  }, [currentParams]);
 
   function applyFilters(): void {
     if (viewMode === "search") {
@@ -417,9 +440,9 @@ export default function Search(): React.ReactElement {
     }
   }
 
-  function patchTurn(id: string, patch: Partial<ChatTurn>): void {
+  const patchTurn = useCallback((id: string, patch: Partial<ChatTurn>): void => {
     setChatTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-  }
+  }, []);
 
   function flushChatAnswer(): void {
     if (chatRaf.current != null) return;
@@ -490,9 +513,16 @@ export default function Search(): React.ReactElement {
       },
       onDelta: (text) => {
         chatBuffer.current += text;
-        setChatTurns((prev) => prev.map((t) => (
-          t.id === turnId && t.status === "searching" ? { ...t, status: "streaming" } : t
-        )));
+        // 状态只在第一段增量时翻转一次。改前每个 delta 都 map 整个
+        // 轮次数组（返回新数组 → 整页重渲染），而正文的实际刷新已经
+        // 由下面的 rAF 合并到每帧一次。
+        setChatTurns((prev) => {
+          const current = prev.find((t) => t.id === turnId);
+          if (!current || current.status !== "searching") return prev;
+          return prev.map((t) => (
+            t.id === turnId ? { ...t, status: "streaming" } : t
+          ));
+        });
         flushChatAnswer();
       },
       onDone: (done) => {
@@ -628,8 +658,25 @@ export default function Search(): React.ReactElement {
   }
 
   const handleFocusHandled = useCallback(() => setFocusChunk(null), []);
+  const handleSend = useCallback(() => sendRef.current(), []);
+  const handleModeChange = useCallback((next: SearchMode) => modeRef.current(next), []);
+  const handleStop = useCallback(() => stopRef.current(), []);
+  const handleNewChat = useCallback(() => newChatRef.current(), []);
+  const toggleSearchExpanded = useCallback(
+    (id: string) => setSearchExpanded((cur) => (cur === id ? null : id)), []);
+  const toggleChatExpanded = useCallback(
+    (id: string) => setChatExpanded((cur) => (cur === id ? null : id)), []);
 
-  const filtersDrawer = (
+  // 每次提交后把最新实现交给稳定入口；引用赋值放 effect 里，
+  // 避免在渲染阶段写入 ref（并发渲染下可能指向未提交的状态）。
+  useEffect(() => {
+    modeRef.current = changeMode;
+    stopRef.current = stopChat;
+    newChatRef.current = newChat;
+    sendRef.current = viewMode === "search" ? submitSearch : sendChat;
+  });
+
+  const filtersPanel = (
     <SearchFilters
       open={filterOpen}
       onClose={() => setFilterOpen(false)}
@@ -648,20 +695,20 @@ export default function Search(): React.ReactElement {
   const composer = (compact: boolean): React.ReactElement => (
     <SearchComposer
       mode={viewMode}
-      onModeChange={changeMode}
+      onModeChange={handleModeChange}
       value={viewMode === "search" ? searchDraft : chatDraft}
       onValueChange={viewMode === "search" ? setSearchDraft : setChatDraft}
-      onSend={viewMode === "search" ? submitSearch : sendChat}
-      onStop={viewMode === "chat" && chatRunningId ? stopChat : undefined}
+      onSend={handleSend}
+      onStop={viewMode === "chat" && chatRunningId ? handleStop : undefined}
       running={viewMode === "search" ? searchBusy : chatRunningId != null}
       compact={compact}
       answerEnabled={answerEnabled}
-      kbId={currentParams.kb_id ?? ""}
+      kbValue={currentParams.kb_id ?? ""}
       retrievalMode={currentParams.mode || "hybrid"}
-      onKbChange={(id) => updateParam("kb_id", id)}
-      onRetrievalModeChange={(mode) => updateParam("mode", mode)}
+      onKbChange={handleKbChange}
+      onRetrievalModeChange={handleRetrievalModeChange}
       onOpenFilters={openFilters}
-      onNewChat={viewMode === "chat" && chatTurns.length > 0 ? newChat : undefined}
+      onNewChat={viewMode === "chat" && chatTurns.length > 0 ? handleNewChat : undefined}
       chips={extraChips}
       onRemoveChip={removeChip}
       kbs={kbs}
@@ -675,7 +722,7 @@ export default function Search(): React.ReactElement {
       <>
         <Box
           sx={{
-            height: "100%",
+            height: FILL_HEIGHT,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -693,7 +740,7 @@ export default function Search(): React.ReactElement {
             {composer(false)}
           </Box>
         </Box>
-        {filtersDrawer}
+        {filtersPanel}
       </>
     );
   }
@@ -704,7 +751,7 @@ export default function Search(): React.ReactElement {
       <>
       <Box
         sx={{
-          height: "100%",
+          height: FILL_HEIGHT,
           display: "flex",
           flexDirection: "column",
           minHeight: 0,
@@ -820,7 +867,7 @@ export default function Search(): React.ReactElement {
                 <EvidenceList
                   hits={searchResp.results}
                   expanded={searchExpanded}
-                  onToggle={(id) => setSearchExpanded((cur) => (cur === id ? null : id))}
+                  onToggle={toggleSearchExpanded}
                 />
               </>
             )}
@@ -841,7 +888,7 @@ export default function Search(): React.ReactElement {
           <Box sx={{ maxWidth: 900, mx: "auto" }}>{composer(true)}</Box>
         </Box>
       </Box>
-      {filtersDrawer}
+      {filtersPanel}
       </>
     );
   }
@@ -850,7 +897,7 @@ export default function Search(): React.ReactElement {
   const activeHits = activeTurn?.hits ?? [];
   return (
     <>
-    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <Box sx={{ height: FILL_HEIGHT, display: "flex", flexDirection: "column", minHeight: 0 }}>
       <Tabs
         value={mobilePane}
         onChange={(_e, value: MobilePane) => setMobilePane(value)}
@@ -974,7 +1021,7 @@ export default function Search(): React.ReactElement {
                   hits={activeHits}
                   compact
                   expanded={chatExpanded}
-                  onToggle={(id) => setChatExpanded((cur) => (cur === id ? null : id))}
+                  onToggle={toggleChatExpanded}
                   focusChunk={focusChunk}
                   onFocusHandled={handleFocusHandled}
                   ariaLabel="本轮证据"
@@ -1001,7 +1048,7 @@ export default function Search(): React.ReactElement {
         </Box>
       </Box>
     </Box>
-    {filtersDrawer}
+    {filtersPanel}
     </>
   );
 }

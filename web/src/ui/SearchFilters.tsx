@@ -1,20 +1,25 @@
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
-import Drawer from "@mui/material/Drawer";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
-import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import CloseIcon from "@mui/icons-material/Close";
 
 import { MODE_OPTIONS, PARAMS } from "../lib/searchparams";
+import type { Kb } from "../lib/types";
+import { GlassFilterPaper } from "./glass";
+import KbMultiSelect from "./KbMultiSelect";
 
 export const HINTS: Record<string, string> = {
-  kb_id: "留空表示在全部知识库中检索",
+  kb_id: "可多选并按名称搜索；一个都不选表示在全部知识库中检索",
   mode: "混合模式通常最稳；向量与全文适合分别验证召回",
   top_k: "展示多少条证据，不是候选池大小",
   group_by_doc: "每篇文档只保留分数最高的一块",
@@ -60,7 +65,7 @@ export interface SearchFiltersProps {
   open: boolean;
   onClose: () => void;
   draft: Record<string, string>;
-  kbs: Array<{ kb_id: string; name: string }>;
+  kbs: Kb[];
   serverDefaults: Record<string, string>;
   dirty: number;
   mode: "search" | "chat";
@@ -70,7 +75,11 @@ export interface SearchFiltersProps {
   onApply: () => void;
 }
 
-/** 完整条件抽屉：所有 17 个参数仍可访问，但不再占据主界面。 */
+/**
+ * 完整条件面板：所有 17 个参数仍可访问，但不再占据主界面、也不再从
+ * 侧边推入。分类纵向排列、组内多列控件：窄屏一行一个，宽屏一行三个，
+ * 比 2×2 卡片更紧凑，也不会出现“左边一大块、右边一小块”的空白。
+ */
 export default function SearchFilters({
   open,
   onClose,
@@ -85,122 +94,202 @@ export default function SearchFilters({
   onApply,
 }: SearchFiltersProps): React.ReactElement {
   return (
-    <Drawer
-      anchor="right"
+    <Dialog
       open={open}
       onClose={onClose}
-      slotProps={{ paper: { sx: { width: { xs: "100%", sm: 470 } } } }}
+      fullWidth
+      maxWidth={false}
+      PaperComponent={GlassFilterPaper}
+      aria-labelledby="filters-title"
+      slotProps={{
+        backdrop: {
+          sx: (t) => ({
+            backgroundColor: t.palette.mode === "dark"
+              ? "rgba(2, 10, 12, 0.55)"
+              : "rgba(15, 23, 42, 0.18)",
+            backdropFilter: "blur(3px)",
+          }),
+        },
+      }}
     >
-      <Stack sx={{ height: "100%" }}>
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 2.5, py: 2 }}>
-          <Box sx={{ flex: 1 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>检索条件</Typography>
-            <Typography variant="caption" color={dirty > 0 ? "primary.main" : "text.secondary"}>
-              {dirty > 0
-                ? `${dirty} 项修改尚未应用`
-                : mode === "chat"
-                  ? "应用后从下一条消息开始生效。"
-                  : "应用后写入地址并重新检索。"}
-            </Typography>
-          </Box>
-          <IconButton aria-label="关闭检索条件" onClick={onClose}>
-            <CloseIcon fontSize="small" />
-          </IconButton>
-        </Stack>
-        <Divider />
+      <DialogTitle
+        id="filters-title"
+        sx={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 2,
+          px: { xs: 2, sm: 3 },
+          pt: { xs: 1.75, sm: 2 },
+          pb: 1,
+        }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            component="div"
+            variant="h6"
+            sx={{ fontWeight: 600, fontSize: 18, lineHeight: 1.3 }}
+          >
+            检索条件
+          </Typography>
+          <Typography
+            variant="caption"
+            color={dirty > 0 ? "primary.main" : "text.secondary"}
+            sx={{ display: "block", mt: 0.5 }}
+          >
+            {dirty > 0
+              ? `${dirty} 项修改尚未应用`
+              : mode === "chat"
+                ? "应用后从下一条消息开始生效。"
+                : "应用后立即重新检索。"}
+          </Typography>
+        </Box>
+        <IconButton aria-label="关闭检索条件" onClick={onClose} size="small">
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </DialogTitle>
+      <Divider />
 
-        <Box sx={{ flex: 1, overflowY: "auto", px: 2.5, py: 2 }}>
-          {PARAM_GROUPS.map((group, gi) => (
-            <Box key={group.title} sx={{ mb: 3 }}>
-              <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: ".12em" }}>
+      <DialogContent sx={{ px: { xs: 2, sm: 3 }, py: 1.5 }}>
+        {PARAM_GROUPS.map((group, gi) => (
+          <Box key={group.title}>
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 1.5,
+                flexWrap: "wrap",
+                mb: 1,
+              }}
+            >
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: 14 }}>
                 {group.title}
               </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+              <Typography variant="caption" color="text.secondary">
                 {group.description}
               </Typography>
-              <Stack spacing={1.75}>
-                {group.keys.map((key) => {
-                  const p = PARAMS.find((x) => x.key === key);
-                  if (!p) return null;
-                  return (
+            </Box>
+            <Box
+              sx={{
+                display: "grid",
+                gridTemplateColumns: {
+                  xs: "1fr",
+                  sm: "repeat(2, minmax(0, 1fr))",
+                  md: "repeat(3, minmax(0, 1fr))",
+                },
+                gap: 1.25,
+                alignItems: "start",
+              }}
+            >
+              {group.keys.map((key) => {
+                const p = PARAMS.find((x) => x.key === key);
+                if (!p) return null;
+                return (
+                  <Box
+                    key={p.key}
+                    title={HINTS[p.key]}
+                    sx={{
+                      gridColumn: p.key === "kb_id"
+                        ? { xs: "1 / -1", sm: "1 / -1", md: "span 2" }
+                        : p.key === "rerank"
+                          ? { md: "span 2" }
+                          : undefined,
+                    }}
+                  >
                     <ParamControl
-                      key={p.key}
                       p={p}
+                      compact
                       value={draft[p.key] ?? ""}
                       defaultValue={serverDefaults[p.key]}
                       kbs={kbs}
                       onChange={(v) => onChange(p.key, v)}
                     />
-                  );
-                })}
-              </Stack>
-              {gi < PARAM_GROUPS.length - 1 && <Divider sx={{ mt: 3 }} />}
+                    <Typography component="span" className="sr-only">
+                      {HINTS[p.key]}
+                    </Typography>
+                  </Box>
+                );
+              })}
             </Box>
-          ))}
-        </Box>
+            {gi < PARAM_GROUPS.length - 1 && <Divider sx={{ my: 1.5 }} />}
+          </Box>
+        ))}
+      </DialogContent>
 
-        <Divider />
-        <Stack direction="row" spacing={1} sx={{ px: 2.5, py: 2 }}>
-          <Button size="small" onClick={onReset} sx={{ color: "text.secondary" }}>
-            恢复默认
-          </Button>
-          <Box sx={{ flex: 1 }} />
-          <Button size="small" onClick={onRevert} disabled={dirty === 0}>
-            撤销修改
-          </Button>
-          <Button variant="contained" size="small" onClick={onApply} disabled={dirty === 0}>
-            应用筛选
-          </Button>
-        </Stack>
-      </Stack>
-    </Drawer>
+      <Divider />
+      <DialogActions
+        disableSpacing
+        sx={{ px: { xs: 1.5, sm: 3 }, py: 1.5, gap: { xs: 0.5, sm: 1 } }}
+      >
+        <Button
+          size="small"
+          onClick={onReset}
+          sx={{
+            color: "text.secondary", whiteSpace: "nowrap",
+            flexShrink: 0, px: { xs: 1.25, sm: 2 },
+          }}
+        >
+          恢复默认
+        </Button>
+        <Box sx={{ flex: 1 }} />
+        <Button
+          size="small"
+          onClick={onRevert}
+          disabled={dirty === 0}
+          sx={{ whiteSpace: "nowrap", flexShrink: 0, px: { xs: 1.25, sm: 2 } }}
+        >
+          撤销修改
+        </Button>
+        <Button
+          variant="contained"
+          size="small"
+          onClick={onApply}
+          disabled={dirty === 0}
+          sx={{ whiteSpace: "nowrap", flexShrink: 0, px: { xs: 1.25, sm: 2 } }}
+        >
+          应用筛选
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
 /** 参数控件：规格表是唯一来源，id 供键盘/测试定位。 */
 function ParamControl({
-  p, value, defaultValue, kbs, onChange,
+  p, compact = false, value, defaultValue, kbs, onChange,
 }: {
   p: (typeof PARAMS)[number];
+  compact?: boolean;
   value: string;
   defaultValue?: string;
-  kbs: Array<{ kb_id: string; name: string }>;
+  kbs: Kb[];
   onChange: (v: string) => void;
 }): React.ReactElement {
   const hint = HINTS[p.key];
+  const helper = compact ? undefined : hint;
   const placeholder = value === "" && defaultValue ? `默认 ${defaultValue}` : undefined;
 
   if (p.key === "kb_id") {
     return (
-      <TextField
-        id={p.id}
-        select
-        size="small"
-        fullWidth
-        label={p.label}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        helperText={hint}
-        slotProps={{
-          inputLabel: { shrink: true },
-          select: {
-            displayEmpty: true,
-            renderValue: (current: unknown) => {
-              const id = String(current ?? "");
-              return id ? (kbs.find((k) => k.kb_id === id)?.name ?? id) : "全部知识库";
-            },
-          },
-        }}
-      >
-        <MenuItem value="">全部知识库</MenuItem>
-        {kbs.map((k) => <MenuItem key={k.kb_id} value={k.kb_id}>{k.name}</MenuItem>)}
-      </TextField>
+      <Box>
+        <KbMultiSelect
+          id={p.id}
+          value={value}
+          onChange={onChange}
+          kbs={kbs}
+          variant="field"
+        />
+        {!compact && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+            {hint}
+          </Typography>
+        )}
+      </Box>
     );
   }
   if (p.key === "mode") {
     return (
       <TextField id={p.id} select size="small" fullWidth label={p.label}
-        value={value || "hybrid"} onChange={(e) => onChange(e.target.value)} helperText={hint}>
+        value={value || "hybrid"} onChange={(e) => onChange(e.target.value)} helperText={helper}>
         {MODE_OPTIONS.map((m) => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
       </TextField>
     );
@@ -208,7 +297,7 @@ function ParamControl({
   if (p.key === "group_by_doc") {
     return (
       <TextField id={p.id} select size="small" fullWidth label={p.label}
-        value={value || "false"} onChange={(e) => onChange(e.target.value)} helperText={hint}>
+        value={value || "false"} onChange={(e) => onChange(e.target.value)} helperText={helper}>
         <MenuItem value="false">否，保留每篇文档的多块</MenuItem>
         <MenuItem value="true">是，每篇只留最高分</MenuItem>
       </TextField>
@@ -224,7 +313,7 @@ function ParamControl({
         label={p.label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        helperText={hint}
+        helperText={helper}
         slotProps={{
           inputLabel: { shrink: true },
           select: {
@@ -253,7 +342,7 @@ function ParamControl({
         label={p.label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        helperText={hint}
+        helperText={helper}
         slotProps={{
           inputLabel: { shrink: true },
           select: {
@@ -285,9 +374,11 @@ function ParamControl({
           }
           label={p.label}
         />
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", ml: 0.25 }}>
-          {hint}
-        </Typography>
+        {!compact && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", ml: 0.25 }}>
+            {hint}
+          </Typography>
+        )}
       </Box>
     );
   }
@@ -301,7 +392,7 @@ function ParamControl({
         label={p.label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        helperText={hint}
+        helperText={helper}
         placeholder={placeholder}
         slotProps={{ htmlInput: { min: 0 } }}
       />
@@ -315,7 +406,7 @@ function ParamControl({
       label={p.label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      helperText={hint}
+      helperText={helper}
       placeholder={placeholder}
     />
   );

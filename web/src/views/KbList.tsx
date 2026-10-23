@@ -25,7 +25,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import { api } from "../lib/api";
 import { CONTENT_MAX } from "../lib/layout";
 import { href, go } from "../lib/router";
-import { invalidateKbs, loadKbs, setCrumbs, useStore } from "../lib/store";
+import { invalidateKbs, loadKbs, setCrumbs, useStoreSelect } from "../lib/store";
 import { fmtTime } from "../lib/format";
 import type { Kb } from "../lib/types";
 import { GlassPanel, useGlassLook } from "../ui/glass";
@@ -42,7 +42,8 @@ import { toast } from "../ui/toast";
  * 库名确认，属于设置页的职责。总览页只做"进入"。
  */
 export default function KbList(): React.ReactElement {
-  const { kbs, kbsLoaded } = useStore();
+  const kbs = useStoreSelect((s) => s.kbs);
+  const kbsLoaded = useStoreSelect((s) => s.kbsLoaded);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
   const reloadSeq = useRef(0);
@@ -66,8 +67,15 @@ export default function KbList(): React.ReactElement {
 
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: CONTENT_MAX, mx: "auto" }}>
-      <Stack direction="row" alignItems="flex-start" spacing={2} sx={{ mb: 3 }}>
-        <Box sx={{ flex: 1, minWidth: 0 }}>
+      {/* 小屏把操作按钮收到标题下方，避免描述被挤成一字一行；大屏四列，
+          否则 1920 下三张卡各占半屏、右半边全是空白。 */}
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        alignItems="flex-start"
+        spacing={2}
+        sx={{ mb: 3 }}
+      >
+        <Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>
           <Typography variant="h5" sx={{ fontWeight: 500 }}>
             知识库
           </Typography>
@@ -75,27 +83,33 @@ export default function KbList(): React.ReactElement {
             按主题组织文档。分块方案等进阶参数建库后在「知识库设置」里单独配置。
           </Typography>
         </Box>
-        <Button
-          variant="outlined"
-          startIcon={<RefreshIcon />}
-          onClick={() => {
-            invalidateKbs();
-            setError("");
-            void loadKbs().then(
-              () => toast("知识库列表已刷新"),
-              (e) => {
-                const msg = e instanceof Error ? e.message : String(e);
-                setError(msg);
-                toast("刷新失败", "err");
-              },
-            );
-          }}
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ flexShrink: 0, alignSelf: { xs: "flex-end", sm: "flex-start" } }}
         >
-          刷新
-        </Button>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
-          新建知识库
-        </Button>
+          <Button
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+            onClick={() => {
+              invalidateKbs();
+              setError("");
+              void loadKbs().then(
+                () => toast("知识库列表已刷新"),
+                (e) => {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  setError(msg);
+                  toast("刷新失败", "err");
+                },
+              );
+            }}
+          >
+            刷新
+          </Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
+            新建知识库
+          </Button>
+        </Stack>
       </Stack>
 
       {!kbsLoaded && error && (
@@ -113,7 +127,10 @@ export default function KbList(): React.ReactElement {
         <Box
           sx={{
             display: "grid", gap: 2,
-            gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)", lg: "repeat(3, 1fr)" },
+            gridTemplateColumns: {
+              xs: "1fr", sm: "repeat(2, minmax(0, 1fr))",
+              lg: "repeat(3, minmax(0, 1fr))", xl: "repeat(4, minmax(0, 1fr))",
+            },
           }}
         >
           {[0, 1, 2].map((i) => (
@@ -133,7 +150,10 @@ export default function KbList(): React.ReactElement {
       <Box
         sx={{
           display: "grid", gap: 2,
-          gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)", lg: "repeat(3, 1fr)" },
+          gridTemplateColumns: {
+            xs: "1fr", sm: "repeat(2, minmax(0, 1fr))",
+            lg: "repeat(3, minmax(0, 1fr))", xl: "repeat(4, minmax(0, 1fr))",
+          },
         }}
       >
         {kbs.map((k) => (

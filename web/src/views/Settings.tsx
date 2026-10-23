@@ -55,7 +55,15 @@ export default function Settings({ tab }: { tab: string }): React.ReactElement {
       <Tabs
         value={active}
         aria-label="设置分区"
-        sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}
+        sx={{
+          mb: 3, borderBottom: 1, borderColor: "divider",
+          // 360px 下四个分区要全部可见：默认 90px 最小宽度会把「存储」
+          // 挤出容器，而这里没有滚动提示。
+          "& .MuiTab-root": {
+            minWidth: { xs: 0, sm: 90 },
+            px: { xs: 1.5, sm: 3 },
+          },
+        }}
       >
         {TABS.map((t) => (
           <Tab key={t.key} value={t.key} label={t.label} component="a" href={t.href} />
@@ -293,7 +301,12 @@ function ModelsPanel(): React.ReactElement {
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             对候选分块重排序；未启用时按融合分数排序。
           </Typography>
-          <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+          <Stack
+            direction={{ xs: "column", lg: "row" }}
+            spacing={2}
+            useFlexGap
+            flexWrap="wrap"
+          >
             <FormControlLabel
               control={<Switch checked={models.rerank.enabled}
                 onChange={(e) => patch("rerank", "enabled", e.target.checked)} />}

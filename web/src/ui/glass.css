@@ -16,6 +16,32 @@
 }
 
 /*
+ * 裁掉玻璃面自己的溢出。
+ *
+ * 表格与代码块内部各有横向滚动容器，但 Chrome 仍会把子内容的
+ * scrollWidth 算进外层滚动区（实测 430px 视口下 main 被撑到 687px），
+ * 于是整页可横向拖动、表头还跟着跑。面板必须自己裁边；内层
+ * TableContainer / pre 的横向滚动不受影响。
+ */
+.lg-clip {
+  overflow: hidden;
+}
+
+/*
+ * 检索条件面板：纸面是 GlassPanel，自己必须裁圆角，滚动交给
+ * DialogContent。MUI Dialog 默认给纸面 overflow-y:auto，若不压住，
+ * 头尾会跟着内容一起滚走。
+ */
+.lg-filter-panel {
+  overflow: hidden !important;
+  max-width: 720px !important;
+}
+
+.lg-filter-panel .MuiDialogContent-root {
+  overscroll-behavior: contain;
+}
+
+/*
  * 平面玻璃：去掉材质的投影，只留玻璃本身。
  *
  * 库给每一块玻璃都挂了 `0 16px 48px -8px` 的大范围暗影。代码卡片是
@@ -56,6 +82,24 @@
   background-color: rgba(18, 32, 34, 0.78) !important;
   border-color: rgba(255, 255, 255, 0.08);
   box-shadow: 0 18px 48px -20px rgba(0, 0, 0, 0.6) !important;
+}
+
+/*
+ * 知识库多选 / 召回模式浮层：纸面交给 open-glass-ui 的 GlassPanel。
+ *
+ * MUI Popover 的 Paper 自带背景、边框和投影；这些必须清掉，否则会盖在
+ * 真正的玻璃材质上，看起来就是一块不透明白板。定位、过渡和 transform
+ * 仍由 MuiPopover-paper 负责，只把“外观”让给玻璃引擎。
+ */
+.MuiPopover-paper.lg-glass-popover-paper,
+[data-theme="dark"] .MuiPopover-paper.lg-glass-popover-paper {
+  background-color: transparent !important;
+  background-image: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  overflow: visible !important;
 }
 
 /*

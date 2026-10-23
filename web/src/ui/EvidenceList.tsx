@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -33,7 +33,7 @@ export interface EvidenceListProps {
  * 检索模式下面板较宽，卡片留出更多呼吸；对话右栏较窄，压紧间距。
  * 展开后的阅读器始终就地出现，不跳页、不开左右分栏。
  */
-export default function EvidenceList({
+function EvidenceList({
   hits,
   expanded,
   onToggle,
@@ -257,6 +257,10 @@ export default function EvidenceList({
     </Box>
   );
 }
+
+// 对话流式输出时证据数组本身不变；没有 memo 时每帧都会把整列卡片
+// （含展开面板里的全文）重渲染一遍。
+export default memo(EvidenceList);
 
 /** 片段渲染：纯文本 + 结构化高亮区间，不使用 HTML 注入。 */
 export function SnippetText({ snippet }: { snippet: Snippet }): React.ReactElement {

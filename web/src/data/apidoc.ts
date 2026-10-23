@@ -118,8 +118,9 @@ export const GROUPS: Group[] = [
           { name: "include_context", in: "body", type: "boolean", desc: "是否返回上下文文本" },
           { name: "snippet_chars", in: "body", type: "int|null", desc: "摘要长度（50-2000，纯文本部分）" },
           { name: "highlight", in: "body", type: "boolean", desc: "摘要中是否用 <mark> 标注命中词" },
-          { name: "filters", in: "body", type: "object", desc: "kb_id / doc_ids / origin / mime / parser_engine / include_disabled" },
-          { name: "kb_id", in: "body", type: "string|null", desc: "限定知识库（等价 filters.kb_id）" },
+          { name: "filters", in: "body", type: "object", desc: "kb_ids / kb_id / doc_ids / origin / mime / parser_engine / include_disabled" },
+          { name: "filters.kb_ids", in: "body", type: "string[]", desc: "多知识库范围（最多 50 个）；与顶层 kb_id 同时出现时 kb_id 优先" },
+          { name: "kb_id", in: "body", type: "string|null", desc: "限定单个知识库（旧字段，等价 filters.kb_id）" },
         ],
         example: {
           q: "逆变器 额定电压",
@@ -149,7 +150,7 @@ export const GROUPS: Group[] = [
         method: "GET",
         path: "/api/v1/search",
         summary: "检索（便于 curl / 脚本调用的便捷形式）。",
-        notes: ["参数全部走 query string，字段名与 POST 版一致；doc_ids 用逗号分隔。"],
+        notes: ["参数全部走 query string，字段名与 POST 版一致；doc_ids / kb_ids 用逗号分隔。"],
         fields: [
           { name: "query", type: "string", desc: "查询词回显" },
           { name: "results", type: "SearchHit[]", desc: "命中列表，结构同 POST 版" },
@@ -189,7 +190,7 @@ export const GROUPS: Group[] = [
           { name: "mode", in: "body", type: "string|null", desc: "hybrid / vector / fts" },
           { name: "kb_id", in: "body", type: "string|null", desc: "限定知识库" },
           { name: "history", in: "body", type: "ChatTurn[]", desc: "最近对话 [{role, content}]，最多 12 条" },
-          { name: "filters", in: "body", type: "object", desc: "与检索端点相同的过滤条件" },
+          { name: "filters", in: "body", type: "object", desc: "与检索端点相同（kb_ids / origin / mime / include_disabled 等）" },
         ],
         example: { q: "逆变器的额定电压是多少？", top_k: 5 },
         fields: [
@@ -220,7 +221,7 @@ export const GROUPS: Group[] = [
           { name: "mode", in: "body", type: "string|null", desc: "hybrid / vector / fts" },
           { name: "kb_id", in: "body", type: "string|null", desc: "限定知识库" },
           { name: "history", in: "body", type: "ChatTurn[]", desc: "最近对话 [{role, content}]，最多 12 条" },
-          { name: "filters", in: "body", type: "object", desc: "与检索端点相同的过滤条件" },
+          { name: "filters", in: "body", type: "object", desc: "与检索端点相同（kb_ids / origin / mime / include_disabled 等）" },
         ],
         example: { q: "逆变器的额定电压是多少？", top_k: 5 },
         raw: "event: sources\ndata: {\"citations\": [{\"index\": 1, \"chunk_id\": \"c1\", \"title\": \"逆变器技术手册\", \"score\": 0.61}]}\n\nevent: delta\ndata: {\"text\": \"变频器额定电压为 \"}\n\nevent: delta\ndata: {\"text\": \"380V，允许波动 ±10%。[1]\"}\n\nevent: done\ndata: {\"took_ms\": 1180.4, \"mode\": \"hybrid\", \"degraded_reason\": null}\n",

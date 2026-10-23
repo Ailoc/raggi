@@ -22,7 +22,7 @@ import { CONTENT_MAX } from "../lib/layout";
 import { fmtTime } from "../lib/format";
 import { removeKbDialog } from "../lib/ops";
 import { href, go } from "../lib/router";
-import { invalidateKbs, kbName, loadKbs, setCrumbs, track, useStore } from "../lib/store";
+import { invalidateKbs, kbName, loadKbs, setCrumbs, track, useStoreSelect } from "../lib/store";
 import { CHUNK_STRATEGIES, strategyLabel } from "../lib/types";
 import type { Kb, KbPlan } from "../lib/types";
 import { toast } from "../ui/toast";
@@ -65,7 +65,7 @@ const planSnap = (inherit: boolean, size: number, ratio: number, strategy: strin
  */
 export default function KbSettings({ kbId }: { kbId: string }): React.ReactElement {
   const look = useGlassLook("card");
-  const { kbsLoaded } = useStore();
+  const kbsLoaded = useStoreSelect((s) => s.kbsLoaded);
   const [kb, setKb] = useState<Kb | null>(null);
   const [plan, setPlan] = useState<KbPlan | null>(null);
   const [phase, setPhase] = useState<"initial" | "ready" | "failed">("initial");
