@@ -5,6 +5,7 @@ import Button from "@mui/material/Button";
 import ButtonBase from "@mui/material/ButtonBase";
 import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { alpha, useTheme } from "@mui/material/styles";
 import LibraryBooksIcon from "@mui/icons-material/LibraryBooks";
@@ -26,7 +27,13 @@ interface ChatThreadProps {
   onCitation: (turnId: string, citation: Citation) => void;
 }
 
-/** 对话记录：用户气泡靠右，Raggi 的回答带头像与浅色卡片；引用可跳回证据。 */
+/**
+ * 对话记录：用户气泡靠右，Raggi 的回答带头像与浅色卡片；引用可展开原文。
+ *
+ * 组件只负责内容：滚动由外层工作列统一持有（检索态与对话态共用同一
+ * 套几何），否则对话列会多出一层独立滚动条，条目与输入台的对齐关系
+ * 也就无从保证。
+ */
 export default function ChatThread({
   turns,
   activeTurnId,
@@ -37,9 +44,6 @@ export default function ChatThread({
   onCitation,
 }: ChatThreadProps): React.ReactElement {
   const look = useGlassLook("card");
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const stick = useRef(true);
-  const prevCount = useRef(turns.length);
 
   // 事件回调经 ref 转发：父组件每次渲染都会新建这些函数，直接透传会
   // 让 memo 化的行组件全部失效（流式时每帧都会重渲染整段对话）。
@@ -56,45 +60,21 @@ export default function ChatThread({
     (id: string, citation: Citation) =>
       handlers.current.onCitation(id, citation), []);
 
-  // 新消息与流式增量都走高頻更新；只有用户贴着底部时才跟随，
-  // 向上翻看旧回答时不抢滚动位置。新增一轮时重新贴底。
-  useEffect(() => {
-    if (turns.length > prevCount.current) stick.current = true;
-    prevCount.current = turns.length;
-    const el = scrollRef.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [turns]);
-
   return (
-    <Box
-      ref={scrollRef}
-      aria-label="对话记录"
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
-      }}
-      sx={{
-        height: "100%",
-        overflowY: "auto",
-        px: { xs: 2, sm: 3 },
-        py: { xs: 2.5, sm: 3 },
-      }}
-    >
-      <Box sx={{ maxWidth: 780, mx: "auto", width: "100%" }}>
-        {turns.map((turn) => (
-          <ChatTurnRow
-            key={turn.id}
-            turn={turn}
-            active={turn.id === activeTurnId}
-            running={turn.id === runningTurnId}
-            look={look}
-            onSelectTurn={selectTurn}
-            onStop={stopTurn}
-            onRetry={retryTurn}
-            onCitation={openCitation}
-          />
-        ))}
-      </Box>
+    <Box aria-label="对话记录">
+      {turns.map((turn) => (
+        <ChatTurnRow
+          key={turn.id}
+          turn={turn}
+          active={turn.id === activeTurnId}
+          running={turn.id === runningTurnId}
+          look={look}
+          onSelectTurn={selectTurn}
+          onStop={stopTurn}
+          onRetry={retryTurn}
+          onCitation={openCitation}
+        />
+      ))}
     </Box>
   );
 }
@@ -178,21 +158,28 @@ const ChatTurnRow = memo(function ChatTurnRow({
             <Typography variant="body2" sx={{ fontWeight: 600 }}>Raggi</Typography>
             <StatusText turn={turn} />
             <Box sx={{ flex: 1 }} />
-            <Button
-              size="small"
-              startIcon={<LibraryBooksIcon fontSize="small" />}
-              onClick={() => onSelectTurn(turn.id)}
-              sx={{
-                minWidth: 0,
-                borderRadius: 999,
-                color: active ? "primary.main" : "text.secondary",
-                bgcolor: active
-                  ? (t) => alpha(t.palette.primary.main, 0.08)
-                  : "transparent",
-              }}
-            >
-              {turn.evidenceLoading ? "正在找证据…" : `证据 ${turn.hits.length}`}
-            </Button>
+            {/*
+              describeChild：提示文案只作为*描述*，按钮的可访问名仍是
+              「证据 N」。MUI v6 默认会用提示标题覆盖可访问名，屏幕阅读器
+              就听不出这是几个证据了。
+            */}
+            <Tooltip title="在右侧打开证据阅读区" describeChild>
+              <Button
+                size="small"
+                startIcon={<LibraryBooksIcon fontSize="small" />}
+                onClick={() => onSelectTurn(turn.id)}
+                sx={{
+                  minWidth: 0,
+                  borderRadius: 999,
+                  color: active ? "primary.main" : "text.secondary",
+                  bgcolor: active
+                    ? (t) => alpha(t.palette.primary.main, 0.08)
+                    : "transparent",
+                }}
+              >
+                {turn.evidenceLoading ? "正在找证据…" : `证据 ${turn.hits.length}`}
+              </Button>
+            </Tooltip>
             {running && (
               <Button
                 size="small"
@@ -273,13 +260,17 @@ const ChatTurnRow = memo(function ChatTurnRow({
             )}
 
             {turn.citations.length > 0 && (
-              <Stack
-                direction="row"
-                spacing={0.75}
-                useFlexGap
-                flexWrap="wrap"
-                sx={{ mt: turn.answer || turn.error ? 1.75 : 0 }}
-              >
+              <Box sx={{ mt: turn.answer || turn.error ? 1.75 : 0 }}>
+                <Typography variant="caption" color="text.secondary">
+                  点引用可在右侧展开原文
+                </Typography>
+                <Stack
+                  direction="row"
+                  spacing={0.75}
+                  useFlexGap
+                  flexWrap="wrap"
+                  sx={{ mt: 0.75 }}
+                >
                 {turn.citations.map((c) => (
                   <ButtonBase
                     key={`${turn.id}-${c.index}-${c.chunk_id}`}
@@ -334,7 +325,8 @@ const ChatTurnRow = memo(function ChatTurnRow({
                     </Stack>
                   </ButtonBase>
                 ))}
-              </Stack>
+                </Stack>
+              </Box>
             )}
           </GlassPanel>
         </Box>

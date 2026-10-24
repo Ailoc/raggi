@@ -4,7 +4,6 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
-import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
 import MenuItem from "@mui/material/MenuItem";
@@ -82,6 +81,102 @@ export default function Settings({ tab }: { tab: string }): React.ReactElement {
 
 type ModelKind = "embed" | "llm" | "rerank";
 type TestKind = "embedding" | "llm" | "rerank";
+type FieldKind = "select" | "text" | "number" | "secret" | "switch";
+
+interface FieldSpec {
+  key: string;
+  label: string;
+  kind: FieldKind;
+  hint?: string;
+  /** 危险项：提示走警示色，不跟普通说明混成一色 */
+  danger?: boolean;
+  /** 两列网格里占满整行：总开关这类单独成行的项 */
+  full?: boolean;
+}
+
+interface ModelCardSpec {
+  kind: ModelKind;
+  title: string;
+  desc: string;
+  test: TestKind;
+  fields: FieldSpec[];
+  /** 这一段的连通性测试到底会做什么：后端真发一次请求，不是空跑。 */
+  testNote: string;
+  /** 补充说明：什么时候才需要这一段。 */
+  tip?: string;
+}
+
+const SECRET_HINT = "显示 *** 表示已保存；保持原样即不修改。";
+
+/**
+ * 三段配置的字段不同（embed 有 dim、rerank 有 enabled），但**排布必须一样**：
+ * 字段写成一张表，由同一个渲染函数逐条竖着铺下去。
+ * 每段各写一遍 JSX 的老写法必然漂移——Rerank 那行曾经就是横排的。
+ */
+const MODEL_CARDS: ModelCardSpec[] = [
+  {
+    kind: "embed", title: "Embedding", desc: "决定向量维度与语义召回质量。", test: "embedding",
+    testNote: "会真的向当前提供方发一次嵌入请求，并回传向量维度与吞吐。",
+    fields: [
+      { key: "provider", label: "提供方", kind: "select" },
+      { key: "model", label: "模型", kind: "text" },
+      { key: "base_url", label: "base_url", kind: "text" },
+      { key: "api_key", label: "API Key", kind: "secret", hint: SECRET_HINT },
+      {
+        key: "dim", label: "向量维度", kind: "number", danger: true,
+        hint: "危险：决定索引宽度。改动会让现有数据写入失败，且重建索引无法修复。",
+      },
+    ],
+  },
+  {
+    kind: "llm", title: "LLM", desc: "用于问答生成，可热切换。", test: "llm",
+    testNote: "会真的向当前提供方发一次生成请求，并回显回答内容与延迟。",
+    fields: [
+      { key: "provider", label: "提供方", kind: "select" },
+      { key: "model", label: "模型", kind: "text" },
+      { key: "base_url", label: "base_url", kind: "text" },
+      { key: "api_key", label: "API Key", kind: "secret", hint: SECRET_HINT },
+    ],
+  },
+  {
+    kind: "rerank", title: "Rerank", desc: "对候选分块重排序；未启用时按融合分数排序。", test: "rerank",
+    testNote: "会真的发一次重排请求，用一组正反例检查相关文档是否排到了前面。",
+    tip: "Rerank 只重排召回后的候选，不扩大召回范围——召回本身就偏时，先调嵌入模型。",
+    fields: [
+      { key: "enabled", label: "启用", kind: "switch", full: true },
+      { key: "provider", label: "提供方", kind: "select" },
+      { key: "model", label: "模型", kind: "text" },
+      { key: "base_url", label: "base_url", kind: "text" },
+      { key: "api_key", label: "API Key", kind: "secret", hint: SECRET_HINT },
+    ],
+  },
+];
+
+const PROVIDER_OPTIONS: Record<ModelKind, Array<[string, string]>> = {
+  embed: [
+    ["custom", "custom（OpenAI 兼容）"],
+    ["openai", "openai"], ["ollama", "ollama"], ["huggingface", "huggingface"],
+  ],
+  llm: [
+    ["custom", "custom（OpenAI 兼容）"],
+    ["openai", "openai"], ["ollama", "ollama"],
+  ],
+  rerank: [
+    ["none", "none（不精排）"],
+    ["api", "api（HTTP）"],
+    ["cross-encoder", "cross-encoder（本地）"],
+  ],
+};
+
+/**
+ * 三段配置的字段名不同，读写形状却一样（都是字符串键值）。
+ * 统一成一张表，渲染层就不必为每段各写一遍类型体操。
+ */
+type Section = Record<string, string | number | boolean>;
+
+function sectionOf(cfg: ModelsConfig, kind: ModelKind): Section {
+  return cfg[kind] as unknown as Section;
+}
 
 function ModelsPanel(): React.ReactElement {
   const look = useGlassLook("card");
@@ -193,171 +288,245 @@ function ModelsPanel(): React.ReactElement {
     );
   }
 
-  const keyField = (kind: ModelKind, label: string): React.ReactElement => (
-    <TextField
-      label={label}
-      type={revealed[kind] ? "text" : "password"}
-      fullWidth autoComplete="off"
-      value={models[kind].api_key}
-      helperText="显示 *** 表示已保存；保持原样即不修改。"
-      onChange={(e) => patch(kind, "api_key", e.target.value)}
-      slotProps={{
-        input: {
-          endAdornment: (
-            <InputAdornment position="end">
-              <IconButton
-                size="small"
-                aria-label={revealed[kind] ? "隐藏密钥" : "显示密钥"}
-                onClick={() => setRevealed((r) => ({ ...r, [kind]: !r[kind] }))}
-              >
-                {revealed[kind] ? <VisibilityOffIcon fontSize="small" /> : <VisibilityIcon fontSize="small" />}
-              </IconButton>
-            </InputAdornment>
-          ),
-        },
-      }}
-    />
+  const section = (kind: ModelKind): Section => sectionOf(models, kind);
+
+  /** 一个设置项：标签在上、控件在下、说明再下。 */
+  const renderField = (kind: ModelKind, spec: FieldSpec): React.ReactElement => {
+    const id = `models-${kind}-${spec.key}`;
+    const labelId = `${id}-label`;
+    const value = section(kind)[spec.key];
+
+    if (spec.kind === "switch") {
+      const on = value === true;
+      return (
+        <SettingField id={id} labelId={labelId} label={spec.label}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+            <Switch
+              id={id}
+              checked={on}
+              onChange={(e) => patch(kind, spec.key, e.target.checked)}
+              slotProps={{ input: { "aria-label": spec.label } }}
+            />
+            <Typography variant="body2" color={on ? "success.main" : "text.secondary"}>
+              {on ? "已开启：候选分块先精排再返回" : "已关闭：按融合分数排序"}
+            </Typography>
+          </Box>
+        </SettingField>
+      );
+    }
+
+    if (spec.kind === "select") {
+      return (
+        <SettingField id={id} labelId={labelId} label={spec.label} hint={spec.hint} danger={spec.danger}>
+          <TextField
+            id={id}
+            select
+            fullWidth
+            value={String(value ?? "")}
+            onChange={(e) => patch(kind, spec.key, e.target.value)}
+            slotProps={{
+              select: {
+                labelId,
+                // MUI 会把 select 的 id 拼进 aria-labelledby，屏幕阅读器会把
+                // 当前值一起念出来（"提供方 custom（OpenAI 兼容）"）。
+                // 这里点名只认可见标签，名字就干净了。
+                SelectDisplayProps: {
+                  "aria-label": spec.label,
+                  "aria-labelledby": labelId,
+                },
+              },
+            }}
+          >
+            {PROVIDER_OPTIONS[kind].map(([v, text]) => (
+              <MenuItem key={v} value={v}>{text}</MenuItem>
+            ))}
+          </TextField>
+        </SettingField>
+      );
+    }
+
+    if (spec.kind === "secret") {
+      return (
+        <SettingField id={id} labelId={labelId} label={spec.label} hint={spec.hint} danger={spec.danger}>
+          <TextField
+            id={id}
+            type={revealed[kind] ? "text" : "password"}
+            fullWidth
+            autoComplete="off"
+            value={String(value ?? "")}
+            onChange={(e) => patch(kind, spec.key, e.target.value)}
+            slotProps={{
+              htmlInput: { "aria-label": spec.label },
+              input: {
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      size="small"
+                      aria-label={revealed[kind] ? "隐藏密钥" : "显示密钥"}
+                      onClick={() => setRevealed((r) => ({ ...r, [kind]: !r[kind] }))}
+                    >
+                      {revealed[kind]
+                        ? <VisibilityOffIcon fontSize="small" />
+                        : <VisibilityIcon fontSize="small" />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              },
+            }}
+          />
+        </SettingField>
+      );
+    }
+
+    return (
+      <SettingField id={id} labelId={labelId} label={spec.label} hint={spec.hint} danger={spec.danger}>
+        <TextField
+          id={id}
+          type={spec.kind === "number" ? "number" : "text"}
+          fullWidth
+          value={String(value ?? "")}
+          onChange={(e) => patch(kind, spec.key, spec.kind === "number" ? Number(e.target.value) : e.target.value)}
+          slotProps={{ htmlInput: { "aria-label": spec.label } }}
+        />
+      </SettingField>
+    );
+  };
+
+  /**
+   * 卡内的参数区：**两列网格**，每项仍是标签在上、控件在下。
+   *
+   * 一行一个字段会把宽屏拉成一条长表单：每行 1200px，眼睛来回折返。
+   * 拆两列后每个字段 ~600px，`base_url` 能一行读完，卡片也不会太高。
+   */
+  const fieldGrid = (card: ModelCardSpec): React.ReactElement => (
+    <Box sx={{
+      display: "grid",
+      gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" },
+      columnGap: 3,
+      rowGap: 2.5,
+      alignItems: "start",
+    }}>
+      {card.fields.map((spec) => (
+        <Box
+          key={spec.key}
+          sx={{ minWidth: 0, gridColumn: spec.full ? "1 / -1" : "auto" }}
+        >
+          {renderField(card.kind, spec)}
+        </Box>
+      ))}
+    </Box>
   );
 
-  const providerSelect = (
-    kind: ModelKind, options: Array<[string, string]>,
-  ): React.ReactElement => (
-    <TextField
-      select label="提供方" fullWidth
-      value={models[kind].provider}
-      onChange={(e) => patch(kind, "provider", e.target.value)}
-    >
-      {options.map(([v, label]) => <MenuItem key={v} value={v}>{label}</MenuItem>)}
-    </TextField>
+  /** 卡内的连通性测试区：按钮 + 结论。 */
+  const testActions = (card: ModelCardSpec): React.ReactElement => (
+    <>
+      <Button size="small" variant="outlined" disabled={!!testing[card.test]}
+        onClick={() => void test(card.test)}>
+        {testing[card.test] ? "测试中…" : "测试连通性"}
+      </Button>
+      <TestResult result={results[card.test]} />
+    </>
+  );
+
+  /** 测试到底会做什么：后端真发一次请求，别让人以为只是探活。 */
+  const testNote = (card: ModelCardSpec): React.ReactElement => (
+    <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5 }}>
+      {card.testNote}
+    </Typography>
   );
 
   return (
     <Box component="form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-      <Box
-        sx={{
-          display: "grid", gap: 2,
-          gridTemplateColumns: { xs: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
-        }}
-      >
-        <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
-          <Typography variant="h6" sx={{ fontSize: 16 }}>Embedding</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            决定向量维度与语义召回质量。
-          </Typography>
-          <Stack spacing={2}>
-            {providerSelect("embed", [
-              ["custom", "custom（OpenAI 兼容）"],
-              ["openai", "openai"], ["ollama", "ollama"], ["huggingface", "huggingface"],
-            ])}
-            <TextField label="模型" fullWidth value={models.embed.model}
-              onChange={(e) => patch("embed", "model", e.target.value)} />
-            <TextField label="base_url" fullWidth value={models.embed.base_url}
-              onChange={(e) => patch("embed", "base_url", e.target.value)} />
-            {keyField("embed", "API Key")}
-            <TextField
-              label="向量维度" type="number" fullWidth value={models.embed.dim}
-              onChange={(e) => patch("embed", "dim", Number(e.target.value))}
-              helperText="危险：决定索引宽度。改动会让现有数据写入失败，且重建索引无法修复。"
-            />
-          </Stack>
-          <Divider sx={{ my: 2 }} />
-          <Stack direction="row" spacing={2} alignItems="flex-start">
-            <Button size="small" variant="outlined" disabled={!!testing.embedding}
-              onClick={() => void test("embedding")}>
-              {testing.embedding ? "测试中…" : "测试连通性"}
-            </Button>
-            <TestResult result={results.embedding} />
-          </Stack>
-        </GlassPanel>
+      {/* 卡片竖着摞，列在卡内：每张卡里的设置项排成两列。
+          表单列宽收在 1280 以内，两列各 ~600px，不会被拉到 1600px 宽。 */}
+      <Box sx={{ maxWidth: 1280, mx: "auto" }}>
+        <Stack spacing={2.5}>
+          {MODEL_CARDS.map((card) => (
+            <GlassPanel key={card.kind} radius={16} look={look} sx={{ p: 3 }}>
+              <Typography variant="h6" sx={{ fontSize: 16 }}>{card.title}</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
+                {card.desc}
+              </Typography>
+              {fieldGrid(card)}
+              <Divider sx={{ my: 2.5 }} />
+              <Stack direction="row" spacing={2} alignItems="flex-start" sx={{ flexWrap: "wrap" }}>
+                {testActions(card)}
+              </Stack>
+              {testNote(card)}
+              {card.tip && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                  {card.tip}
+                </Typography>
+              )}
+            </GlassPanel>
+          ))}
+        </Stack>
 
-        <GlassPanel radius={16} look={look} sx={{ p: 3 }}>
-          <Typography variant="h6" sx={{ fontSize: 16 }}>LLM</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            用于问答生成，可热切换。
+        <GlassPanel
+          radius={16} look={look}
+          style={{ position: "sticky", bottom: 0, zIndex: 5 }}
+          sx={{
+            mt: 2.5, p: 2, display: "flex", gap: 2,
+            alignItems: "center", flexWrap: "wrap",
+          }}
+        >
+          <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 200 }}>
+            保存后立即热切换并写入 data/config.toml。
+            {/* 窄屏上这条提醒要占三行，把输入框都盖住了；维度字段旁边
+                已经有一行红色的完整警告，这里只在宽屏重复一次。 */}
+            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+              <strong>向量维度变更会导致写入失效</strong>，需谨慎操作。
+            </Box>
           </Typography>
-          <Stack spacing={2}>
-            {providerSelect("llm", [
-              ["custom", "custom（OpenAI 兼容）"],
-              ["openai", "openai"], ["ollama", "ollama"],
-            ])}
-            <TextField label="模型" fullWidth value={models.llm.model}
-              onChange={(e) => patch("llm", "model", e.target.value)} />
-            <TextField label="base_url" fullWidth value={models.llm.base_url}
-              onChange={(e) => patch("llm", "base_url", e.target.value)} />
-            {keyField("llm", "API Key")}
-          </Stack>
-          <Divider sx={{ my: 2 }} />
-          <Stack direction="row" spacing={2} alignItems="flex-start">
-            <Button size="small" variant="outlined" disabled={!!testing.llm}
-              onClick={() => void test("llm")}>
-              {testing.llm ? "测试中…" : "测试连通性"}
-            </Button>
-            <TestResult result={results.llm} />
-          </Stack>
-        </GlassPanel>
-
-        <GlassPanel radius={16} look={look} style={{ gridColumn: "1 / -1" }} sx={{ p: 3 }}>
-          <Typography variant="h6" sx={{ fontSize: 16 }}>Rerank</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            对候选分块重排序；未启用时按融合分数排序。
-          </Typography>
-          <Stack
-            direction={{ xs: "column", lg: "row" }}
-            spacing={2}
-            useFlexGap
-            flexWrap="wrap"
-          >
-            <FormControlLabel
-              control={<Switch checked={models.rerank.enabled}
-                onChange={(e) => patch("rerank", "enabled", e.target.checked)} />}
-              label="启用"
-              sx={{ minWidth: 110 }}
-            />
-            <TextField select label="提供方" value={models.rerank.provider}
-              onChange={(e) => patch("rerank", "provider", e.target.value)}
-              sx={{ minWidth: 220 }}>
-              <MenuItem value="none">none（不精排）</MenuItem>
-              <MenuItem value="api">api（HTTP）</MenuItem>
-              <MenuItem value="cross-encoder">cross-encoder（本地）</MenuItem>
-            </TextField>
-            <TextField label="模型" value={models.rerank.model} sx={{ flex: 1, minWidth: 180 }}
-              onChange={(e) => patch("rerank", "model", e.target.value)} />
-            <TextField label="base_url" value={models.rerank.base_url} sx={{ flex: 1, minWidth: 180 }}
-              onChange={(e) => patch("rerank", "base_url", e.target.value)} />
-            <Box sx={{ minWidth: 220, flex: 1 }}>{keyField("rerank", "API Key")}</Box>
-          </Stack>
-          <Divider sx={{ my: 2 }} />
-          <Stack direction="row" spacing={2} alignItems="flex-start">
-            <Button size="small" variant="outlined" disabled={!!testing.rerank}
-              onClick={() => void test("rerank")}>
-              {testing.rerank ? "测试中…" : "测试连通性"}
-            </Button>
-            <TestResult result={results.rerank} />
-          </Stack>
+          {dirty && (
+            <Typography variant="body2" color="primary" role="status">有未保存的改动</Typography>
+          )}
+          {dirty && (
+            <Button disabled={saving} onClick={() => void load()}>放弃改动</Button>
+          )}
+          <Button type="submit" variant="contained" disabled={!dirty || saving}>
+            {saving ? "保存中…" : "保存并热切换"}
+          </Button>
         </GlassPanel>
       </Box>
+    </Box>
+  );
+}
 
-      <GlassPanel
-        radius={16} look={look}
-        style={{ position: "sticky", bottom: 0, zIndex: 5, marginTop: 16 }}
-        sx={{
-          p: 2, display: "flex", gap: 2,
-          alignItems: "center", flexWrap: "wrap",
-        }}
+/**
+ * 设置项的骨架：标签在上、控件在下、说明再下。
+ *
+ * 标签是真正的 `<label for>`：点文字能聚焦控件，读屏也读得到名字——
+ * 不能靠 placeholder，输入后就消失了。
+ */
+function SettingField({ id, labelId, label, hint, danger, children }: {
+  id: string;
+  labelId: string;
+  label: string;
+  hint?: string;
+  danger?: boolean;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <Box sx={{ display: "grid", gap: 0.75 }}>
+      <Typography
+        component="label"
+        htmlFor={id}
+        id={labelId}
+        variant="caption"
+        sx={{ color: "text.secondary", fontWeight: 600, letterSpacing: "0.04em" }}
       >
-        <Typography variant="body2" color="text.secondary" sx={{ flex: 1, minWidth: 200 }}>
-          保存后立即热切换并写入 data/config.toml。<strong>向量维度变更会导致写入失效</strong>，需谨慎操作。
+        {label}
+      </Typography>
+      {children}
+      {hint && (
+        <Typography
+          variant="caption"
+          sx={{ color: danger ? "error.main" : "text.secondary" }}
+        >
+          {hint}
         </Typography>
-        {dirty && (
-          <Typography variant="body2" color="primary" role="status">有未保存的改动</Typography>
-        )}
-        {dirty && (
-          <Button disabled={saving} onClick={() => void load()}>放弃改动</Button>
-        )}
-        <Button type="submit" variant="contained" disabled={!dirty || saving}>
-          {saving ? "保存中…" : "保存并热切换"}
-        </Button>
-      </GlassPanel>
+      )}
     </Box>
   );
 }

@@ -567,7 +567,9 @@ def test_models_panel_tracks_dimension_and_dirtiness():
     assert "有未保存的改动" in code, "未保存提示不可见"
     assert "变更向量维度" in code and "destructive: true" in code, \
         "维度变更没有量化后果并要求确认"
-    assert "testing[kind]" not in code and "testing.embedding" in code, \
+    assert "testing[kind]" not in code and \
+        "useState<Record<string, boolean>>({})" in code and \
+        "disabled={!!testing[card.test]}" in code, \
         "三类模型的测试状态必须分别记录（一个在跑不该锁死另两个）"
     assert "latency_ms" in code and "sorted_correctly" in code, \
         "连通性结果没有翻译成结论"
@@ -967,10 +969,60 @@ def test_scrollable_tables_clip_inside_the_glass_panel():
 def test_topbar_keeps_every_section_reachable_on_narrow_screens():
     """360px 下五个分区要全部可见，不能靠横向滑动才发现设置/API。"""
     app = read(SRC / "App.tsx")
-    assert 'display: { xs: "none", sm: "block" }' in app, \
-        "小屏品牌文字没有让位，导航会被挤出容器"
     assert 'minWidth: { xs: 0, sm: 72 }' in app, \
         "小屏 Tab 仍保留 72px 最小宽度"
+    # 品牌换成了字标：宽是原来圆形图标的两倍多。小屏必须同时收字标高度
+    # 和 Tab 内边距把宽度还回去，否则 API 会被主题按钮压掉半个。
+    assert 'height: { xs: 17, sm: 26 }' in app, \
+        "小屏字标高度没有让位，导航会被挤出容器"
+    assert 'px: { xs: 0.7, sm: 2 }' in app, \
+        "小屏 Tab 内边距没有让位，导航会被挤出容器"
+    assert '"@media (max-width: 359px)": { display: "none" }' in app, \
+        "320px 级窄屏没有隐藏品牌"
+
+
+def test_brand_wordmark_is_a_vector_mark_that_follows_the_theme():
+    """品牌字标是内联 SVG：矢量可缩放，配色跟主题走，不靠两套位图。"""
+    app = read(SRC / "App.tsx")
+    mark = read(UI / "Wordmark.tsx")
+    assert "<Wordmark" in app, "顶栏品牌没有用字标组件"
+    assert 'role="img"' in mark and 'aria-label="Raggi"' in mark, \
+        "字标没有可访问名称"
+    assert 'stroke="currentColor"' in mark, "字标笔画没有跟随主题文字色"
+    assert "palette.mode" in mark, "字标配色没有跟随主题切换"
+    assert not list((WEB / "public").glob("raggi-logo*.png")), \
+        "位图字标已退役，别再往回加：缩放会锯齿，还得为每个主题各出一份"
+
+
+def test_model_settings_pairs_each_models_fields_in_two_columns():
+    """模型设置：卡片竖着摞，卡内设置项排两列，每项标签在上控件在下。
+
+    用户 2026-10-23 的原话是"每个设置项应该上下排列"——说的是**项内部**
+    （标签在上、控件在下），不是整页单列；随后又追问"你不会显示两列吗"，
+    指的是**同一张卡里的设置项**排两列。所以：卡片一列竖排，卡内两列。
+    一行一个字段会把 1280px 的表单拉成独木桥；两列各 ~600px，`base_url`
+    能一行读完。总开关（Rerank 的「启用」）单独占满整行。
+    """
+    settings = read(VIEWS / "Settings.tsx")
+    # read() 会剥掉注释，分段只能靠函数名这种代码标记
+    panel = settings.split("function ModelsPanel")[1].split("function HealthPanel")[0]
+
+    field_block = panel.split("const fieldGrid")[1].split("const testActions")[0]
+    assert 'gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" }' in field_block, \
+        "卡内设置项没有排成两列：宽屏上每行只放一个字段，表单被拉成一条独木桥"
+    assert "renderField(card.kind, spec)" in field_block, \
+        "两列网格没有复用同一个渲染函数，排布必然漂移（历史上 Rerank 就是横排的）"
+    assert 'spec.full ? "1 / -1"' in field_block, \
+        "总开关没有占满整行：会和参数挤在同一行里"
+
+    assert re.search(r"<Stack spacing=\{2\.5\}>\s*\{MODEL_CARDS\.map", panel), \
+        "卡片被套进了多栏网格：两列是卡内的设置项，卡片本身必须竖着摞"
+    assert re.search(r"maxWidth:\s*\d{3,4}", panel), \
+        "表单列没有宽度上限：两列会各自被拉到 800px 以上"
+    assert 'component="label"' in panel and "htmlFor={id}" in panel, \
+        "设置项的标签不是真正的 <label for>：点标签不能聚焦控件，读屏也没名字"
+    assert 'SelectDisplayProps' in panel, \
+        "下拉框没点名 aria-labelledby：MUI 会把当前值一起念出来"
 
 
 def test_filter_panel_is_a_glass_dialog_not_a_sidebar():
@@ -1092,8 +1144,8 @@ def test_streaming_updates_are_coalesced():
     search = read(VIEWS / "Search.tsx")
     assert 'current.status !== "searching") return prev' in search, \
         "每个 delta 仍在重建轮次数组"
-    assert "onToggle={toggleChatExpanded}" in search, \
-        "证据列表的 onToggle 不是稳定引用，memo 会失效"
+    assert "onSelectChunk={handleSelectChunk}" in search, \
+        "阅读区的分块切换不是稳定引用，memo 会失效"
 
     thread = read(UI / "ChatThread.tsx")
     assert "const ChatTurnRow = memo(" in thread, "对话轮次没有 memo"
@@ -1101,3 +1153,91 @@ def test_streaming_updates_are_coalesced():
     assert "export default memo(EvidenceList)" in evidence, "证据列表没有 memo"
     composer = read(UI / "SearchComposer.tsx")
     assert "export default memo(SearchComposer)" in composer, "输入台没有 memo"
+
+
+def test_search_and_chat_share_one_work_column():
+    """检索与对话必须共用同一条工作列（`ui/FloatColumn`）。
+
+    回归防护：两处各写一遍几何，迟早只改一处——宽度、圆角缺口、滚动条
+    补偿三件事会各走各的。对话态曾经自己一套左右分栏，输入台与内容列
+    对不齐，底部还铺了一条全宽渐变条。
+    """
+    search = read(VIEWS / "Search.tsx")
+    assert search.count("<FloatColumn") == 2, \
+        "检索与对话应各用一次 FloatColumn（而不是各自拼一套几何）"
+    assert "gridTemplateColumns" not in search, \
+        "检索页又退回了左右分栏网格"
+    assert "linear-gradient(180deg" not in search, \
+        "输入台下方又铺了全宽渐变条（底部应只有输入台本身）"
+
+    column = read(UI / "FloatColumn.tsx")
+    assert "COMPOSER_RADIUS" in column, "工作列没有圆角半径常量"
+    assert "clipPath: \"inset(0 -64px -64px -64px)\"" in column, \
+        "工作列没有裁掉输入台向上的投影"
+    assert "borderRadius: `${COMPOSER_RADIUS}px`" in column, \
+        "玻璃下方缺同半径的圆角衬底（条目会从玻璃中间透出来）"
+
+
+def test_chat_starts_a_fresh_session_on_every_entry():
+    """每次进入对话都是新会话：上一段对话不恢复、不落盘。
+
+    回归防护：曾经把对话写进 sessionStorage 并在挂载时恢复，于是点一次
+    「对话」就落进一段陈旧会话（左右分栏 + 半截回答）。用户要的是
+    「切到对话 = 从零开始的一段新对话」。
+    """
+    search = read(VIEWS / "Search.tsx")
+    assert "sessionStorage" not in search, "对话历史又开始落盘/恢复了"
+    assert "loadChatState" not in search and "saveChatState" not in search, \
+        "对话历史的存取函数还在"
+    change = strip_comments(search)
+    assert re.search(
+        r'if \(next === "chat"\) \{[^}]*setChatTurns\(\[\]\)', change,
+    ), "切到对话时没有清空上一段对话"
+    assert "setChatParams({ ...applied })" in search, \
+        "新会话没有继承当前检索条件"
+
+
+def test_evidence_panel_is_a_sibling_not_an_overlay():
+    """阅读区与对话内容同层：对话列左移，而不是浮层盖住。
+
+    回归防护：抽屉式浮层会把对话内容压在下面，读者看不到自己点的是
+    哪一条；同层布局让两侧并排，主列宽度可见地变化。
+    """
+    panel = read(UI / "SourcePanel.tsx")
+    assert 'component="aside"' in panel, "阅读区不是 aside（读屏角色不对）"
+    assert "position: { xs: \"fixed\", md: \"relative\" }" in panel, \
+        "阅读区没有区分窄屏浮层与宽屏同层两种形态"
+    assert "flex: { xs: \"none\", md: \"0 0 clamp(340px, 28vw, 400px)\" }" in panel, \
+        "阅读区没有占据固定版面（对话列不会左移）"
+
+    search = read(VIEWS / "Search.tsx")
+    assert "<SourcePanel" in search, "检索页没有接上阅读区"
+    assert "onSelectTurn={openEvidence}" in search, \
+        "「证据 N」没有打开右侧阅读区"
+    assert "onCitation={revealCitation}" in search, \
+        "点引用没有打开右侧阅读区"
+
+
+def test_reading_region_shows_the_chosen_chunk_source_text():
+    """右侧区域展示被点选分块的**原文**，不是整列检索证据。
+
+    回归防护：这里曾经用整份证据列表充数，读者点开引用看到的是八条
+    片段而不是自己点的那一条的原文；现在必须按 chunk_id 取回原始分块
+    正文，并在原文里标出命中位置。
+    """
+    panel = read(UI / "SourcePanel.tsx")
+    assert "<ChunkReader" in panel, "阅读区没有渲染分块原文阅读器"
+    assert "EvidenceList" not in panel, \
+        "阅读区仍在渲染整列证据列表（读者看到的是所有片段而不是所选原文）"
+    assert "GlassPanel" in panel, "阅读区没有用液态玻璃材质"
+
+    reader = read(UI / "ChunkReader.tsx")
+    assert "/api/chunks/" in reader, "阅读器没有按 chunk_id 取回原始分块正文"
+    assert 'aria-label="分块原文"' in reader, "阅读器没有标出原文区域"
+    assert "locateSnippet" in reader, "阅读器没有在原文里定位命中片段"
+
+    search = read(VIEWS / "Search.tsx")
+    assert "setPanelChunkId(citation.chunk_id)" in search, \
+        "点引用没有把阅读区切到被引用的分块"
+    assert "onSelectChunk={handleSelectChunk}" in search, \
+        "阅读区没有接上分块切换"

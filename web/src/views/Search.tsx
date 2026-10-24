@@ -1,5 +1,5 @@
 import {
-  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  useCallback, useEffect, useMemo, useRef, useState,
 } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -7,16 +7,12 @@ import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Skeleton from "@mui/material/Skeleton";
 import Stack from "@mui/material/Stack";
-import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
-import { alpha } from "@mui/material/styles";
 import DownloadIcon from "@mui/icons-material/Download";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 
 import { api, apiText } from "../lib/api";
-import { CONTENT_MAX } from "../lib/layout";
 import { GlassPanel, useGlassLook } from "../ui/glass";
 import { setCrumbs, useStoreSelect } from "../lib/store";
 import { streamPost } from "../lib/sse";
@@ -26,18 +22,16 @@ import {
 } from "../lib/searchparams";
 import { takePendingSearch } from "../lib/searchintent";
 import type {
-  AnswerHistoryTurn, ChatTurn, Citation, ModelsConfig, SearchResponse,
+  AnswerHistoryTurn, ChatTurn, Citation, ModelsConfig, SearchHit, SearchResponse,
 } from "../lib/types";
 import ChatThread from "../ui/ChatThread";
 import EvidenceList from "../ui/EvidenceList";
+import FloatColumn from "../ui/FloatColumn";
 import SearchComposer from "../ui/SearchComposer";
 import type { ComposerChip, SearchMode } from "../ui/SearchComposer";
 import SearchFilters, { HINTS } from "../ui/SearchFilters";
+import SourcePanel, { hitFromCitation } from "../ui/SourcePanel";
 import { toast } from "../ui/toast";
-
-type MobilePane = "chat" | "evidence";
-
-const CHAT_STATE_KEY = "raggi.chatState.v1";
 
 /**
  * 顶栏之下的剩余视口。
@@ -47,85 +41,6 @@ const CHAT_STATE_KEY = "raggi.chatState.v1";
  * 高度，底部输入台正好被挤出屏幕。
  */
 const FILL_HEIGHT = "calc(100% - var(--shell-header-h, 84px))";
-
-/**
- * 检索态的工作列宽：结果、空态卡片、浮动输入台共用同一列。
- *
- * 改前结果区用全站 CONTENT_MAX（1680），输入台是 900：1440 视口下卡片
- * 1392px、输入 900px，左右各错开 246px。现在结果列与输入台同宽，
- * 输入台是浮在滚动区上的独立玻璃面——内容从它背后滑过，而不是被
- * 底部一条全宽区域截断。
- */
-const SEARCH_COLUMN_MAX = 900;
-// 与 SearchComposer 的 COMPOSER_RADIUS 一致。滚动区向下多伸出这段，
-// 让条目能进入顶部两个圆角缺口；玻璃下方另铺同色圆角衬底，避免条目
-// 从玻璃中间透出来。
-const SEARCH_COMPOSER_RADIUS = 26;
-// 与底部输入台外层的内边距一致（xs=16px、md=32px）；结果列用
-// calc 从滚动区宽度里扣除同样的值，滚动条出现时两边仍严格对齐。
-const SEARCH_COLUMN_INSET = { xs: 32, md: 64 } as const;
-
-interface StoredChat {
-  turns: ChatTurn[];
-  params: Record<string, string>;
-  activeTurnId: string | null;
-}
-
-function isStoredTurn(value: unknown): value is ChatTurn {
-  if (!value || typeof value !== "object") return false;
-  const t = value as Partial<ChatTurn>;
-  const statuses = new Set(["searching", "streaming", "done", "error", "stopped"]);
-  return typeof t.id === "string"
-    && typeof t.question === "string"
-    && typeof t.answer === "string"
-    && typeof t.status === "string"
-    && statuses.has(t.status)
-    && Array.isArray(t.citations)
-    && Array.isArray(t.hits);
-}
-
-/** 只恢复终态轮次；保存时没写完的轮次在加载时标记为已停止。 */
-function loadChatState(): StoredChat | null {
-  try {
-    const raw = sessionStorage.getItem(CHAT_STATE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<StoredChat>;
-    if (!parsed || !Array.isArray(parsed.turns)) return null;
-    const turns = parsed.turns.filter(isStoredTurn).map((turn) => ({
-      ...turn,
-      evidenceLoading: false,
-      status: turn.status === "searching" || turn.status === "streaming"
-        ? "stopped" as const
-        : turn.status,
-    })).slice(-10);
-    if (turns.length === 0) return null;
-    const params = {
-      ...defaultParams(),
-      ...(parsed.params && typeof parsed.params === "object" ? parsed.params : {}),
-    };
-    const active = typeof parsed.activeTurnId === "string"
-      && turns.some((t) => t.id === parsed.activeTurnId)
-      ? parsed.activeTurnId
-      : turns[turns.length - 1]!.id;
-    return { turns, params, activeTurnId: active };
-  } catch {
-    return null;
-  }
-}
-
-function saveChatState(
-  turns: ChatTurn[], params: Record<string, string>, activeTurnId: string | null,
-): void {
-  try {
-    sessionStorage.setItem(CHAT_STATE_KEY, JSON.stringify({
-      turns: turns.slice(-10),
-      params,
-      activeTurnId,
-    }));
-  } catch {
-    // 配额/隐私模式：聊天仍在内存里，不因持久化失败打断交互
-  }
-}
 
 function chipLabel(key: string, value: string): string {
   if (key === "origin") return `来源：${value === "manual" ? "手工块" : "解析入库"}`;
@@ -166,9 +81,11 @@ function makeTurnId(): string {
 /**
  * 智能体工作台。
  *
- * 空态只有一个居中的输入台；发送后输入台下移：
- * - 检索：结果占据上方滚动区，输入台固定在底部；
- * - 对话：左侧是带多轮历史的消息流，右侧是本轮证据，输入台在消息流底部。
+ * 空态只有一个居中的输入台；发送后输入台下移，检索与对话共用同一条
+ * 工作列：内容在上、玻璃输入台浮在底部。
+ * - 检索：结果卡片占据上方滚动区；
+ * - 对话：多轮问答占据上方滚动区；点引用或「证据 N」时，右侧同层
+ *   展开证据面板（分块原文/文档全文），对话列整体左移而不是被浮层盖住。
  *
  * 检索模式下 URL 仍是唯一事实来源；对话模式不共享 URL 状态，避免每轮
  * 追问都改写历史。两种模式共用同一份参数解释与同一套证据渲染。
@@ -178,30 +95,27 @@ export default function Search(): React.ReactElement {
   const kbs = useStoreSelect((s) => s.kbs);
   // 命令面板可能在本页挂载前就发起了检索，初始化时先取走它的意图。
   const initialSearch = useMemo(takePendingSearch, []);
-  const restoredChat = useMemo(loadChatState, []);
 
   const [viewMode, setViewMode] = useState<SearchMode>("search");
   const [query, setQuery] = useState(initialSearch);
   const [searchDraft, setSearchDraft] = useState(initialSearch);
   const [applied, setApplied] = useState<Record<string, string>>(defaultParams);
   const [chatDraft, setChatDraft] = useState("");
-  const [chatParams, setChatParams] = useState<Record<string, string>>(
-    () => restoredChat?.params ?? defaultParams(),
-  );
+  const [chatParams, setChatParams] = useState<Record<string, string>>(defaultParams);
 
   const [searchResp, setSearchResp] = useState<SearchResponse | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [searchExpanded, setSearchExpanded] = useState<string | null>(null);
 
-  const [chatTurns, setChatTurns] = useState<ChatTurn[]>(() => restoredChat?.turns ?? []);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(
-    () => restoredChat?.activeTurnId ?? null,
-  );
-  const [chatExpanded, setChatExpanded] = useState<string | null>(null);
+  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [chatRunningId, setChatRunningId] = useState<string | null>(null);
-  const [focusChunk, setFocusChunk] = useState<string | null>(null);
-  const [mobilePane, setMobilePane] = useState<MobilePane>("chat");
+  // 右侧阅读区：打开状态、正在阅读的分块、以及不在本轮证据里的
+  // 引用兜底。
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelChunkId, setPanelChunkId] = useState<string | null>(null);
+  const [panelFallback, setPanelFallback] = useState<SearchHit | null>(null);
 
   const [answerEnabled, setAnswerEnabled] = useState(false);
   const [serverDefaults, setServerDefaults] = useState<Record<string, string>>({});
@@ -210,16 +124,12 @@ export default function Search(): React.ReactElement {
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const searchSeq = useRef(0);
-  const searchRootRef = useRef<HTMLDivElement | null>(null);
   const searchScrollRef = useRef<HTMLDivElement | null>(null);
   const searchContentRef = useRef<HTMLDivElement | null>(null);
-  const composerRef = useRef<HTMLDivElement | null>(null);
-  // 滚动条占掉的宽度：结果列与输入台都要扣除同一份，才能在任意视口
-  // 严格同宽（否则经典滚动条会让结果列凭空窄 15px）。
-  const [searchScrollbarW, setSearchScrollbarW] = useState(0);
-  // 从工作台底边到输入台上沿的距离（输入台高度 + 底部外边距）。
-  // 滚动区在输入台上沿截止，条目不会穿到输入台背后。
-  const [searchComposerInset, setSearchComposerInset] = useState(0);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatContentRef = useRef<HTMLDivElement | null>(null);
+  // 对话列是否贴着底部：贴底时流式增量自动跟随，向上翻看时不抢位置。
+  const chatStick = useRef(true);
 
   const chatStream = useRef<StreamHandle | null>(null);
   const chatSearchCtrl = useRef<AbortController | null>(null);
@@ -304,7 +214,7 @@ export default function Search(): React.ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // `/` 聚焦输入台；在移动端的证据页先切回对话页。
+  // `/` 聚焦输入台。
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const t = e.target as HTMLElement | null;
@@ -312,7 +222,6 @@ export default function Search(): React.ReactElement {
       if (t && t.closest('[role="dialog"]')) return;
       if (e.key === "/" && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        setMobilePane("chat");
         requestAnimationFrame(() => inputRef.current?.focus());
       }
     };
@@ -357,51 +266,6 @@ export default function Search(): React.ReactElement {
     return () => ctrl.abort();
   }, [runSearch]);
 
-  // 记录滚动条宽度（0 表示 overlay 滚动条/无滚动）。
-  // 同时观察滚动区与内容列：结果从骨架切到卡片、或展开一条证据时，
-  // 内容高度变化才让滚动条出现，仅观察滚动区本身不会触发尺寸回调。
-  useLayoutEffect(() => {
-    if (!searchActive) {
-      setSearchScrollbarW(0);
-      return;
-    }
-    const el = searchScrollRef.current;
-    if (!el) return;
-    const sync = (): void => {
-      const w = Math.max(0, el.offsetWidth - el.clientWidth);
-      setSearchScrollbarW((prev) => (prev === w ? prev : w));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    if (searchContentRef.current) ro.observe(searchContentRef.current);
-    return () => ro.disconnect();
-  }, [searchActive, searchResp, searchBusy, searchError]);
-
-  // 输入台浮在底部，但不与内容重叠：滚动区在它的**上沿**截止，
-  // 条目滑到这里就被裁掉，不会穿过玻璃。高度随多行输入/条件 chip
-  // 变化；观察输入台与工作台两者：输入台变高、或顶栏高度变化导致
-  // 工作台变矮，都要重新计算底边到上沿的距离。
-  useLayoutEffect(() => {
-    if (!searchActive) {
-      setSearchComposerInset(0);
-      return;
-    }
-    const el = composerRef.current;
-    const root = searchRootRef.current;
-    if (!el || !root) return;
-    const sync = (): void => {
-      const inset = Math.max(0, Math.ceil(
-        root.getBoundingClientRect().bottom - el.getBoundingClientRect().top));
-      setSearchComposerInset((prev) => (prev === inset ? prev : inset));
-    };
-    sync();
-    const ro = new ResizeObserver(sync);
-    ro.observe(el);
-    ro.observe(root);
-    return () => ro.disconnect();
-  }, [searchActive]);
-
   // 组件离开时断开正在进行的证据检索与生成流。
   useEffect(() => () => {
     chatStream.current?.stop();
@@ -409,20 +273,19 @@ export default function Search(): React.ReactElement {
     if (chatRaf.current != null) cancelAnimationFrame(chatRaf.current);
   }, []);
 
-  // 对话历史只写本机 sessionStorage：刷新/切换页面后可恢复，但不改 URL、
-  // 不跨浏览器会话；生成中的轮次不落盘，避免恢复到半截状态。
+  // 对话列贴底跟随：流式增量每帧都会更新轮次，只有用户本来就贴着底部
+  // 时才滚到底，向上翻看旧回答时不抢滚动位置。
   useEffect(() => {
-    if (chatTurns.length === 0) {
-      try { sessionStorage.removeItem(CHAT_STATE_KEY); } catch { /* 隐私模式 */ }
-      return;
-    }
-    if (chatTurns.some((t) => t.status === "searching" || t.status === "streaming")) return;
-    const timer = setTimeout(
-      () => saveChatState(chatTurns, chatParams, activeTurnId),
-      250,
-    );
-    return () => clearTimeout(timer);
-  }, [chatTurns, chatParams, activeTurnId]);
+    if (!chatActive) return;
+    const el = chatScrollRef.current;
+    if (el && chatStick.current) el.scrollTop = el.scrollHeight;
+  }, [chatTurns, chatActive]);
+
+  const handleChatScroll = useCallback((): void => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    chatStick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+  }, []);
 
   function newSearch(): void {
     setViewMode("search");
@@ -453,11 +316,16 @@ export default function Search(): React.ReactElement {
     if (next === "chat" && !answerEnabled) return;
     if (chatRunningId) stopChat();
     if (next === "chat") {
-      if (chatTurns.length === 0) {
-        setChatParams({ ...applied });
-        if (!chatDraft && query) setChatDraft(query);
-      }
-      setMobilePane("chat");
+      // 每次进入对话都是**新会话**：上一段对话直接丢弃，既不恢复也不
+      // 续写。会话内仍可连续追问，历史照常随请求带给模型。
+      setChatTurns([]);
+      setActiveTurnId(null);
+      setPanelOpen(false);
+      setPanelChunkId(null);
+      setPanelFallback(null);
+      setChatParams({ ...applied });
+      setChatDraft(query.trim() ? query : "");
+      chatStick.current = true;
     }
     setViewMode(next);
     requestAnimationFrame(() => inputRef.current?.focus());
@@ -650,10 +518,11 @@ export default function Search(): React.ReactElement {
     };
     setChatTurns((prev) => [...prev, turn]);
     setActiveTurnId(id);
-    setChatExpanded(null);
-    setFocusChunk(null);
+    setPanelChunkId(null);
+    setPanelFallback(null);
     setChatDraft("");
-    setMobilePane("chat");
+    // 新的一轮从底部开始看：贴底跟随流式增量。
+    chatStick.current = true;
     runTurn(id, text, history);
   }
 
@@ -677,8 +546,8 @@ export default function Search(): React.ReactElement {
       degradedReason: undefined,
     });
     setActiveTurnId(turnId);
-    setChatExpanded(null);
-    setFocusChunk(null);
+    setPanelChunkId(null);
+    setPanelFallback(null);
     runTurn(turnId, turn.question, history);
   }
 
@@ -707,41 +576,66 @@ export default function Search(): React.ReactElement {
     if (chatRunningId) stopChat();
     setChatTurns([]);
     setActiveTurnId(null);
-    setChatExpanded(null);
     setChatDraft("");
-    setFocusChunk(null);
-    setMobilePane("chat");
-    try { sessionStorage.removeItem(CHAT_STATE_KEY); } catch { /* 隐私模式 */ }
+    setPanelOpen(false);
+    setPanelChunkId(null);
+    setPanelFallback(null);
+    chatStick.current = true;
   }
 
-  function selectTurn(turnId: string): void {
+  /**
+   * 「证据 N」：在右侧同层打开阅读区，并直接读第一条证据。
+   *
+   * 区域本身就是这一轮证据的阅读面，默认落在第一条上，读者不用先点
+   * 一遍列表才能看到内容。
+   */
+  function openEvidence(turnId: string): void {
+    const turn = chatTurns.find((t) => t.id === turnId);
     setActiveTurnId(turnId);
-    if (turnId !== activeTurnId) setChatExpanded(null);
-    setFocusChunk(null);
-    setMobilePane("evidence");
+    setPanelChunkId(turn?.hits[0]?.chunk_id ?? null);
+    setPanelFallback(null);
+    setPanelOpen(true);
   }
 
+  /**
+   * 点引用：在右侧同层打开阅读区，读这个引用指向的分块原文。
+   *
+   * 引用不在本轮证据里（模型引到了检索之外的分块）时，用引用自身兜底
+   * 元信息，至少让读者看到它是什么。
+   */
   function revealCitation(turnId: string, citation: Citation): void {
     const turn = chatTurns.find((t) => t.id === turnId);
-    if (turn && !turn.evidenceLoading && !turn.hits.some((h) => h.chunk_id === citation.chunk_id)) {
+    const inHits = turn?.hits.some((h) => h.chunk_id === citation.chunk_id) ?? false;
+    if (turn && !turn.evidenceLoading && !inHits) {
       toast("该引用不在本轮证据列表中", "err");
     }
     setViewMode("chat");
     setActiveTurnId(turnId);
-    setChatExpanded(citation.chunk_id);
-    setFocusChunk(citation.chunk_id);
-    setMobilePane("evidence");
+    setPanelChunkId(citation.chunk_id);
+    setPanelFallback(inHits ? null : hitFromCitation(citation));
+    setPanelOpen(true);
   }
 
-  const handleFocusHandled = useCallback(() => setFocusChunk(null), []);
+  /** 阅读区里换一条证据。 */
+  function selectPanelChunk(chunkId: string): void {
+    setPanelChunkId(chunkId);
+    setPanelFallback(null);
+  }
+
+  function closePanel(): void {
+    setPanelOpen(false);
+    setPanelChunkId(null);
+    setPanelFallback(null);
+  }
+
   const handleSend = useCallback(() => sendRef.current(), []);
   const handleModeChange = useCallback((next: SearchMode) => modeRef.current(next), []);
   const handleStop = useCallback(() => stopRef.current(), []);
   const handleNewChat = useCallback(() => newChatRef.current(), []);
+  const handleSelectChunk = useCallback(
+    (id: string) => selectPanelChunk(id), []);
   const toggleSearchExpanded = useCallback(
     (id: string) => setSearchExpanded((cur) => (cur === id ? null : id)), []);
-  const toggleChatExpanded = useCallback(
-    (id: string) => setChatExpanded((cur) => (cur === id ? null : id)), []);
 
   // 每次提交后把最新实现交给稳定入口；引用赋值放 effect 里，
   // 避免在渲染阶段写入 ref（并发渲染下可能指向未提交的状态）。
@@ -825,50 +719,12 @@ export default function Search(): React.ReactElement {
   if (searchActive) {
     return (
       <>
-      <Box
-        ref={searchRootRef}
-        sx={{
-          height: FILL_HEIGHT,
-          position: "relative",
-          minHeight: 0,
-          backgroundImage: (t) => `radial-gradient(1000px 360px at 50% -120px, `
-            + `${alpha(t.palette.primary.main, 0.08)}, transparent 70%)`,
-          backgroundRepeat: "no-repeat",
-        }}
-      >
-        {/*
-          滚动区止于输入台上沿，并向下多伸出一个圆角半径：中间部分被
-          输入台的圆角衬底盖住，两个圆角缺口处则继续显示条目——条目是
-          绕开玻璃圆角消失的，而不是被一个矩形连同圆角一起裁掉。
-        */}
-        <Box
-          ref={searchScrollRef}
-          sx={{
-            height: `calc(100% - ${Math.max(0, searchComposerInset - SEARCH_COMPOSER_RADIUS)}px)`,
-            overflowY: "auto",
-            // 键盘/scrollIntoView 定位时，为输入台和圆角缺口留出空间。
-            scrollPaddingBottom: `${SEARCH_COMPOSER_RADIUS + 24}px`,
-          }}
+      <Box sx={{ height: FILL_HEIGHT, display: "flex", minHeight: 0 }}>
+        <FloatColumn
+          scrollRef={searchScrollRef}
+          contentRef={searchContentRef}
+          footer={composer(true)}
         >
-          <Box
-            ref={searchContentRef}
-            sx={{
-              // 与浮动输入台同宽：两侧内边距 + 900 上限。
-              width: {
-                xs: `calc(100% - ${SEARCH_COLUMN_INSET.xs}px)`,
-                md: `calc(100% - ${SEARCH_COLUMN_INSET.md}px)`,
-              },
-              maxWidth: SEARCH_COLUMN_MAX,
-              mx: "auto",
-              pt: { xs: 2, md: 3 },
-              // 滚动区向下多伸出一个圆角半径；这里再加回它，保证滚到
-              // 底时最后一条停在输入台上方，而不是藏在圆角缺口里。
-              pb: {
-                xs: `${SEARCH_COMPOSER_RADIUS + 24}px`,
-                md: `${SEARCH_COMPOSER_RADIUS + 32}px`,
-              },
-            }}
-          >
             <Stack
               direction="row"
               spacing={2}
@@ -978,221 +834,43 @@ export default function Search(): React.ReactElement {
                 />
               </>
             )}
-          </Box>
-        </Box>
-
-        {/*
-          唯一的底部元素：居中的玻璃输入台本身。容器透明、只负责定位，
-          不再铺整条背景；左右空白处 pointer-events: none，滚轮与点击
-          直接落到下面的结果区。
-        */}
-        <Box
-          sx={{
-            position: "absolute",
-            left: 0,
-            right: `${searchScrollbarW}px`,
-            bottom: 0,
-            display: "flex",
-            justifyContent: "center",
-            pl: { xs: "16px", md: "32px" },
-            pr: { xs: "16px", md: "32px" },
-            pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: "12px" },
-            pointerEvents: "none",
-            zIndex: 2,
-          }}
-        >
-          <Box
-            ref={composerRef}
-            sx={{
-              position: "relative",
-              width: "100%",
-              maxWidth: SEARCH_COLUMN_MAX,
-              pointerEvents: "auto",
-              // 玻璃投影默认向上扩散约 40px；只保留左/右/下方的投影，
-              // 顶部裁到 0，避免阴影压住条目。
-              clipPath: "inset(0 -64px -64px -64px)",
-            }}
-          >
-            {/*
-              玻璃下方的同色圆角衬底：让滚动内容在玻璃覆盖区不可见，
-              但在两个圆角缺口外继续可见（衬底的圆角与玻璃一致）。
-            */}
-            <Box
-              aria-hidden
-              sx={{
-                position: "absolute",
-                inset: 0,
-                borderRadius: `${SEARCH_COMPOSER_RADIUS}px`,
-                bgcolor: "background.default",
-                pointerEvents: "none",
-                zIndex: 0,
-              }}
-            />
-            <Box sx={{ position: "relative", zIndex: 1 }}>
-              {composer(true)}
-            </Box>
-          </Box>
-        </Box>
+        </FloatColumn>
       </Box>
       {filtersPanel}
       </>
     );
   }
 
-  // ---- 对话：左侧消息流，右侧本轮证据，输入台在左侧底部 ----
-  const activeHits = activeTurn?.hits ?? [];
+  // ---- 对话：单列工作台，引用/证据在右侧同层展开 ----
   return (
     <>
-    <Box sx={{ height: FILL_HEIGHT, display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <Tabs
-        value={mobilePane}
-        onChange={(_e, value: MobilePane) => setMobilePane(value)}
-        variant="fullWidth"
-        sx={{
-          display: { xs: "flex", lg: "none" },
-          borderBottom: 1,
-          borderColor: "divider",
-          minHeight: 44,
-        }}
+    <Box sx={{ height: FILL_HEIGHT, display: "flex", minHeight: 0 }}>
+      <FloatColumn
+        scrollRef={chatScrollRef}
+        contentRef={chatContentRef}
+        onScroll={handleChatScroll}
+        footer={composer(true)}
       >
-        <Tab value="chat" label="对话" sx={{ minHeight: 44 }} />
-        <Tab
-          value="evidence"
-          label={`证据${activeHits.length > 0 ? ` (${activeHits.length})` : ""}`}
-          sx={{ minHeight: 44 }}
+        <ChatThread
+          turns={chatTurns}
+          activeTurnId={activeTurn?.id ?? null}
+          runningTurnId={chatRunningId}
+          onSelectTurn={openEvidence}
+          onStop={stopChat}
+          onRetry={retryTurn}
+          onCitation={revealCitation}
         />
-      </Tabs>
+      </FloatColumn>
 
-      <Box
-        sx={{
-          flex: 1,
-          minHeight: 0,
-          width: "100%",
-          maxWidth: CONTENT_MAX,
-          mx: "auto",
-          display: "grid",
-          gridTemplateColumns: { xs: "minmax(0,1fr)", lg: "minmax(0,1.08fr) minmax(0,.92fr)" },
-        }}
-      >
-        <Box
-          sx={{
-            minHeight: 0,
-            display: { xs: mobilePane === "chat" ? "flex" : "none", lg: "flex" },
-            flexDirection: "column",
-            borderRight: { lg: 1 },
-            borderColor: "divider",
-          }}
-        >
-          <Box sx={{ flex: 1, minHeight: 0 }}>
-            <ChatThread
-              turns={chatTurns}
-              activeTurnId={activeTurn?.id ?? null}
-              runningTurnId={chatRunningId}
-              onSelectTurn={selectTurn}
-              onStop={stopChat}
-              onRetry={retryTurn}
-              onCitation={revealCitation}
-            />
-          </Box>
-          <Box
-            sx={{
-              flex: "none",
-              px: { xs: 1.5, sm: 2.5 },
-              pt: 1,
-              pb: { xs: "calc(10px + env(safe-area-inset-bottom))", md: 1.5 },
-              backgroundImage: (t) => `linear-gradient(180deg, `
-                + `${alpha(t.palette.background.default, 0)}, `
-                + `${t.palette.background.default} 60%)`,
-            }}
-          >
-            {composer(true)}
-          </Box>
-        </Box>
-
-        <Box
-          sx={{
-            minHeight: 0,
-            overflowY: "auto",
-            display: { xs: mobilePane === "evidence" ? "block" : "none", lg: "block" },
-            bgcolor: (t) => alpha(t.palette.primary.main, 0.02),
-            borderLeft: { lg: 1 },
-            borderColor: "divider",
-          }}
-        >
-          <Box sx={{ px: { xs: 2, md: 2.5 }, py: 2.5 }}>
-            <Typography variant="subtitle2" color="text.secondary">
-              本轮证据
-            </Typography>
-            <Typography variant="h6" sx={{ fontWeight: 600, mt: 0.25, wordBreak: "break-word" }}>
-              {activeTurn?.question ?? ""}
-            </Typography>
-            <Typography variant="caption" color="text.secondary" aria-live="polite">
-              {activeTurn?.evidenceLoading && activeHits.length === 0
-                ? "正在检索…"
-                : `${activeHits.length} 条证据`
-                  + (activeTurn?.searchTookMs != null ? ` · ${activeTurn.searchTookMs}ms` : "")
-                  + (activeTurn?.mode ? ` · ${modeLabel(activeTurn.mode)}` : "")
-                  + (activeTurn?.scoreKind ? ` · ${activeTurn.scoreKind}` : "")}
-            </Typography>
-
-            {activeTurn?.searchError && (
-              <Alert severity="warning" sx={{ mt: 1.5 }}>
-                证据检索失败：{activeTurn.searchError}
-              </Alert>
-            )}
-
-            {activeTurn?.evidenceLoading && activeHits.length === 0 && (
-              <Stack spacing={1.25} sx={{ mt: 2 }}>
-                {[0, 1, 2].map((i) => (
-                  <Skeleton key={i} variant="rounded" height={84} sx={{ borderRadius: 2 }} />
-                ))}
-              </Stack>
-            )}
-
-            {activeTurn && activeHits.length === 0
-              && !activeTurn.evidenceLoading
-              && !activeTurn.searchError && (
-                <Box sx={{ mt: 2, py: 3 }}>
-                  <Typography variant="body2" color="text.secondary">
-                    {activeTurn.status === "stopped"
-                      ? "已停止生成，证据检索也已被取消。"
-                      : "这一轮没有检索到证据，回答可能缺少依据。"}
-                  </Typography>
-                </Box>
-              )}
-
-            {activeHits.length > 0 && (
-              <Box sx={{ mt: 1.5 }}>
-                <EvidenceList
-                  hits={activeHits}
-                  compact
-                  expanded={chatExpanded}
-                  onToggle={toggleChatExpanded}
-                  focusChunk={focusChunk}
-                  onFocusHandled={handleFocusHandled}
-                  ariaLabel="本轮证据"
-                />
-              </Box>
-            )}
-
-            {!activeTurn && (
-              <GlassPanel
-                radius={12} look={look}
-                sx={{
-                  mt: 2,
-                  px: 2.5,
-                  py: 4,
-                  textAlign: "center",
-                }}
-              >
-                <Typography variant="body2" color="text.disabled">
-                  发送消息后，本轮检索到的证据会出现在这里。
-                </Typography>
-              </GlassPanel>
-            )}
-          </Box>
-        </Box>
-      </Box>
+      {panelOpen && (
+        <SourcePanel
+          turn={activeTurn}
+          chunkId={panelChunkId}
+          fallbackHit={panelFallback}
+          onSelectChunk={handleSelectChunk}
+          onClose={closePanel}
+        />
+      )}
     </Box>
     {filtersPanel}
     </>

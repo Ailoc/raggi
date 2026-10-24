@@ -15,7 +15,6 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { alpha } from "@mui/material/styles";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import LayersIcon from "@mui/icons-material/Layers";
 import LightModeIcon from "@mui/icons-material/LightMode";
 
 import { CONTENT_MAX } from "./lib/layout";
@@ -41,6 +40,7 @@ import { ToastHost } from "./ui/toast";
 import CommandPalette from "./ui/CommandPalette";
 import WorkspaceTabs from "./ui/WorkspaceTabs";
 import { GlassBackdrop, GlassPanel, useGlassLook } from "./ui/glass";
+import { Wordmark } from "./ui/Wordmark";
 
 /**
  * 壳层：AppBar（品牌 + 分段导航 + 命令面板入口 + 队列 + 主题）+ 面包屑条 +
@@ -232,35 +232,26 @@ export default function App(): ReactElement {
                 component="a"
                 href="#/"
                 sx={{
-                  display: "flex", alignItems: "center", gap: 1.25,
+                  display: "flex", alignItems: "center",
                   color: "inherit", textDecoration: "none", flex: "none",
                   borderRadius: 999, pr: 0.5,
-                  // 320px 级窄屏：品牌图标也要让位，否则五个分区只能
+                  // 320px 级窄屏：品牌也要让位，否则五个分区只能
                   // 靠横向滑动才能点到 API。
                   "@media (max-width: 359px)": { display: "none" },
                 }}
               >
-                <Box
-                  sx={(t) => ({
-                    width: 30, height: 30, borderRadius: "50%",
-                    display: "grid", placeItems: "center",
-                    bgcolor: alpha(t.palette.primary.main, t.palette.mode === "dark" ? 0.2 : 0.12),
-                    boxShadow: `inset 0 0 0 1px ${alpha(t.palette.primary.main, 0.18)}`,
-                  })}
-                >
-                  <LayersIcon color="primary" sx={{ fontSize: 18 }} />
-                </Box>
-                {/* 小屏只留图标：五个分区在 360px 下要全部可见，品牌文字
-                    和每个 Tab 的内边距都得让位。 */}
-                <Typography
-                  variant="subtitle1"
+                {/*
+                  品牌字标：内联 SVG，跟主题走同一条造型线（见 ui/Wordmark.tsx）。
+                */}
+                <Wordmark
                   sx={{
-                    fontWeight: 600, letterSpacing: ".01em",
-                    display: { xs: "none", sm: "block" },
+                    // 字标比原来的圆形图标宽：小屏必须同时收字标高度
+                    // 和 Tab 内边距，否则五个分区放不下，API 会被挤掉。
+                    height: { xs: 17, sm: 26 },
+                    width: "auto",
+                    display: "block",
                   }}
-                >
-                  Raggi
-                </Typography>
+                />
               </Box>
 
               <Tabs
@@ -284,7 +275,7 @@ export default function App(): ReactElement {
                   "& .MuiTab-root": {
                     minHeight: 36,
                     minWidth: { xs: 0, sm: 72 },
-                    px: { xs: 0.9, sm: 2 },
+                    px: { xs: 0.7, sm: 2 },
                     mx: 0.25,
                     fontSize: { xs: 12.5, sm: 14 },
                     borderRadius: 999,

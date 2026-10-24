@@ -126,7 +126,7 @@ test("检索：空态居中输入，发送后结果在上、条件草稿本地�
   await expect(box).toHaveValue("");
 });
 
-test("对话：两栏布局、多轮历史、引用跳回证据", async ({ page }) => {
+test("对话：单列工作台、每次进入是新会话、引用在右侧同层展开原文", async ({ page }) => {
   const firstQuestion = "苹果是什么？";
   const search = (await (
     await page.request.post("/api/search", {
@@ -147,6 +147,12 @@ test("对话：两栏布局、多轮历史、引用跳回证据", async ({ page 
   };
   const hit = search.results[0];
   expect(hit, "检索没有结果，无法验证引用跳转").toBeTruthy();
+
+  // 右侧阅读区展示的是这个分块在原始文件里的正文，不是检索片段。
+  const chunk = (await (
+    await page.request.get(`/api/chunks/${encodeURIComponent(hit!.chunk_id)}`)
+  ).json()) as { text: string };
+  expect(chunk.text.length).toBeGreaterThan(0);
 
   await page.route("**/api/models", (route) =>
     route.fulfill({
@@ -205,16 +211,56 @@ test("对话：两栏布局、多轮历史、引用跳回证据", async ({ page 
   await box.fill("苹果");
   await box.press("Enter");
   await page.getByText(/条 · 候选/).first().waitFor();
-  await page.getByRole("button", { name: "对话" }).click();
+
+  // 切到对话：回到空态（只有居中输入台），不直接落进左右分栏。
+  await page.getByRole("button", { name: "对话模式" }).click();
+  await expect(page.locator('[aria-label="对话记录"]')).toHaveCount(0);
+  await expect(page.locator("aside[aria-label='证据阅读区']")).toHaveCount(0);
+
   await box.fill(firstQuestion);
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.getByText(/根据证据，苹果出现在水果列表中/)).toBeVisible();
-  await expect(page.getByText("本轮证据")).toBeVisible();
 
+  // 发送后的对话列与检索页同款：与输入台同宽同左边界。
+  const thread = page.locator('[aria-label="对话记录"]');
+  const composer = page.locator(".lg-composer");
+  const threadBox = await thread.boundingBox();
+  const composerBox = await composer.boundingBox();
+  if (!threadBox || !composerBox) throw new Error("对话列或输入台未渲染");
+  expect(Math.abs(threadBox.width - composerBox.width)).toBeLessThan(1.5);
+  expect(Math.abs(threadBox.x - composerBox.x)).toBeLessThan(1.5);
+
+  // 右侧阅读区默认不出现；点引用后它在**同一页面层级**展开：
+  // 对话列整体左移，而不是被一个浮层盖住。
+  const panel = page.locator("aside[aria-label='证据阅读区']");
+  await expect(panel).toHaveCount(0);
   await page.getByRole("button", { name: /\[1\]/ }).first().click();
-  await expect(page.getByText("命中片段")).toBeVisible();
-  await expect(page.locator('[role="button"][aria-expanded="true"]')).toHaveCount(1);
+  await expect(panel).toBeVisible();
 
+  // 区域里是那个分块的**原文**，不是检索片段。
+  const reader = panel.getByLabel("分块原文");
+  await expect(reader).toBeVisible();
+  await expect(reader).toContainText(chunk.text.slice(0, 24));
+
+  const shifted = await thread.boundingBox();
+  const panelBox = await panel.boundingBox();
+  if (!shifted || !panelBox) throw new Error("证据阅读区未渲染");
+  expect(shifted.x).toBeLessThan(threadBox.x);
+  expect(panelBox.x).toBeGreaterThanOrEqual(shifted.x + shifted.width - 2);
+
+  // 编号带可以在本轮证据之间快速切换。
+  await expect(page.getByRole("button", { name: "阅读证据 1" })).toBeVisible();
+
+  // 「证据 N」同样打开右侧阅读区。
+  await page.getByRole("button", { name: "关闭证据面板" }).click();
+  await expect(panel).toHaveCount(0);
+  await page.getByRole("button", { name: /证据 \d+/ }).first().click();
+  await expect(panel).toBeVisible();
+  // exact：按钮的悬浮提示文字里也含「本轮证据」四个字，不加精确匹配
+  // 会同时命中提示气泡与区域标题。
+  await expect(page.getByText("本轮证据", { exact: true })).toBeVisible();
+
+  // 会话内可以连续追问，历史照常随请求带给模型。
   await box.fill("它还有哪些水果？");
   await page.getByRole("button", { name: "发送" }).click();
   await expect(page.getByText(/它还有苹果、香蕉和葡萄/)).toBeVisible();
@@ -224,13 +270,11 @@ test("对话：两栏布局、多轮历史、引用跳回证据", async ({ page 
     { role: "assistant", content: "根据证据，苹果出现在水果列表中。[1]" },
   ]);
 
-  // 刷新后历史仍可恢复（sessionStorage），页面默认回到空态检索模式。
-  await page.waitForTimeout(400);
-  await page.reload();
-  await expect(box).toBeVisible();
-  await expect(page.getByText("检索结果")).toHaveCount(0);
-  await page.getByRole("button", { name: "对话" }).click();
-  await expect(page.getByText(/它还有苹果、香蕉和葡萄/)).toBeVisible();
+  // 切回检索再切回对话：每次进入都是新会话，上一段对话被丢弃。
+  await page.getByRole("button", { name: "检索模式" }).click();
+  await page.getByRole("button", { name: "对话模式" }).click();
+  await expect(page.getByText(/它还有苹果、香蕉和葡萄/)).toHaveCount(0);
+  await expect(page.locator('[aria-label="对话记录"]')).toHaveCount(0);
 });
 
 test("API 文档：过滤进 URL，选中端点进 URL", async ({ page }) => {
@@ -268,6 +312,102 @@ test("深链 ?chunk= 自动展开原文并定位到该文档", async ({ page }) 
   );
   await expect(page.getByRole("heading", { name: DOC })).toBeVisible();
   await expect(page.locator('[aria-label="原文"]')).toBeVisible();
+});
+
+test("模型设置：卡内设置项两列、卡片竖排、脏状态可见可放弃、维度变更二次确认", async ({ page }) => {
+  await page.goto("/#/settings/models");
+  await expect(page.getByRole("combobox", { name: "提供方" }).first()).toBeVisible();
+
+  // 卡片竖着摞、同宽；卡内设置项排两列——同一行两项 y 相同、x 分开
+  const layout = await page.evaluate(() => {
+    const panelOf = (title: string) =>
+      [...document.querySelectorAll(".MuiTypography-h6")]
+        .find((t) => t.textContent?.trim() === title)
+        ?.closest(".lg-glass-panel") as HTMLElement | null;
+    const box = (title: string) => {
+      const r = panelOf(title)!.getBoundingClientRect();
+      return { title, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) };
+    };
+    const rows = (title: string) => {
+      const p = panelOf(title)!;
+      return [...p.querySelectorAll("label[for]")].map((l) => {
+        const t = document.getElementById(l.getAttribute("for")!) as HTMLElement;
+        const r = t.getBoundingClientRect();
+        return {
+          label: l.textContent?.trim(),
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          checkbox: (t as HTMLInputElement).type === "checkbox",
+        };
+      });
+    };
+    return {
+      boxes: ["Embedding", "LLM", "Rerank"].map(box),
+      embed: rows("Embedding"),
+      llm: rows("LLM"),
+      rerank: rows("Rerank"),
+    };
+  });
+
+  expect(layout.boxes.map((b) => b.title)).toEqual(["Embedding", "LLM", "Rerank"]);
+  expect(new Set(layout.boxes.map((b) => b.x)).size).toBe(1);
+  expect(new Set(layout.boxes.map((b) => b.w)).size).toBe(1);
+  expect(layout.boxes[1]!.y).toBeGreaterThan(layout.boxes[0]!.y);
+  expect(layout.boxes[2]!.y).toBeGreaterThan(layout.boxes[1]!.y);
+
+  // 卡内两列：非复选框字段恰好两个左边缘，逐行成对往下
+  for (const rows of [layout.embed, layout.llm, layout.rerank]) {
+    const fields = rows.filter((r) => !r.checkbox);
+    const xs = [...new Set(fields.map((f) => f.x))].sort((a, b) => a - b);
+    expect(xs.length).toBe(2);
+    expect(xs[1]! - xs[0]!).toBeGreaterThan(200);
+    expect(fields[0]!.y).toBe(fields[1]!.y);
+    expect(fields[0]!.x).toBe(xs[0]);
+    expect(fields[1]!.x).toBe(xs[1]);
+    for (let i = 2; i < fields.length; i++) {
+      expect(fields[i]!.y).toBeGreaterThan(fields[i - 2]!.y);
+    }
+  }
+
+  // 改一个字段 → 脏状态可见 → 放弃后回到原值
+  const model = page.getByRole("textbox", { name: "模型", exact: true }).first();
+  const origModel = await model.inputValue();
+  await model.fill("changed-model");
+  await expect(page.getByText("有未保存的改动")).toBeVisible();
+  await page.getByRole("button", { name: "放弃改动" }).click();
+  await expect(page.getByText("有未保存的改动")).toHaveCount(0);
+  await expect(model).toHaveValue(origModel);
+
+  // 改向量维度 → 保存时必须二次确认；取消则维度回退
+  const dim = page.getByRole("spinbutton", { name: "向量维度" });
+  const origDim = await dim.inputValue();
+  await dim.fill("8");
+  await page.getByRole("button", { name: "保存并热切换" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByText(/变更向量维度/)).toBeVisible();
+  await page.getByRole("button", { name: "取消" }).click();
+  await expect(dim).toHaveValue(origDim);
+});
+
+test("窄屏：模型设置不横向溢出，设置项收成一列", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 780 });
+  await page.goto("/#/settings/models");
+  await expect(page.getByRole("combobox", { name: "提供方" }).first()).toBeVisible();
+  const overflow = await page.evaluate(() => {
+    const main = document.querySelector("main");
+    return {
+      doc: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      main: main ? main.scrollWidth > main.clientWidth : false,
+    };
+  });
+  expect(overflow).toEqual({ doc: false, main: false });
+
+  // 两列在窄屏必须收成一列：所有字段共用同一个左边缘
+  const xs = await page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>('[id^="models-"]')]
+      .filter((el) => (el as HTMLInputElement).type !== "checkbox")
+      .map((el) => Math.round(el.getBoundingClientRect().x)));
+  expect(new Set(xs).size).toBe(1);
 });
 
 test("主题切换跨刷新保留", async ({ page }) => {
