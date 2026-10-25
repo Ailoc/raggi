@@ -57,6 +57,8 @@ services:
       # 不和入库抢 provider。按 provider 的真实配额调整。
       RAG_EMBED__QUERY_CONCURRENCY: "32"
       RAG_EMBED__QUERY_WAIT_MS: "50"
+      # 在飞请求上限（每副本）：按总目标并发 ÷ 副本数分配；0=关闭
+      RAG_API_MAX_INFLIGHT: "1000"
       RAG_REDIS__NAMESPACE: raggi
       RAG_CACHE__MAX_ITEMS: "2048"
       RAG_CACHE__TTL_SECONDS: "600"

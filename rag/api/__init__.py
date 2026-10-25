@@ -72,6 +72,12 @@ TAGS_METADATA = [
 # 会改变数据状态的方法。判定「该不该作废健康快照」用（与 ratelimit.is_limited_method
 # 用的是同一组语义，但不 import 它——那个函数还包含限流豁免的判断，语义并不等价）。
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# 观测端点不受准入控制限制（见 _http_guards）：
+# - 健康探针被限流挡住，编排会把整个实例判死；
+# - /stats 要能报告"当前在飞多少"，它自己算进计数就没法读。
+_ADMISSION_BYPASS = frozenset({
+    "/api/health", "/api/v1/health", "/api/stats", "/api/v1/stats",
+})
 # 读语义的 POST：只是查询/生成/向量化，不改任何数据。
 #
 # 不排除它们的话，一次检索就要写一次 SQLite `write_epoch`、并清空
@@ -375,6 +381,9 @@ def create_app(ctx: Ctx) -> FastAPI:
     # 挂出来是为了让测试与运维能触达它、重置它。
     app.state.idem = ctx.idem
     app.state.limiter = _build_limiter(ctx)
+    from rag.core.admission import InflightGate
+
+    app.state.inflight = InflightGate(ctx.settings.api_max_inflight)
     _check_web_build()
 
     @app.middleware("http")
@@ -516,9 +525,9 @@ def _wire_exception_handlers(app: FastAPI) -> None:
 
 
 async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
-    """请求 ID + 鉴权 + 限流 + 响应头。拆出来说明它为什么值得单独一层：
+    """请求 ID + 准入 + 鉴权 + 限流 + 响应头。拆出来说明它为什么值得单独一层：
 
-    这 70 行里同时管着**四件事**，而且每一件都是「漏了就静默出问题」的类型
+    这七十来行里同时管着**五件事**，而且每一件都是「漏了就静默出问题」的类型
     （鉴权漏一次是越权、快照失效漏一个端点是界面显示旧账本、
     请求 ID 漏在错误路径上就没法对日志）。放在 `create_app` 内部时，
     装配函数长到 180 行，改任何一件都要先在噪声里定位。
@@ -529,104 +538,121 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
     request.state.request_id = rid
     started = time.perf_counter()
 
-    # 先于鉴权拒掉超大请求：Content-Length 是客户端自报的，用它避免
-    # 把 GB 级 JSON 读进内存；没有 Content-Length 的 chunked 请求仍会在
-    # 读取时受限（uvicorn 不提供通用上限）。
-    # 文件上传的 multipart 按 max_upload_mb 放行，其余按 20MB 正文上限。
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            declared = int(content_length)
-        except ValueError:
-            declared = -1
-        if declared < 0:
+    # 准入控制：在飞请求超过上限直接 503（保护进程本身）。
+    # 健康探针永远放行——探针被自己的限流挡住，编排会把整个实例判死。
+    gate = getattr(app.state, "inflight", None)
+    admitted = False
+    if (gate is not None and gate.enabled
+            and request.url.path.startswith("/api")
+            and request.url.path not in _ADMISSION_BYPASS):
+        if not gate.enter():
             return _finalize_response(JSONResponse(
-                {"detail": "Content-Length 不合法", "request_id": rid},
-                status_code=400), rid, started)
-        upload_limit = ctx.settings.max_upload_mb * 1024 * 1024
-        limit = max(_JSON_BODY_MAX_BYTES, upload_limit) + _BODY_OVERHEAD_BYTES
-        if declared > limit:
-            return _finalize_response(JSONResponse(
-                {"detail": f"请求体超过上限（{limit // (1024 * 1024)}MB）",
+                {"detail": "服务繁忙（在飞请求已达上限），请稍后重试",
                  "request_id": rid},
-                status_code=413), rid, started)
-    # 鉴权：API 密钥（可吊销/过期/分作用域）优先，兼容旧版静态 token。
-    # 未配置 token 且无任何密钥时不拦截（单机自用零摩擦）。
-    # 静态前端与 CORS 预检放行。
-    key_row = None
+                status_code=503, headers={"Retry-After": "1"}), rid, started)
+        admitted = True
     try:
-        # 鉴权要查 LanceDB（has_keys/verify/touch），是同步 IO。
-        # 放事件循环里会阻塞整个服务：每请求一次 count_rows，
-        # 配了密钥后还额外一次写（touch）。必须挪到线程池。
-        key_row = await asyncio.to_thread(authenticate, ctx, request)
-    except AuthError as e:
-        # 必须在中间件里显式构造响应：此时 ExceptionMiddleware 尚未
-        # 生效，直接抛 HTTPException 会退化成裸 500，调用方看不出原因。
-        return _finalize_response(e.to_response(), rid, started)
-
-    # 限流放在鉴权之后：未通过鉴权的请求不该消耗别人的配额，
-    # 也不该向调用方泄露「这个 key 还有多少额度」。
-    path = request.url.path
-    if (app.state.limiter.enabled
-            and ratelimit.is_limited_method(request)
-            and path.startswith("/api")
-            and not ratelimit.is_idempotent(path)):
-        # 共享实现要跑 SQLite 事务（BEGIN IMMEDIATE），不能占用事件循环
-        ok, retry = await asyncio.to_thread(
-            app.state.limiter.allow,
-            ratelimit.caller_key(request, key_row))
-        if not ok:
-            resp = JSONResponse(
-                {"detail": f"写入过于频繁，请 {retry} 秒后重试",
-                 "retry_after": retry, "request_id": rid},
-                status_code=429,
-                headers={"Retry-After": str(retry)})
-            return _finalize_response(resp, rid, started)
-
-    response = await call_next(request)
-    # 快照类端点（/health、/stats）带 3s 缓存，如实告诉调用方
-    # 这份数据是多少毫秒前的——否则刚入库完刷新界面看到的是旧数，
-    # 而它读起来像实时状态。
-    age = getattr(request.state, "snapshot_age_ms", None)
-    if age is not None:
-        response.headers["X-Snapshot-Age-Ms"] = str(age)
-    # 写成功 → 作废健康/容量快照（见 api/system.invalidate_snapshots）。
-    # 放在中间件里而不是每个端点里：漏一个端点就会让用户看到过期账本，
-    # 而这种「改完了但界面还是旧的」正是最难自查的一类问题。
-    if (request.method in _WRITE_METHODS
-            and not _is_read_only_post(path)
-            and path.startswith("/api") and response.status_code < 300):
-        from rag.api.system import invalidate_snapshots
-
-        invalidate_snapshots()
-        # 跨进程：其它 worker 的 /health、/stats 缓存键会因代际变化而失效。
-        # 这是观测层，递增失败不该影响已经成功的业务写入；记录 warning。
-        if ctx.meta is not None:
+        # 先于鉴权拒掉超大请求：Content-Length 是客户端自报的，用它避免
+        # 把 GB 级 JSON 读进内存；没有 Content-Length 的 chunked 请求仍会在
+        # 读取时受限（uvicorn 不提供通用上限）。
+        # 文件上传的 multipart 按 max_upload_mb 放行，其余按 20MB 正文上限。
+        content_length = request.headers.get("content-length")
+        if content_length:
             try:
-                ctx.meta.bump_state("write_epoch")
-            except Exception as e:  # noqa: BLE001
-                logger.warning("递增写代际失败（跨进程快照可能短暂过期）: %s", e)
-    if request.url.path.startswith("/api"):
-        # API 响应可能含密钥列表、文档正文等敏感/实时数据：
-        # 既不允许浏览器落盘，也不允许中间代理缓存。
-        # 端点自己设置更具体的 Cache-Control（如原文签名链接）时保留它。
-        response.headers.setdefault("Cache-Control", "no-store")
-    else:
-        # Vite 的产物文件名自带内容哈希（assets/xxx-<hash>.js），
-        # 所以 /assets/ 下的资源可以永久强缓存：改了前端会生成新文件名，
-        # index.html 里的引用也随之变化 —— 不存在「改了但页面没变」。
-        #
-        # 改前对**所有**非 /api 路径一律 no-cache，于是 SPA 每次进入
-        # 都要重新验证整套 JS/CSS：在并发下这些请求和 API 抢同一批
-        # 线程池额度（StaticFiles 的读文件也走 to_thread）。
-        if request.url.path.startswith("/assets/"):
-            response.headers["Cache-Control"] = (
-                "public, max-age=31536000, immutable")
-        else:
-            # index.html 与 favicon 等仍不缓存：它们是「指向哪份产物」的入口
-            response.headers["Cache-Control"] = "no-cache"
-    return _finalize_response(response, rid, started)
+                declared = int(content_length)
+            except ValueError:
+                declared = -1
+            if declared < 0:
+                return _finalize_response(JSONResponse(
+                    {"detail": "Content-Length 不合法", "request_id": rid},
+                    status_code=400), rid, started)
+            upload_limit = ctx.settings.max_upload_mb * 1024 * 1024
+            limit = max(_JSON_BODY_MAX_BYTES, upload_limit) + _BODY_OVERHEAD_BYTES
+            if declared > limit:
+                return _finalize_response(JSONResponse(
+                    {"detail": f"请求体超过上限（{limit // (1024 * 1024)}MB）",
+                     "request_id": rid},
+                    status_code=413), rid, started)
+        # 鉴权：API 密钥（可吊销/过期/分作用域）优先，兼容旧版静态 token。
+        # 未配置 token 且无任何密钥时不拦截（单机自用零摩擦）。
+        # 静态前端与 CORS 预检放行。
+        key_row = None
+        try:
+            # 鉴权要查 LanceDB（has_keys/verify/touch），是同步 IO。
+            # 放事件循环里会阻塞整个服务：每请求一次 count_rows，
+            # 配了密钥后还额外一次写（touch）。必须挪到线程池。
+            key_row = await asyncio.to_thread(authenticate, ctx, request)
+        except AuthError as e:
+            # 必须在中间件里显式构造响应：此时 ExceptionMiddleware 尚未
+            # 生效，直接抛 HTTPException 会退化成裸 500，调用方看不出原因。
+            return _finalize_response(e.to_response(), rid, started)
 
+        # 限流放在鉴权之后：未通过鉴权的请求不该消耗别人的配额，
+        # 也不该向调用方泄露「这个 key 还有多少额度」。
+        path = request.url.path
+        if (app.state.limiter.enabled
+                and ratelimit.is_limited_method(request)
+                and path.startswith("/api")
+                and not ratelimit.is_idempotent(path)):
+            # 共享实现要跑 SQLite 事务（BEGIN IMMEDIATE），不能占用事件循环
+            ok, retry = await asyncio.to_thread(
+                app.state.limiter.allow,
+                ratelimit.caller_key(request, key_row))
+            if not ok:
+                resp = JSONResponse(
+                    {"detail": f"写入过于频繁，请 {retry} 秒后重试",
+                     "retry_after": retry, "request_id": rid},
+                    status_code=429,
+                    headers={"Retry-After": str(retry)})
+                return _finalize_response(resp, rid, started)
+
+        response = await call_next(request)
+        # 快照类端点（/health、/stats）带 3s 缓存，如实告诉调用方
+        # 这份数据是多少毫秒前的——否则刚入库完刷新界面看到的是旧数，
+        # 而它读起来像实时状态。
+        age = getattr(request.state, "snapshot_age_ms", None)
+        if age is not None:
+            response.headers["X-Snapshot-Age-Ms"] = str(age)
+        # 写成功 → 作废健康/容量快照（见 api/system.invalidate_snapshots）。
+        # 放在中间件里而不是每个端点里：漏一个端点就会让用户看到过期账本，
+        # 而这种「改完了但界面还是旧的」正是最难自查的一类问题。
+        if (request.method in _WRITE_METHODS
+                and not _is_read_only_post(path)
+                and path.startswith("/api") and response.status_code < 300):
+            from rag.api.system import invalidate_snapshots
+
+            invalidate_snapshots()
+            # 跨进程：其它 worker 的 /health、/stats 缓存键会因代际变化而失效。
+            # 这是观测层，递增失败不该影响已经成功的业务写入；记录 warning。
+            if ctx.meta is not None:
+                try:
+                    ctx.meta.bump_state("write_epoch")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("递增写代际失败（跨进程快照可能短暂过期）: %s", e)
+        if request.url.path.startswith("/api"):
+            # API 响应可能含密钥列表、文档正文等敏感/实时数据：
+            # 既不允许浏览器落盘，也不允许中间代理缓存。
+            # 端点自己设置更具体的 Cache-Control（如原文签名链接）时保留它。
+            response.headers.setdefault("Cache-Control", "no-store")
+        else:
+            # Vite 的产物文件名自带内容哈希（assets/xxx-<hash>.js），
+            # 所以 /assets/ 下的资源可以永久强缓存：改了前端会生成新文件名，
+            # index.html 里的引用也随之变化 —— 不存在「改了但页面没变」。
+            #
+            # 改前对**所有**非 /api 路径一律 no-cache，于是 SPA 每次进入
+            # 都要重新验证整套 JS/CSS：在并发下这些请求和 API 抢同一批
+            # 线程池额度（StaticFiles 的读文件也走 to_thread）。
+            if request.url.path.startswith("/assets/"):
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable")
+            else:
+                # index.html 与 favicon 等仍不缓存：它们是「指向哪份产物」的入口
+                response.headers["Cache-Control"] = "no-cache"
+        return _finalize_response(response, rid, started)
+
+    finally:
+        if admitted:
+            gate.leave()
 
 def _elapsed_ms(started: float) -> str:
     return f"{(time.perf_counter() - started) * 1000:.1f}"

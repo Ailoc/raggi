@@ -131,9 +131,19 @@ CDN / 静态
 - [x] compose 里给多副本形态显式配置 `RAG_EMBED__QUERY_CONCURRENCY=32`
 - [x] 测试：闸门拒绝 / 单飞豁免 / 503 映射 / 计时对账（`tests/test_query_gate.py`）
 
-#### 4b 仍待做
+#### 4b 准入控制（已完成）
 
-- 准入控制：按队列深度与 p95 返回 429/503，不无限排队；
+- [x] `api_max_inflight`（每进程，默认 0=关闭）：在飞请求超过上限直接
+  `503 + Retry-After: 1`，把「无限排队后一起超时」换成快速失败
+- [x] `/api/health`、`/api/stats` 不受准入控制（探针被限流会判死实例；
+  stats 自己算进计数就读不出真实值）
+- [x] `/api/stats` 暴露 `inflight` / `max_inflight` / `peak_inflight`（实时，不走快照）
+- [x] 测试：计数/拒绝/健康放行/SSE 长连接占槽/默认关闭（`tests/test_admission.py`）
+- [x] compose 给多副本形态配置每副本 1000
+
+#### 4c 仍待做
+
+- 自动扩缩：按在飞请求 / CPU / p95 扩 API 副本；
 - 自动扩缩：按 CPU / 在飞请求 / p95 扩 API 副本；
 - LLM/embedding 连接池与超时预算；SSE 网关长连接参数；
 - 压测：k6/wrk 场景（1 → 10 → 50 → 100 → 300 → 1k 并发），记录 p50/p95/错误率；

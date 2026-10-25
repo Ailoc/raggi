@@ -118,6 +118,10 @@ async def api_stats(request: Request, fresh: bool = False) -> StatsOut:
     snap, age_ms, _loaded = await asyncio.to_thread(
         _stats_cache.get_or_load, key, ctx.store.stats)
     request.state.snapshot_age_ms = round(age_ms, 1)
+    # 在飞请求是**实时**指标，不走 3s 快照：运维看它判断当前该不该扩容。
+    gate = getattr(request.app.state, "inflight", None)
+    if gate is not None:
+        snap = {**snap, **gate.snapshot()}
     return snap
 
 

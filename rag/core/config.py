@@ -259,6 +259,10 @@ class Settings(BaseSettings):
     api_processes: str = "auto"
     # 任务记录保留天数
     job_retention_days: int = 7
+    # 在飞请求上限（每进程）。0 = 关闭（单机默认）。
+    # 超限直接 503 + Retry-After，让客户端错峰重试；保护进程本身，
+    # 与 embedding 闸门（保护 provider）是两层不同的背压。
+    api_max_inflight: int = 0
     # 限流：每分钟允许的写操作次数。0 = 关闭（单机自用的默认）。
     # 只挡**写**操作：检索是读多写少且代价低，挡它只会影响正常使用；
     # 而入库/编辑/删除才是真正吃资源、可能被滥用打爆队列的路径。
