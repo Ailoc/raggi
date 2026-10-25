@@ -11,61 +11,84 @@ def get_ctx(request):
     return request.app.state.ctx
 
 
-def _bind(ctx, fn):
-    """把 pipeline 入口绑定到 (store, registry, queue)，返回只吃数据参数的调用对象。
+def enqueue(ctx, job, *, wait: bool = True, timeout: float = 600.0) -> dict:
+    """把一个**可序列化的入库任务**交给队列。
 
-    集中在这里做，是为了让 `enqueue` 的契约保持简单：
-    它只调度，不关心被调对象的签名长什么样。
+    `job` 是 `rag.ingest.jobspec.IngestJob`：本地队列进程内执行，
+    Redis Stream 队列交给独立的 worker 进程。API 层只依赖
+    `queue.submit_job(job)` 这一个入口。
 
-    绑定 queue 是取消能力的前提：阶段边界的取消检查要问队列
-    「这个任务被请求取消了吗」，而队列实例只有 ctx 上有。
+    wait=True（默认）等到任务终态再返回：
+    - 本地队列有 Future，直接取结果（异常原样重抛）；
+    - 外部队列没有 Future，轮询任务行；结果里的 chunk_count / engine
+      从文档行回读（**"duplicate" 这类细分状态由本地队列保留**，
+      远程队列只能给出 ready/failed/cancelled 三态）。
+
+    队列满（`QueueFull`）在这里拦下来翻译成 503，状态码与 Retry-After
+    取自异常本身：端点外围普遍有 `except Exception → 500` 的兜底。
     """
-    from functools import partial
 
-    return partial(fn, ctx.store, ctx.registry, queue=ctx.queue)
+    from fastapi import HTTPException
 
-
-def enqueue(ctx, fn, *args, wait: bool = True,
-            doc_id: str = "", **kwargs) -> dict:
-    """把入库任务交给队列。
-
-    `fn` 必须是**已绑定好基础设施**的可调用对象（store / registry / ctx），
-    队列只负责把它连同数据参数一起调度。这样队列不必知道
-    「pipeline 函数的前两个参数是 store 和 registry」这种约定——
-    早前在这里自动 partial 绑定，结果把 `_ingest_upload(ctx, ...)`
-    也当成 pipeline 签名去绑，直接参数错位报 500。
-
-    wait=True（默认）阻塞等结果，响应与队列引入前完全一致；
-    wait=false 立即返回 {job_id, status: "queued"}，客户端轮询
-    /api/jobs/{job_id} 获取进度——上传大文件时界面不必卡住。
-
-    队列满（`QueueFull`）在这里拦下来翻译成 503，**但状态码与
-    `Retry-After` 取自异常本身**（`rag.core.errors.QueueFull`）：端点外围
-    普遍有 `except Exception → 500` 的兜底，领域异常不在这里拦就会被
-    兜成 500；而在这里硬写 503 又会让同一个契约有两处定义。
-
-    kwargs 里若带 kb_id，它要同时到两处：submit 的任务行（供任务页回链
-    知识库）与 pipeline（决定文档归属）。submit 从 kwargs 里取它，
-    因此这里**原样透传**即可，不需要拆成两份——拆开反而会因同名
-    撞出 "multiple values"。
-    """
     from rag.core.errors import QueueFull
+    from rag.ingest.jobspec import IngestJob  # noqa: F401  仅用于类型可读性
     from rag.ingest.queue import JobCancelled
 
     try:
-        job_id, fut = ctx.queue.submit(fn, *args, doc_id=doc_id, **kwargs)
+        job_id, fut = ctx.queue.submit_job(job)
     except QueueFull as e:
         raise HTTPException(e.status_code, str(e), headers=dict(e.headers))
     if not wait:
-        return {"job_id": job_id, "status": "queued", "doc_id": doc_id}
+        return {"job_id": job_id, "status": "queued", "doc_id": job.doc_id}
     try:
-        result = fut.result()      # 任务体的异常在这里原样重抛
+        result = fut.result() if fut is not None else _wait_remote(
+            ctx, job_id, timeout)
     except JobCancelled:
         # 等待中被取消：这是**用户的动作**，不是服务端故障，
         # 不该变成 500。409 让调用方能明确区分「被取消」与「出错了」。
         raise HTTPException(409, "任务已取消")
     result.setdefault("job_id", job_id)
     return result
+
+
+def _wait_remote(ctx, job_id: str, timeout: float) -> dict:
+    """外部队列：轮询任务行直到终态（本地队列走 Future，不用这里）。"""
+    import time
+
+    from fastapi import HTTPException
+
+    from rag.ingest.queue import JobCancelled
+    from rag.storage.repos import documents as docs_repo
+    from rag.storage.repos import jobs as jobs_repo
+
+    terminal = {"done", "failed", "cancelled"}
+    deadline = time.monotonic() + max(1.0, timeout)
+    delay = 0.05
+    last = None
+    while time.monotonic() < deadline:
+        row = jobs_repo.get_job(ctx.store, job_id)
+        last = row
+        stage = str((row or {}).get("stage") or "")
+        if stage in terminal:
+            if stage == "cancelled":
+                raise JobCancelled()
+            if stage == "failed":
+                raise RuntimeError(str((row or {}).get("error") or "任务失败"))
+            doc_id = str((row or {}).get("doc_id") or "")
+            doc = (docs_repo.get_document(ctx.store, doc_id, include_text=False)
+                   if doc_id else None)
+            return {
+                "doc_id": doc_id,
+                "job_id": job_id,
+                "status": "ready",
+                "chunk_count": int((doc or {}).get("chunk_count") or 0),
+                "engine": str((doc or {}).get("parser_engine") or ""),
+            }
+        time.sleep(delay)
+        delay = min(1.0, delay * 1.5)
+    raise HTTPException(
+        504, f"等待任务超时（{timeout:.0f}s，任务仍在后台继续；"
+             f"job_id={job_id}，最后阶段={str((last or {}).get('stage'))}）")
 
 
 def scalar_dict(d: dict) -> dict:

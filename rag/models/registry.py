@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from rag.core.cache import shared_cache
 from rag.core.config import EmbedConfig, LLMConfig, RerankConfig, Settings
 from rag.models.chat import build_chat
 from rag.models.embeddings import Embedder, build_embedder
@@ -41,7 +42,7 @@ class ModelRegistry:
 
     def _build(self, s: Settings) -> ModelBundle:
         return ModelBundle(
-            embedder=build_embedder(s.embed),
+            embedder=build_embedder(s.embed, cache=shared_cache(s)),
             chat_factory=lambda: build_chat(s.llm),
             reranker=build_reranker(s.rerank),
             # 存副本而非引用，隔离外部对 settings 的就地修改

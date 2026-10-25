@@ -468,6 +468,13 @@ class ApiKey(LanceModel):
 | 临时文件 | 上传文件的**所有权归队列**——此前 worker 还在读、请求已把临时文件删掉，导致偶发失败 |
 | 取消 | `DELETE /api/jobs/{job_id}`，**如实区分处置方式**（见下） |
 
+> 队列有两种后端：`queue.backend=thread`（默认，进程内）与 `redis`
+> （任务规格写进 Redis Stream，由 `rag worker` 进程消费；至少一次、崩溃
+> 任务可被 XAUTOCLAIM 接管）。两种后端共用 `rag/ingest/jobspec.py` 的同一个
+> 执行入口。任务行仍在本机 SQLite，**worker 必须与 API 共享数据目录**——
+> 跨机器要等 Postgres 迁移（`docs/ARCH-SCALE-2026-10-25.md` 阶段 2b）。
+> 在那之前不要把写流量打到多个副本上：LanceDB 的写入依赖单写者锁。
+
 任务行在**入队时**即写入（不是开工时），因此排队中的任务也能被查询到；`doc_id` 在成功与去重两条分支上都会回写。
 
 **取消的能力边界**（必须如实说明，不能一律显示"已取消"）：
@@ -984,7 +991,9 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 - **systemd**：`Restart=always`；**单 worker**（见 §16）。
 - **幂等**：`POST /documents`、`/documents/text`、`/documents/url` 支持 `Idempotency-Key` 头（TTL 24h，进程内存储）；同键重试回放首次结果并带 `idempotent_replay: true`，**不会产生第二份文档**。不给键时行为不变。
 - **并发编辑**：`PATCH /chunks/{id}` 可带 `updated_at`（客户端读到的那一版）；期间被别人改过则返回 **409** 而非静默覆盖。不带该字段沿用「最后写入者胜」。
-- **可运维性**：每个响应带 `X-Request-ID`（上游传入则沿用，未捕获异常会把它写进日志并回传引用）；`rate_limit_writes_per_min` 限**写**操作（默认 0=关闭，检索与幂等入库豁免），按调用方分桶，超限返回 429 + `Retry-After`。
+- **可运维性**：每个响应带 `X-Request-ID`（上游传入则沿用，未捕获异常会把它写进日志并回传引用）；`rate_limit_writes_per_min` 限**写**操作（默认 0=关闭，检索与幂等入库豁免），按调用方分桶，超限返回 429 + `Retry-After`。配了 `redis.url` 时令牌桶走 Redis（多副本共享额度），Redis 不可用退回进程内桶。
+- **共享缓存（多副本）**：`RAG_REDIS__URL` 一配，query embedding 缓存就从"每进程一份"变成 L1 进程内 + L2 Redis（`LayeredCache`）。L2 读失败按未命中、写失败只告警——Redis 挂掉只会变慢，不会 500。默认空值 = 纯进程内，不装 `redis` 依赖也能跑。详见 `docs/ARCH-SCALE-2026-10-25.md`。
+- **多副本部署骨架**：`deploy/Dockerfile` + `deploy/docker-compose.yml`（Valkey + Postgres + API ×2 + worker）。元数据可切 Postgres（`storage.meta_engine=postgres` + `storage.postgres_url`；`rag migrate --to-postgres` 复制存量 SQLite）。向量仍是嵌入式 LanceDB 的共享卷：它的写锁是同机 flock，**同一台 Docker 主机上的多进程安全，跨主机不安全**——跨机器部署要等向量库替换（`docs/ARCH-SCALE-2026-10-25.md` 阶段 3）。
 - **本地模型侧车**：Ollama（`ollama serve`）或 vLLM——不进入本进程，避免 torch 依赖污染应用环境；均由 `/api/models/test` 验证。
 - **Python 基线 3.11**（`unstructured` 约束）。
 

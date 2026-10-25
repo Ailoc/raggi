@@ -47,7 +47,14 @@ class StorageConfig(BaseModel):
     #   sqlite  —— 直接用 SQLite（新库就是这个）
     #   lancedb —— **回退开关**：完全走改造前的读写路径
     # 旧表在 LanceDB 里保留不删，所以回退不需要恢复备份。
-    meta_engine: Literal["auto", "sqlite", "lancedb"] = "auto"
+    meta_engine: Literal["auto", "sqlite", "lancedb", "postgres"] = "auto"
+
+    # Postgres 元数据（meta_engine=postgres 时生效）。
+    # 多副本/跨机器形态用它替掉 SQLite；空 = 不用。
+    postgres_url: str = ""
+    # 连接池上限由进程内的线程数决定（每线程一条连接），生产建议前面
+    # 再挂 pgbouncer，否则 N 个副本 × 线程数会撞 max_connections。
+    postgres_connect_timeout_s: float = 5.0
 
     # ---- s3（RustFS / MinIO / AWS）----
     endpoint: str = ""            # 例如 http://127.0.0.1:9000
@@ -60,6 +67,50 @@ class StorageConfig(BaseModel):
     allow_http: bool = True
     # bucket 内的路径前缀，便于一个 bucket 放多套环境
     prefix: str = ""
+
+
+# ---------------------------------------------------------------- 共享缓存
+
+class RedisConfig(BaseModel):
+    """Redis / Valkey 连接（可选）。
+
+    空 url = 不启用。单机默认不依赖任何外部服务；需要多副本共享
+    （查询向量缓存、分布式限流、外部任务队列）时填这一项。
+    客户端是同步的、超时默认 300ms：宁可退化成"没命中"，也不能让
+    共享缓存把请求拖住。
+    """
+
+    url: str = ""
+    namespace: str = "raggi"
+    timeout_ms: int = 300
+    max_connections: int = 64
+
+
+class CacheConfig(BaseModel):
+    """进程内缓存参数（L1）；配置了 Redis 时它就是 L1 的容量与 TTL。"""
+
+    # query embedding 缓存：512 条 / 600s 是当前单机默认值
+    max_items: int = 512
+    ttl_seconds: float = 600.0
+
+
+class QueueConfig(BaseModel):
+    """入库队列后端。
+
+    `thread`（默认）＝进程内有界线程池，行为与改造前一致。
+    `redis` ＝ 任务规格写进 Redis Stream，由独立 `rag worker` 进程消费；
+    需要 API 与 worker 共享同一个数据目录（文件任务的 path 是共享卷上的
+    工作副本），并配置 `redis.url`。
+    """
+
+    backend: Literal["thread", "redis"] = "thread"
+    stream: str = "raggi:ingest"
+    group: str = "raggi-workers"
+    consumer: str = ""          # 空 = 主机名-pid
+    max_pending: int = 32
+    block_ms: int = 2000
+    # 崩溃 worker 的任务回收阈值（毫秒）：超过这个空闲时间的 pending 会被接管
+    claim_idle_ms: int = 60_000
 
 
 # ---------------------------------------------------------------- 模型
@@ -207,7 +258,13 @@ class Settings(BaseSettings):
     rate_limit_writes_per_min: int = 0
     # 限流：单次突发容量（令牌桶容量）。设 0 表示与每分钟额度同值。
     rate_limit_burst: int = 0
+    # 限流后端。auto = 配了 redis.url 就用 Redis（跨副本共享配额），
+    # 否则沿用现状（有 SQLite 元数据时跨进程、没有时进程内）。
+    rate_limit_backend: Literal["auto", "memory", "redis"] = "auto"
 
+    redis: RedisConfig = RedisConfig()
+    cache: CacheConfig = CacheConfig()
+    queue: QueueConfig = QueueConfig()
     storage: StorageConfig = StorageConfig()
     embed: EmbedConfig = EmbedConfig()
     rerank: RerankConfig = RerankConfig()

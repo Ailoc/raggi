@@ -68,8 +68,13 @@ class IngestQueue:
 
     def __init__(self, store, workers: int = DEFAULT_WORKERS,
                  max_pending: int = DEFAULT_MAX_PENDING,
-                 retention_days: int = JOB_RETENTION_DAYS):
+                 retention_days: int = JOB_RETENTION_DAYS,
+                 runner=None):
         self.store = store
+        # 规格化任务的执行器：`runner(job, job_id=…)`。由装配层（Ctx）
+        # 注入，队列本身不认识 pipeline——这样换外部队列时执行体可以
+        # 留在同一个 dispatch 函数上（rag/ingest/jobspec.py）。
+        self._runner = runner
         self.workers = max(1, int(workers))
         self.max_pending = max(1, int(max_pending))
         # 来自 `settings.job_retention_days`。曾经这个配置只写进 config.toml
@@ -157,6 +162,20 @@ class IngestQueue:
             else:
                 self._futures[job_id] = fut
         return job_id, fut
+
+    def submit_job(self, job):
+        """按**可序列化规格**提交任务（本地队列的实现）。
+
+        远程队列（Redis Streams）用同名方法把规格写进流；调用方
+        （`api._common.enqueue`）只依赖这个入口，不关心队列在哪。
+        """
+        if self._runner is None:
+            raise RuntimeError(
+                "队列没有装配 runner：请通过 Ctx 构造，或直接调用 submit(fn)")
+        return self.submit(
+            self._runner, job,
+            doc_id=job.doc_id, engine=job.engine,
+            kb_id=job.kb_id)
 
     # ---- 取消 ----------------------------------------------------------
 

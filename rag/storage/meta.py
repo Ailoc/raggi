@@ -433,12 +433,25 @@ class _Tx:
         return False
 
 
-def open_meta_store(settings, *, force_disabled: bool = False) -> MetaStore | None:
-    """按配置打开元数据引擎；`meta_engine=lancedb` 时返回 None（退回旧路径）。"""
-    engine = (getattr(getattr(settings, "storage", None), "meta_engine",
-                      "auto") or "auto").lower()
+def open_meta_store(settings, *, force_disabled: bool = False):
+    """按配置打开元数据引擎；`meta_engine=lancedb` 时返回 None（退回旧路径）。
+
+    返回 SQLite 或 Postgres 实现——两者方法集一致，仓储层不感知。
+    """
+    storage = getattr(settings, "storage", None)
+    engine = (getattr(storage, "meta_engine", "auto") or "auto").lower()
     if force_disabled or engine == "lancedb":
         return None
+    if engine == "postgres":
+        url = str(getattr(storage, "postgres_url", "") or "")
+        if not url:
+            raise Invalid("meta_engine=postgres 需要同时配置 storage.postgres_url")
+        from .pg_meta import PostgresMetaStore
+
+        return PostgresMetaStore(
+            url,
+            connect_timeout_s=float(getattr(
+                storage, "postgres_connect_timeout_s", 5.0)))
     return MetaStore(Path(settings.data_dir) / "raggi.db")
 
 
@@ -447,7 +460,7 @@ def needs_import(meta: MetaStore) -> bool:
     try:
         total = sum(meta.count(t) for t in
                     ("documents", "jobs", "kbs", "apikeys"))
-    except sqlite3.Error:
+    except Exception:  # noqa: BLE001  两种引擎的驱动异常都要吞掉
         return False
     return total == 0
 

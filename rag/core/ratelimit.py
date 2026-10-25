@@ -215,3 +215,84 @@ def is_idempotent(path: str) -> bool:
     """
     rel = normalize_path(path)
     return any(rel == p or rel.startswith(p + "?") for p in _IDEMPOTENT_PATHS)
+
+# ---- Redis 共享令牌桶 ------------------------------------------------------
+#
+# 与 SQLite 版语义一致：整个 read-modify-write 在一段 Lua 里原子完成，
+# 多副本共享同一份额度。墙钟时间由应用传入（Redis TIME 在同一台机器上
+# 也可能与副本不同，统一用调用方时间更可预期）。
+_TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local burst = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+if tokens == nil then
+  tokens = burst
+  ts = now
+end
+tokens = math.min(burst, tokens + (now - ts) / 1000.0 * rate)
+local allowed = 0
+local retry = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+  allowed = 1
+else
+  retry = math.ceil((1 - tokens) / rate)
+end
+redis.call('HSET', key, 'tokens', tostring(tokens), 'ts', tostring(now))
+redis.call('PEXPIRE', key, ttl)
+return {allowed, retry}
+"""
+
+
+class RedisRateLimiter:
+    """跨副本共享的写限流（Redis 令牌桶）。
+
+    Redis 不可用时**退回进程内令牌桶**并告警：限流是保护措施，不能因为
+    缓存层故障把所有写请求打死；但也不能完全放行——那样一次 Redis 抖动
+    就会把入库队列打满。
+    """
+
+    def __init__(self, url: str, *, namespace: str = "raggi",
+                 limit: int = 0, burst: int = 0, timeout_ms: int = 300):
+        self.limit = max(0, int(limit))
+        self.burst = int(burst) if burst > 0 else self.limit
+        self._client = None
+        self._error_logged = False
+        self._fallback = RateLimiter(limit=self.limit, burst=self.burst)
+        if self.limit <= 0:
+            return
+        try:
+            from rag.core.redis import RedisClient
+
+            self._client = RedisClient(
+                url, namespace=f"{namespace}:rl", timeout_ms=timeout_ms,
+                max_connections=16)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Redis 限流初始化失败，退回进程内限流: %s", e)
+
+    @property
+    def enabled(self) -> bool:
+        return self.limit > 0 and self._client is not None
+
+    def allow(self, key: str) -> tuple[bool, int]:
+        if not self.enabled or self._client is None:
+            return self._fallback.allow(key)
+        rate = self.limit / 60.0
+        ttl_ms = max(60_000, int(self.burst / max(rate, 1e-9) * 2000) + 60_000)
+        try:
+            allowed, retry = self._client.eval(
+                _TOKEN_BUCKET_LUA, [f"bucket:{key}"],
+                [int(time.time() * 1000), rate, float(self.burst), ttl_ms])
+        except Exception as e:  # noqa: BLE001
+            if not self._error_logged:
+                self._error_logged = True
+                logger.warning(
+                    "Redis 限流不可用，退回进程内令牌桶（后续同类错误不再逐条记录）: %s",
+                    e)
+            return self._fallback.allow(key)
+        return bool(int(allowed)), int(retry)

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from pathlib import Path
 
 from rag.core.maintenance import mark_maintenance_done
 
@@ -40,7 +41,19 @@ def build_app():
     561 条测试全绿也没发现 —— 因为没有任何一条测试从**真正的入口**跑一遍。
     现已由 `tests/test_server_cli.py` 钉住。
     """
-    from rag.api import Ctx, create_app
+    from rag.api import create_app
+
+    return create_app(build_ctx())
+
+
+def build_ctx():
+    """装配进程上下文（API 与独立 worker 共用）。
+
+    注意：**导入必须留在函数体内**，理由同 `build_app`——`rag.core.config`
+    的模块级 `settings` 单例在 `import rag.server` 时就会按当时的 argv/环境
+    冻结一次，CLI 参数要在这之后才写进 RAG_*，提前导入会让它们静默失效。
+    """
+    from rag.api import Ctx
     from rag.core.config import settings
     from rag.models.registry import ModelRegistry
     from rag.storage.backend import build_backend
@@ -63,8 +76,7 @@ def build_app():
     meta = prepare_meta_store(settings, store, log=log)
     registry = ModelRegistry(settings)
     _warn_if_unauthenticated_listener(settings, store)
-    app = create_app(Ctx(settings, store, registry, meta=meta))
-    return app
+    return Ctx(settings, store, registry, meta=meta)
 
 
 def _warn_if_unauthenticated_listener(settings, store) -> None:
@@ -124,12 +136,14 @@ def _resolve_processes(raw: str | None) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(prog="rag", description="Raggi 极简单机 RAG")
     ap.add_argument("command", nargs="?", default="serve",
-                    choices=["serve", "reindex", "migrate"])
+                    choices=["serve", "reindex", "migrate", "worker"])
     ap.add_argument("--host", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--data", default=None, help="数据目录（覆盖 RAG_DATA_DIR）")
     ap.add_argument("--check", action="store_true",
                     help="migrate：只校验行数一致性，不改变已有 SQLite 数据")
+    ap.add_argument("--to-postgres", action="store_true",
+                    help="migrate：把 SQLite 元数据复制到 storage.postgres_url")
     ap.add_argument("--processes", default=None,
                     help="只读 API 进程数：auto（默认，min(cpu,4)）或数字；"
                          "1 = 原来的单进程形态。覆盖 RAG_API_PROCESSES "
@@ -180,6 +194,10 @@ def main() -> None:
             uvicorn.run("rag.server:build_app", factory=True,
                         host=settings.host, port=settings.port,
                         workers=n_proc, loop=loop)
+    elif args.command == "worker":
+        from rag.worker import run_worker
+
+        run_worker()
     elif args.command == "migrate":
         # 显式迁移/校验入口。启动期本来就会 auto 导入，这条命令的存在意义是
         # 让运维能**先看一眼再切**：升级前跑一次 `rag migrate --check`，
@@ -189,6 +207,22 @@ def main() -> None:
         from rag.storage.tables import LanceStore
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.to_postgres:
+            from rag.storage.meta import MetaStore
+            from rag.storage.pg_meta import PostgresMetaStore, copy_from_sqlite
+
+            url = str(settings.storage.postgres_url or "")
+            if not url:
+                log.error("--to-postgres 需要先配置 storage.postgres_url")
+                raise SystemExit(2)
+            sqlite_meta = MetaStore(Path(settings.data_dir) / "raggi.db")
+            pg_meta = PostgresMetaStore(url)
+            report = copy_from_sqlite(sqlite_meta, pg_meta)
+            log.info("复制到 Postgres 完成：%s", report)
+            log.info("现在把 storage.meta_engine 设为 postgres 并重启即可切换")
+            return
+
         store = LanceStore(build_backend(settings.storage, settings.data_dir),
                            settings.embed.dim)
         meta = open_meta_store(settings)

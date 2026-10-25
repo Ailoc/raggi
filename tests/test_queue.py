@@ -109,20 +109,18 @@ def test_async_submit_returns_immediately(tmp_path):
     emb = _GatedEmbedder()
     c = _client_with(emb, tmp_path)
     try:
-        t0 = time.perf_counter()
         r = c.post("/api/documents/text",
                    json={"text": "异步入库内容 " * 20, "title": "async"},
                    params={"wait": "false"})
-        elapsed = (time.perf_counter() - t0) * 1000
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "queued"
         assert body["job_id"]
-        # 流水线确实已经跑到 embed（并且卡在那里），响应却已经返回：
-        # 这证明 submit 没有等流水线，与机器快慢无关。
+        # 流水线已经跑到 embed（并且卡在那里），而响应已经返回——这就是
+        # "没有等流水线"的完整证明：真等了的话，这个 POST 会一直挂着。
+        # 不再断言墙钟（全量套件下 submit 自己可能耗时几百毫秒）。
         assert emb.entered.wait(10), "流水线没有跑到 embed 阶段"
         assert not emb.release.is_set()
-        assert elapsed < 500, f"疑似等完了流水线（{elapsed:.0f}ms）"
     finally:
         emb.release.set()
 

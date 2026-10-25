@@ -83,15 +83,19 @@ class EmbedUnavailable(RuntimeError):
 
 
 class Embedder:
-    def __init__(self, lc_embeddings, dim: int, model: str, normalize: bool):
+    def __init__(self, lc_embeddings, dim: int, model: str, normalize: bool,
+                 cache=None):
         self.lc = lc_embeddings
         self.dim = dim
         self.model = model
         self.normalize = normalize
         # 向量随模型变化，所以键里带模型名：换了 embedding 模型后
         # 旧缓存必须失效，否则会拿到旧模型的向量。
-        self._one_cache = TTLCache(max_items=ONE_CACHE_MAX,
-                                   ttl_seconds=ONE_CACHE_TTL_SECONDS)
+        #
+        # cache 由装配层注入：默认是进程内 TTLCache；配了 redis.url 时
+        # 是 LayeredCache（L1 + 共享 L2），多副本之间共享查询向量。
+        self._one_cache = cache or TTLCache(
+            max_items=ONE_CACHE_MAX, ttl_seconds=ONE_CACHE_TTL_SECONDS)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """同步批量向量化：失败退避重试（仅可重试错误）。"""
@@ -126,5 +130,6 @@ class Embedder:
         return vec
 
 
-def build_embedder(cfg: EmbedConfig) -> Embedder:
-    return Embedder(build_lc_embeddings(cfg), cfg.dim, cfg.model, cfg.normalize)
+def build_embedder(cfg: EmbedConfig, cache=None) -> Embedder:
+    return Embedder(build_lc_embeddings(cfg), cfg.dim, cfg.model, cfg.normalize,
+                    cache=cache)

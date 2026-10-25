@@ -9,11 +9,11 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from rag.api._common import _bind, get_ctx, raise_operation_error
 from rag.api._common import enqueue as _enqueue
+from rag.api._common import get_ctx, raise_operation_error
 from rag.api.responses import DocPlanOut, DocPlansOut, IngestOut, KbPlanOut, error_responses
 from rag.api.schemas import PlanUpdateReq
-from rag.ingest import pipeline
+from rag.ingest.jobspec import IngestJob
 from rag.storage import plan as chunking
 from rag.storage.repos import get_document, list_documents
 from rag.storage.repos import kbs as kbs_store
@@ -95,9 +95,8 @@ async def api_doc_resplit(request: Request, doc_id: str,
     ctx = get_ctx(request)
     try:
         return await asyncio.to_thread(
-            _enqueue, ctx, _bind(ctx, pipeline.resplit_doc),
-            doc_id, ctx.settings.parser, ctx.settings, queue=ctx.queue,
-            wait=wait, doc_id=doc_id)
+            _enqueue, ctx, IngestJob(kind="resplit", doc_id=doc_id),
+            wait=wait)
     except KeyError:
         raise HTTPException(404, "document not found")
     except ValueError as e:

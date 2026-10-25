@@ -1,0 +1,103 @@
+# 多副本骨架：API ×2 + worker ×1 + Valkey + Postgres。
+#
+# 适用形态：**同一台 Docker 主机上的多进程**。元数据已可放 Postgres，
+# 任务走 Redis Stream；但向量仍存在嵌入式 LanceDB 的共享卷上——
+# 它的写锁是**同机 flock**，跨主机不安全。跨机器要等向量库替换
+# （docs/ARCH-SCALE-2026-10-25.md 阶段 3）。
+#
+# 启动前：
+#   cd web && npm run build
+#   cd .. && docker compose -f deploy/docker-compose.yml up --build
+services:
+  valkey:
+    image: valkey/valkey:8
+    # 纯缓存用途：关持久化，内存满按 LRU 淘汰
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: raggi
+      POSTGRES_DB: raggi
+    volumes:
+      - raggi-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d raggi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      # 共享缓存 + 分布式写限流（默认限流关闭，按需设 RAG_RATE_LIMIT_WRITES_PER_MIN）
+      RAG_REDIS__URL: redis://valkey:6379/0
+      # 元数据：多副本共享 Postgres（默认单机仍是 SQLite）
+      RAG_STORAGE__META_ENGINE: postgres
+      RAG_STORAGE__POSTGRES_URL: postgresql://postgres:raggi@postgres:5432/raggi
+      RAG_REDIS__NAMESPACE: raggi
+      RAG_CACHE__MAX_ITEMS: "2048"
+      RAG_CACHE__TTL_SECONDS: "600"
+      # 每个副本内部的进程数；副本之间各自持有 Lance 索引
+      RAG_API_PROCESSES: "1"
+      # API 只负责把任务规格写进 Redis；执行交给下面的 worker
+      RAG_QUEUE__BACKEND: redis
+    volumes:
+      - raggi-data:/data
+    ports:
+      - "8000-8001:8000"
+    deploy:
+      replicas: 2
+    depends_on:
+      valkey:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+  # 独立入库 worker：与 API 共享数据卷（文件任务的 path 是共享卷上的
+  # 工作副本），消费 Redis Stream。可单独扩副本数。
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["rag", "worker"]
+    environment:
+      RAG_REDIS__URL: redis://valkey:6379/0
+      RAG_REDIS__NAMESPACE: raggi
+      RAG_QUEUE__BACKEND: redis
+      RAG_STORAGE__META_ENGINE: postgres
+      RAG_STORAGE__POSTGRES_URL: postgresql://postgres:raggi@postgres:5432/raggi
+      RAG_QUEUE__STREAM: raggi:ingest
+      RAG_QUEUE__GROUP: raggi-workers
+      RAG_INGEST_WORKERS: "2"
+    volumes:
+      - raggi-data:/data
+    depends_on:
+      valkey:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  raggi-data:
+  raggi-pg:

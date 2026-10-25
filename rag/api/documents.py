@@ -11,8 +11,8 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from rag.api._common import _bind, get_ctx, raise_operation_error, scalar_dict
 from rag.api._common import enqueue as _enqueue
+from rag.api._common import get_ctx, raise_operation_error, scalar_dict
 from rag.api.responses import (
     BatchIngestOut,
     DocDeleteBatchOut,
@@ -34,8 +34,7 @@ from rag.api.schemas import (
 )
 from rag.core.errors import Invalid
 from rag.core.idempotency import normalize_key
-from rag.ingest import pipeline
-from rag.ingest.queue import JobCancelled
+from rag.ingest.jobspec import IngestJob
 from rag.parsing.router import ALLOWED_ENGINES
 from rag.storage.repos import (
     delete_document,
@@ -115,39 +114,6 @@ def _safe_suffix(filename: str | None) -> str:
     return raw
 
 
-def _ingest_upload(ctx, tmp: Path, title, parser_cfg, filename: str,
-                   kb_id: str, job_id: str | None = None) -> dict:
-    """任务体：入库上传的临时文件，并负责它的生命周期。
-
-    临时文件的所有权归任务体：
-    - 成功时 pipeline 已把它 move 到 files_dir（留档），无需再删；
-    - 失败时由这里删除，避免磁盘泄漏。
-
-    这样做是必须的——若让 HTTP 处理器用 finally 清理，异步模式下
-    请求早已返回，会删掉 worker 正在读的文件。
-    """
-    try:
-        # 全用关键字：位置参数一旦与签名顺序不一致就会串位
-        # （此前 filename 落到 backend、kb_id 落到 source_uri）
-        return pipeline.ingest_file(
-            ctx.store, ctx.registry, tmp, title, parser_cfg, ctx.settings,
-            backend=ctx.backend, source_uri=filename, kb_id=kb_id,
-            job_id=job_id, queue=ctx.queue)
-    except JobCancelled:
-        # 取消也要清理临时文件：任务体终止后没人再管它
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
 @router.post("/documents", responses={
     413: {"model": ErrorOut, "description": "文件超过 max_upload_mb"},
 })
@@ -213,12 +179,11 @@ async def api_upload(request: Request,
             raise_operation_error(
                 RuntimeError("写临时文件失败"), "文件入库失败")
         try:
-            from functools import partial
-
-            result = await asyncio.to_thread(
-                _enqueue, ctx, partial(_ingest_upload, ctx),
-                tmp, title, parser_cfg, file.filename, kb_id or "",
-                wait=wait)
+            job = IngestJob(
+                kind="file", path=str(tmp), filename=file.filename or "",
+                title=title or "", kb_id=kb_id or "", engine=engine or "",
+                idempotency_key=key or "")
+            result = await asyncio.to_thread(_enqueue, ctx, job, wait=wait)
             if key and claim is not None:
                 if result.get("status") != "failed":
                     await asyncio.to_thread(
@@ -256,10 +221,9 @@ async def api_text(request: Request, body: TextIngestReq,
     ctx = get_ctx(request)
 
     async def _run():
-        return await asyncio.to_thread(
-            _enqueue, ctx, _bind(ctx, pipeline.ingest_text),
-            body.text, body.title, ctx.settings.parser,
-            ctx.settings, wait=wait, kb_id=body.kb_id or "")
+        job = IngestJob(kind="text", text=body.text, title=body.title,
+                        kb_id=body.kb_id or "")
+        return await asyncio.to_thread(_enqueue, ctx, job, wait=wait)
 
     try:
         return await _idem(ctx, request, "/documents/text", _run)
@@ -283,11 +247,9 @@ async def api_batch(request: Request, body: BatchIngestReq,
         out = []
         for item in body.items:
             try:
-                out.append(_enqueue(
-                    ctx, _bind(ctx, pipeline.ingest_text),
-                    item.text, item.title,
-                    ctx.settings.parser, ctx.settings,
-                    wait=wait, kb_id=item.kb_id or ""))
+                job = IngestJob(kind="text", text=item.text, title=item.title,
+                                kb_id=item.kb_id or "")
+                out.append(_enqueue(ctx, job, wait=wait))
             except Exception as e:  # noqa: BLE001
                 out.append({"title": item.title,
                             "status": "failed", "error": str(e)})
@@ -303,10 +265,8 @@ async def api_url(request: Request, body: UrlIngestReq,
     ctx = get_ctx(request)
 
     async def _run():
-        return await asyncio.to_thread(
-            _enqueue, ctx, _bind(ctx, pipeline.ingest_url),
-            body.url, ctx.settings.parser, ctx.settings,
-            wait=wait, kb_id=body.kb_id or "")
+        job = IngestJob(kind="url", url=body.url, kb_id=body.kb_id or "")
+        return await asyncio.to_thread(_enqueue, ctx, job, wait=wait)
 
     try:
         return await _idem(ctx, request, "/documents/url", _run)
@@ -507,12 +467,8 @@ async def api_reparse(request: Request, doc_id: str,
     ctx = get_ctx(request)
     engine = body.engine if body else None
     try:
-        return await asyncio.to_thread(
-            _enqueue, ctx, _bind(ctx, pipeline.reparse_doc),
-            doc_id, ctx.settings.parser, ctx.settings, ctx.backend,
-            # engine 可能是 None（请求未指定），而任务行的 parser_engine
-            # 是非空列——这里归一成空串，交给 pipeline 走"沿用当前配置"
-            wait=wait, doc_id=doc_id, engine=engine or "")
+        job = IngestJob(kind="reparse", doc_id=doc_id, engine=engine or "")
+        return await asyncio.to_thread(_enqueue, ctx, job, wait=wait)
     except KeyError:
         raise HTTPException(404, "document not found")
     except (ValueError, FileNotFoundError) as e:

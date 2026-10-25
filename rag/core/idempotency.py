@@ -326,9 +326,11 @@ class IdempotencyStore:
             excess = int(conn.execute(
                 "SELECT count(*) FROM idempotency").fetchone()[0]) - MAX_ENTRIES
             if excess > 0:
+                # 不用 rowid：那是 SQLite 独有的伪列，Postgres 上没有。
+                # 行值 IN 子查询两边都支持（SQLite ≥3.15）。
                 conn.execute(
-                    "DELETE FROM idempotency WHERE rowid IN "
-                    "(SELECT rowid FROM idempotency WHERE state='done' "
+                    "DELETE FROM idempotency WHERE (path, key) IN "
+                    "(SELECT path, key FROM idempotency WHERE state='done' "
                     "ORDER BY updated ASC LIMIT ?)", (excess,))
         except Exception as e:  # noqa: BLE001
             logger.warning("幂等记录清理失败: %s", e)

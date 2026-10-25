@@ -31,7 +31,7 @@ from rag.api.search import router as search_router
 from rag.api.system import router as system_router
 from rag.core import ratelimit, requestid
 from rag.core.config import Settings
-from rag.core.errors import RaggiError, short
+from rag.core.errors import Invalid, RaggiError, short
 from rag.core.maintenance import (
     mark_maintenance_done,
     should_run_startup_maintenance,
@@ -224,11 +224,37 @@ class Ctx:  # 应用上下文（在 server 中装配）
         from rag.core.signing import UrlSigner
 
         self.signer = UrlSigner(settings.data_dir)
-        # 入库队列：有界并发 + 状态可查（见 rag/queue.py）
-        from rag.ingest.queue import IngestQueue
+        # 入库队列：默认进程内有界线程池；queue.backend=redis 时任务规格
+        # 写进 Redis Stream，由独立的 `rag worker` 进程消费。
+        from rag.ingest.jobspec import run_ingest_job
 
-        self.queue = IngestQueue(store, workers=settings.ingest_workers,
-                                 retention_days=settings.job_retention_days)
+        def _runner(job, job_id=None, **_kwargs):
+            return run_ingest_job(self, job, job_id)
+
+        if settings.queue.backend == "redis":
+            if not settings.redis.url:
+                raise Invalid("queue.backend=redis 需要同时配置 redis.url")
+            from rag.ingest.redis_queue import RedisStreamQueue
+
+            self.queue = RedisStreamQueue(
+                store, _runner,
+                url=settings.redis.url,
+                namespace=settings.redis.namespace,
+                stream=settings.queue.stream,
+                group=settings.queue.group,
+                consumer=settings.queue.consumer,
+                max_pending=settings.queue.max_pending,
+                block_ms=settings.queue.block_ms,
+                claim_idle_ms=settings.queue.claim_idle_ms,
+                timeout_ms=settings.redis.timeout_ms)
+        else:
+            from rag.ingest.queue import IngestQueue
+
+            self.queue = IngestQueue(
+                store, workers=settings.ingest_workers,
+                max_pending=settings.queue.max_pending,
+                retention_days=settings.job_retention_days,
+                runner=_runner)
         # 幂等键：有 MetaStore 时跨进程；None 时退回进程内（lancedb 回退形态）
         from rag.core.idempotency import IdempotencyStore
 
@@ -348,10 +374,7 @@ def create_app(ctx: Ctx) -> FastAPI:
     # 幂等键存储挂到 app.state：默认跨进程（SQLite）；lancedb 回退时进程内。
     # 挂出来是为了让测试与运维能触达它、重置它。
     app.state.idem = ctx.idem
-    app.state.limiter = RateLimiter(
-        limit=ctx.settings.rate_limit_writes_per_min,
-        burst=ctx.settings.rate_limit_burst,
-        meta=ctx.meta)
+    app.state.limiter = _build_limiter(ctx)
     _check_web_build()
 
     @app.middleware("http")
@@ -372,6 +395,31 @@ def create_app(ctx: Ctx) -> FastAPI:
     _wire_exception_handlers(app)
 
     return app
+
+
+def _build_limiter(ctx):
+    """写限流的后端选择。
+
+    - `auto`（默认）：配了 `redis.url` 就用 Redis（多副本共享配额），
+      否则沿用现状（有 SQLite 元数据时跨进程、没有时进程内）；
+    - `memory`：强制进程内（多副本下额度会乘以副本数，只适合单进程）；
+    - `redis`：强制 Redis，连不上时退回进程内桶并告警。
+    """
+    settings = ctx.settings
+    limit = settings.rate_limit_writes_per_min
+    burst = settings.rate_limit_burst
+    backend = settings.rate_limit_backend
+    if limit > 0 and settings.redis.url and backend in ("auto", "redis"):
+        from rag.core.ratelimit import RedisRateLimiter
+
+        return RedisRateLimiter(
+            settings.redis.url,
+            namespace=settings.redis.namespace,
+            limit=limit, burst=burst,
+            timeout_ms=settings.redis.timeout_ms)
+    return RateLimiter(
+        limit=limit, burst=burst,
+        meta=None if backend == "memory" else ctx.meta)
 
 
 def _wire_routers(app: FastAPI) -> None:
