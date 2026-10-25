@@ -38,6 +38,9 @@ PAYLOAD_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "heading_path",
                 "page", "text", "char_start", "char_end", "offset_valid",
                 "edited", "enabled", "origin", "embed_model",
                 "created_at", "updated_at"]
+# 复合排序键：ordinal 只在单文档内唯一，必须再拼 chunk_id 才有全序，
+# 否则分页在 ordinal 并列处会重复/漏项（与 Lance 侧的次级排序键同义）。
+ORD_SORT = "ord_sort"
 
 
 def _token_id(token: str) -> int:
@@ -139,6 +142,12 @@ class QdrantChunkStore:
                         modifier=qm.Modifier.IDF),
                 },
             )
+        try:
+            self.client.create_payload_index(
+                self.collection, field_name=ORD_SORT,
+                field_schema=qm.PayloadSchemaType.INTEGER)
+        except Exception:  # noqa: BLE001  已存在即可
+            pass
         for field in ("doc_id", "kb_id", "origin", "enabled"):
             try:
                 self.client.create_payload_index(
@@ -166,6 +175,66 @@ class QdrantChunkStore:
             self.collection, count_filter=to_qdrant_filter(where),
             exact=True).count)
 
+    def vector_dim(self) -> int | None:
+        """collection 里 dense 向量的实际维度（对账用）。"""
+        info = self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        if isinstance(vectors, dict):
+            params = vectors.get(DENSE)
+            return int(params.size) if params is not None else None
+        return int(vectors.size) if vectors is not None else None
+
+    def page(self, *, where: ChunkFilter | None = None,
+             limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """分块列表页：稳定排序 + 计数。
+
+        Qdrant 的 scroll 游标是"上一页最后一个点"，不是数字偏移；为了
+        保持 API 的 `offset` 语义，这里取 `offset+limit` 再切片。分块列表
+        的页深很小（limit 上限 500），代价可接受；真要深翻页应改用游标。
+        """
+        from qdrant_client import models as qm
+
+        n = max(1, int(limit))
+        skip = max(0, int(offset))
+        flt = to_qdrant_filter(where)
+        rows: list[dict] = []
+        cursor = None
+        while len(rows) < skip + n:
+            pts, cursor = self.client.scroll(
+                self.collection, scroll_filter=flt,
+                limit=skip + n - len(rows), offset=cursor,
+                order_by=qm.OrderBy(key=ORD_SORT,
+                                    direction=qm.Direction.ASC),
+                with_payload=True, with_vectors=False)
+            rows.extend(dict(p.payload or {}) for p in pts)
+            if cursor is None:
+                break
+        return rows[skip:skip + n], self.count(where)
+
+    def facts(self) -> tuple[dict[str, int], int, set[str]]:
+        """健康检查需要的三项（与 Lance 侧 `_chunk_facts` 同义）。
+
+        Qdrant 里没有"待重建 FTS"这回事：sparse 向量随点位一起更新，
+        所以 fts_stale 恒为 0。
+        """
+        counts: dict[str, int] = {}
+        models: set[str] = set()
+        cursor = None
+        while True:
+            pts, cursor = self.client.scroll(
+                self.collection, limit=1000, offset=cursor,
+                with_payload=["doc_id", "embed_model"], with_vectors=False)
+            for p in pts:
+                payload = dict(p.payload or {})
+                doc = str(payload.get("doc_id") or "")
+                counts[doc] = counts.get(doc, 0) + 1
+                model = payload.get("embed_model")
+                if model:
+                    models.add(str(model))
+            if cursor is None:
+                break
+        return counts, 0, models
+
     # ---- 写入 ----------------------------------------------------------
 
     def upsert_chunks(self, rows: list[dict]) -> None:
@@ -178,6 +247,7 @@ class QdrantChunkStore:
                 raise ValueError("upsert_chunks 需要 vector 列")
             payload = {k: r.get(k) for k in PAYLOAD_COLS if k in r}
             payload["chunk_id"] = str(r["chunk_id"])
+            payload[ORD_SORT] = _ord_sort(r.get("ordinal"), r["chunk_id"])
             indices, values = sparse_vector(str(r.get("text") or ""))
             points.append(qm.PointStruct(
                 id=str(r["chunk_id"]),
@@ -268,6 +338,22 @@ class QdrantChunkStore:
             rows = [_row(p, distance=1.0 - float(p.score)) for p in res.points]
         # 分数列在检索后按上限截断（应用层还会精排/阈值过滤）
         return rows[:max(1, int(limit))]
+
+
+def _ord_sort(ordinal, chunk_id) -> int:
+    """(ordinal, chunk_id) 的**全序**整数键：高位 ordinal，低位 chunk_id 哈希。
+
+    Qdrant 的 order_by 要求 range 索引，不能按字符串排序；把两级排序键
+    压进一个 int64 既满足索引要求，也保住「并列处不重复不丢项」。
+    """
+    try:
+        n = max(0, int(ordinal or 0))
+    except (TypeError, ValueError):
+        n = 0
+    h = int.from_bytes(
+        hashlib.blake2b(str(chunk_id).encode("utf-8"), digest_size=4).digest(),
+        "big")
+    return (n << 32) | (h & 0xFFFFFFFF)
 
 
 def _row(point, *, distance: float | None = None,

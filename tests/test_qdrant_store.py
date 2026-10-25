@@ -143,3 +143,46 @@ def test_vector_topk_matches_lance(tmp_path, store):
     b = store.search(mode="vector", vector=query,
                      where=ChunkFilter(enabled_only=True), limit=3)
     assert [h["chunk_id"] for h in a] == [h["chunk_id"] for h in b]
+
+
+def test_page_is_stable_on_ordinal_ties(store):
+    """ordinal 只在单文档内唯一：分页必须有次级键，否则并列处重复/漏项。"""
+    ids = [str(uuid.UUID(int=i + 1)) for i in range(4)]
+    rows = [
+        _row("a", ordinal=0, chunk_id=ids[0]),
+        _row("b", ordinal=1, chunk_id=ids[1]),
+        _row("c", ordinal=1, chunk_id=ids[2]),
+        _row("d", ordinal=2, chunk_id=ids[3]),
+    ]
+    store.upsert_chunks(rows)
+
+    page1, total = store.page(limit=2, offset=0)
+    page2, _ = store.page(limit=2, offset=2)
+
+    assert total == 4
+    got = [r["chunk_id"] for r in page1 + page2]
+    assert len(got) == len(set(got)) == 4, "分页出现重复或漏项"
+    assert set(got) == set(ids)
+    ordinals = [r["ordinal"] for r in page1 + page2]
+    assert ordinals == sorted(ordinals), "跨页顺序不是 ordinal 升序"
+
+
+def test_page_honours_filters(store):
+    a = _row("甲", doc_id="d1", ordinal=0)
+    b = _row("乙", doc_id="d2", ordinal=0)
+    store.upsert_chunks([a, b])
+    rows, total = store.page(where=ChunkFilter(doc_ids=("d2",)), limit=10)
+    assert total == 1 and [r["chunk_id"] for r in rows] == [b["chunk_id"]]
+
+
+def test_facts_and_vector_dim(store):
+    store.upsert_chunks([
+        _row("甲", doc_id="d1", embed_model="m1"),
+        _row("乙", doc_id="d1", embed_model="m1"),
+        _row("丙", doc_id="d2", embed_model="m2"),
+    ])
+    counts, stale, models = store.facts()
+    assert counts == {"d1": 2, "d2": 1}
+    assert stale == 0, "Qdrant 的 sparse 索引随点更新，没有待重建"
+    assert models == {"m1", "m2"}
+    assert store.vector_dim() == 4

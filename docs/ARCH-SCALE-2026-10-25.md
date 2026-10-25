@@ -135,10 +135,17 @@ CDN / 静态
   `tests/test_qdrant_store.py`（`RAG_TEST_QDRANT_URL` 才跑）
 - [x] `deploy/docker-compose.yml` 增加 qdrant 服务；可选依赖 `raggi[vector-qdrant]`
 
-**下一步（3c，未接线）**：分页/列表（scroll + count）、健康检查
-（`_chunk_facts` / vector_dim）、分块编辑与入库写路径改走适配器；
-`storage.vector_engine=qdrant` 切换，默认仍 LanceDB；用同一数据集与
-LanceDB 做 top-k 对齐。
+#### 3b-2 读路径补齐（已完成，未接线）
+
+- [x] `page()`：scroll + range 索引全序键（(ordinal<<32)|chunk_id 哈希），
+  分页在 ordinal 并列处不重复不漏项；`count()` 走精确计数
+- [x] `facts()`：按文档计数 / 待重排行 / 模型集合（Qdrant 的 sparse 随点更新，
+  待重建恒为 0）；`vector_dim()` 读 collection 配置
+- [x] 10 条真实 Qdrant 测试：加 page 稳定性、过滤、facts、vector_dim
+
+**下一步（3c，接线）**：把 `chunks_page` / health / 分块编辑 / 入库写路径
+改为经后端分派；`storage.vector_engine=qdrant` 切换；Lance→Qdrant 迁移工具；
+E2E 回归。
 
 1. ~~元数据：SQLite → Postgres~~（阶段 2b 已完成）；
 2. 向量：LanceDB → Qdrant（或 Milvus）。必须对齐四件事：
