@@ -122,10 +122,23 @@ CDN / 静态
 - [x] 测试：11 条（渲染/互斥/转义/恒假/兼容入口/真实 Lance 检索）
   `tests/test_chunk_filter.py`
 
-**下一步（3b，未开始）**：Qdrant 适配器——collection schema、点位
-upsert/delete、`ChunkFilter → qdrant.Filter` 映射、hybrid（dense+sparse/
-全文）与 RRF、分页计数；用 Docker Qdrant 与 LanceDB 跑同一数据集的结果
-对齐；`storage.vector_engine=qdrant` 切换，默认仍 LanceDB。
+#### 3b 适配器核心（已完成，尚未接线）
+
+- [x] `rag/storage/qdrant_store.py`：collection schema（dense + sparse/IDF）、
+  点位 upsert/get/delete、payload 更新与正文改写、`ChunkFilter →
+  qdrant.Filter`（空白名单落成恒假，不退化成"不过滤"）
+- [x] 检索三通道：vector（cosine 相似度折成应用层约定的余弦距离）、
+  fts（jieba → sparse + IDF）、hybrid（dense+sparse 两路 prefetch + RRF 融合）
+- [x] 分数列对齐 `_score_of()` 的既有约定：`_distance` / `_score` /
+  `_relevance_score`
+- [x] 真实 Qdrant 6 条集成测试（过滤/恒假/全文/融合/删除/改写）
+  `tests/test_qdrant_store.py`（`RAG_TEST_QDRANT_URL` 才跑）
+- [x] `deploy/docker-compose.yml` 增加 qdrant 服务；可选依赖 `raggi[vector-qdrant]`
+
+**下一步（3c，未接线）**：分页/列表（scroll + count）、健康检查
+（`_chunk_facts` / vector_dim）、分块编辑与入库写路径改走适配器；
+`storage.vector_engine=qdrant` 切换，默认仍 LanceDB；用同一数据集与
+LanceDB 做 top-k 对齐。
 
 1. ~~元数据：SQLite → Postgres~~（阶段 2b 已完成）；
 2. 向量：LanceDB → Qdrant（或 Milvus）。必须对齐四件事：

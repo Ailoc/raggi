@@ -30,6 +30,15 @@ services:
       timeout: 2s
       retries: 10
 
+  # 向量库（阶段 3b 接线后由 storage.vector_engine=qdrant 启用；
+  # 客户端与服务端 minor 版本相差不要超过 1）
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+    volumes:
+      - raggi-qdrant:/qdrant/storage
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -107,3 +116,4 @@ services:
 volumes:
   raggi-data:
   raggi-pg:
+  raggi-qdrant:
