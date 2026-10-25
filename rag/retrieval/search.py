@@ -25,7 +25,7 @@ from rag.core.config import RetrieveConfig
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment
 from rag.retrieval.highlight import make_snippet
-from rag.storage.repos import chunk_prefilter, contexts_for, docs_query, search_chunks
+from rag.storage.repos import chunk_filter, contexts_for, docs_query, search_chunks
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.retrieve")
@@ -195,7 +195,7 @@ def search(
     # 一路带到 SQL 拼装处，那是一条隐式通道：filters 同时扮演两种角色，
     # 任何人把它原样回显或转发就会带出内部状态。
     t_start = time.perf_counter()
-    where = chunk_prefilter(store, filters)
+    where = chunk_filter(store, filters)
     q_seg = segment(q) if cfg.use_jieba else q
     q_vec = embedder.embed_one(q)
     t_embed_ms = (time.perf_counter() - t_start) * 1000.0

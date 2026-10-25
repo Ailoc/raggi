@@ -107,7 +107,25 @@ CDN / 静态
 上传文件仍是共享卷上的路径而不是对象存储 key。跨机器部署要等向量库替换
 （阶段 3）与 S3 原文归档。
 
-### 阶段 3：存储替换（向量，下一步）
+### 阶段 3：存储替换（向量）
+
+#### 3a 结构化过滤（已完成）
+
+- [x] `rag/storage/filters.py`：`ChunkFilter` 把过滤条件变成**数据**
+  （enabled / origin / kb(_ids) / doc_ids / mime|parser_engine 解析出的
+  文档白名单 / 独立分块 / 正文子串），`to_sql()` 只服务当前引擎
+- [x] 检索侧 `chunk_filter()` 返回结构化对象，`search_chunks(where=…)`
+  同时接受对象与旧 SQL 字符串；`chunk_prefilter()` 保留为 SQL 兼容包装
+- [x] 列表侧 `list_filter()`；`chunks_page` 内部改走结构化对象
+- [x] 空集合**直接报错**，恒假必须显式用 `NEVER`（`IN ()` 是语法错误，
+  被吞掉就退化成「不加过滤」）
+- [x] 测试：11 条（渲染/互斥/转义/恒假/兼容入口/真实 Lance 检索）
+  `tests/test_chunk_filter.py`
+
+**下一步（3b，未开始）**：Qdrant 适配器——collection schema、点位
+upsert/delete、`ChunkFilter → qdrant.Filter` 映射、hybrid（dense+sparse/
+全文）与 RRF、分页计数；用 Docker Qdrant 与 LanceDB 跑同一数据集的结果
+对齐；`storage.vector_engine=qdrant` 切换，默认仍 LanceDB。
 
 1. ~~元数据：SQLite → Postgres~~（阶段 2b 已完成）；
 2. 向量：LanceDB → Qdrant（或 Milvus）。必须对齐四件事：

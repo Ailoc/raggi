@@ -20,6 +20,7 @@ from ..sql import (
     scalar_rows,
 )
 from .chunks import (
+    chunk_filter,
     chunk_filters,
     chunk_prefilter,
     chunks_page,
@@ -29,6 +30,7 @@ from .chunks import (
     doc_chunk_index,
     doc_ids_by_attr,
     get_chunk,
+    list_filter,
     search_chunks,
     texts_by_id,
     update_chunk_text,
@@ -64,7 +66,8 @@ delete_doc = delete_document
 
 __all__ = [
     # chunks
-    "chunk_filters", "chunk_prefilter", "chunks_page", "search_chunks", "contexts_for", "delete_chunk",
+    "chunk_filter", "chunk_filters", "chunk_prefilter", "list_filter",
+    "chunks_page", "search_chunks", "contexts_for", "delete_chunk",
     "delete_kb_chunks", "doc_chunk_index", "doc_ids_by_attr", "get_chunk", "texts_by_id",
     "update_chunk_text", "upsert_chunks",
     # documents

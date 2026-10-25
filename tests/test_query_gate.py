@@ -112,8 +112,10 @@ def test_gate_busy_maps_to_503_with_retry_after(monkeypatch, tmp_path):
 def test_search_reports_split_timings(monkeypatch):
     """took_ms 必须包含 embedding；embed_ms/search_ms 加起来对得上。"""
     from rag.retrieval import search as svc
+    from rag.storage.filters import ChunkFilter
 
-    monkeypatch.setattr(svc, "chunk_prefilter", lambda store, filters: None)
+    monkeypatch.setattr(svc, "chunk_filter",
+                        lambda store, filters: ChunkFilter())
     monkeypatch.setattr(svc, "search_chunks", lambda *a, **k: [])
     monkeypatch.setattr(svc, "_doc_meta", lambda store, ids: {})
     monkeypatch.setattr(svc, "_contexts", lambda store, rows, win: {})

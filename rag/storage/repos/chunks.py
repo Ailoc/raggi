@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from ..filters import ChunkFilter, where_sql
 from ..sql import (
     chunk_defaults,
-    escape_like,
     escape_sql,
     fetch_rows,
     fill_missing,
@@ -128,28 +128,26 @@ def chunk_counts_by_doc(store: "LanceStore") -> dict[str, int]:
         vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
 
 
-def chunk_filters(*, doc_id: str = "", kb_id: str = "",
-                  only_standalone: bool = False, q: str = "") -> str | None:
-    """把分块列表的过滤条件翻成 where 子句（**SQL 文本只在这层出现**）。
+def list_filter(*, doc_id: str = "", kb_id: str = "",
+                only_standalone: bool = False, q: str = "") -> ChunkFilter:
+    """分块**列表**的过滤条件（结构化）。
 
     `doc_id` 与 `kb_id` 是**互斥优先**而不是 AND：调用方给了 doc_id 就只按
     文档取，这是前端文档详情页与知识库列表页共用一个端点的前提。
     """
-    conds: list[str] = []
-    if doc_id:
-        conds.append(f"doc_id = '{escape_sql(doc_id)}'")
-    elif kb_id:
-        # kb_id 在入库时即写入每个分块，故库下全部块（含独立分块）都能命中
-        conds.append(f"kb_id = '{escape_sql(kb_id)}'")
-    if only_standalone:
-        # doc_id='' 是「独立分块」的存储形态，须下推到 SQL 而非事后过滤
-        conds.append("doc_id = ''")
-    needle = (q or "").strip()
-    if needle:
-        # 子串过滤下推成 ILIKE（本机实测对中文有效），并且必须过 escape_like：
-        # 查询词含 % 或 _ 时不能当通配符，否则「包含 foo」会变成「foo 开头」。
-        conds.append(f"text ILIKE '%{escape_like(needle)}%'")
-    return " AND ".join(conds) if conds else None
+    return ChunkFilter(
+        doc_ids=(doc_id,) if doc_id else (),
+        kb_id="" if doc_id else kb_id,
+        only_standalone=only_standalone,
+        text_contains=(q or "").strip(),
+    )
+
+
+def chunk_filters(*, doc_id: str = "", kb_id: str = "",
+                  only_standalone: bool = False, q: str = "") -> str | None:
+    """兼容包装：列表过滤的 SQL 文本（旧调用点/测试仍可用）。"""
+    return list_filter(doc_id=doc_id, kb_id=kb_id,
+                       only_standalone=only_standalone, q=q).to_sql()
 
 
 def chunks_page(store: "LanceStore", *, doc_id: str = "", kb_id: str = "",
@@ -169,8 +167,8 @@ def chunks_page(store: "LanceStore", *, doc_id: str = "", kb_id: str = "",
     from ..sql import count_rows, scalar_rows
 
     n = max(1, int(limit))
-    where = chunk_filters(doc_id=doc_id, kb_id=kb_id,
-                          only_standalone=only_standalone, q=q)
+    where = list_filter(doc_id=doc_id, kb_id=kb_id,
+                        only_standalone=only_standalone, q=q).to_sql()
     rows = scalar_rows(store.chunks, cols=LIST_COLS, where=where,
                        order_by=[("ordinal", True), ("chunk_id", True)],
                        limit=n, offset=int(offset) or None)
@@ -197,16 +195,8 @@ SEARCH_COLS = ["chunk_id", "doc_id", "kb_id", "ordinal", "heading_path", "page",
                "edited", "enabled", "origin"]
 
 
-def _in_clause(column: str, ids) -> str:
-    """值集合 → SQL IN (…)。**空集合绝不能写成 `IN ()`**：那是语法错误，
-    而且若被上层 except 吞掉就会退化成「不加这个过滤」，调用方以为过滤过了。
-    """
-    return f"{column} IN (" + ", ".join(
-        f"'{escape_sql(i)}'" for i in ids) + ")"
-
-
-def chunk_prefilter(store: "LanceStore", filters: dict) -> str | None:
-    """把检索过滤条件翻成 chunks 的 where 子句（SQL 文本只在这层出现）。
+def chunk_filter(store: "LanceStore", filters: dict) -> ChunkFilter:
+    """把检索过滤条件翻成**结构化**对象（换引擎时不再解析 SQL）。
 
     这里守着的两件事都**不会报错**，所以必须集中在一个地方：
 
@@ -215,36 +205,29 @@ def chunk_prefilter(store: "LanceStore", filters: dict) -> str | None:
       再套到 chunks 上；解析失败或解析出空集合时**必须产生恒假条件**，
       绝不能跳过该过滤——改前 `if ids is not None` 就是这个意思：
       传 `mime=application/pdf` 却返回全库结果，调用方看不出来。
-
-    `store` 是显式参数。改前它被塞进 `filters["_store"]` 一路带下来，
-    那是一种隐式通道：filters 同时是「用户可传的过滤条件」和
-    「内部携带的对象」，任何人把 filters 原样回显或转发都会带出内部状态。
     """
-    conds: list[str] = []
-    if filters.get("include_disabled") is not True:
-        conds.append("enabled = true")
-    if filters.get("origin"):
-        conds.append(f"origin = '{escape_sql(filters['origin'])}'")
-    if filters.get("kb_id"):
-        conds.append(f"kb_id = '{escape_sql(filters['kb_id'])}'")
-    elif filters.get("kb_ids"):
-        conds.append(_in_clause("kb_id", filters["kb_ids"]))
-    if filters.get("doc_ids"):
-        conds.append(_in_clause("doc_id", filters["doc_ids"]))
-    # DESIGN §7：mime / parser_engine 过滤。
+    doc_sets: list[tuple[str, ...]] = []
     for key in ("mime", "parser_engine"):
         val = filters.get(key)
         if not val:
             continue
         vals = val if isinstance(val, (list, tuple)) else [val]
         ids = doc_ids_by_attr(store, key, vals)
-        # 解析失败（ids 为 None）与解析出空集合，都必须产生**恒假条件**。
-        # 改前这里是 `if ids is not None`，于是查询异常退化成「不加该过滤」——
-        # 传 mime=application/pdf 却返回全库结果，调用方会以为已经过滤过了。
-        # 宁严勿松：返回 0 条是可见的空结果，返回全库是不可见的错误结果。
-        conds.append(_in_clause("doc_id", ids) if ids
-                     else "doc_id IN ('__no_match__')")
-    return " AND ".join(conds) if conds else None
+        doc_sets.append(tuple(ids or ()))
+    kb_ids = filters.get("kb_ids")
+    return ChunkFilter(
+        enabled_only=filters.get("include_disabled") is not True,
+        origin=str(filters.get("origin") or ""),
+        kb_id=str(filters.get("kb_id") or ""),
+        kb_ids=tuple(str(k) for k in (kb_ids or ())),
+        doc_ids=tuple(str(d) for d in (filters.get("doc_ids") or ())),
+        doc_id_sets=tuple(doc_sets),
+    )
+
+
+def chunk_prefilter(store: "LanceStore", filters: dict) -> str | None:
+    """兼容包装：检索过滤的 SQL 文本（旧调用点/测试仍可用）。"""
+    return chunk_filter(store, filters).to_sql()
 
 
 def doc_ids_by_attr(store: "LanceStore", column: str, vals) -> list[str] | None:
@@ -264,7 +247,8 @@ def doc_ids_by_attr(store: "LanceStore", column: str, vals) -> list[str] | None:
 
 
 def search_chunks(store: "LanceStore", *, mode: str = "vector",
-                  vector=None, text: str = "", where: str | None = None,
+                  vector=None, text: str = "",
+                  where: "ChunkFilter | str | None" = None,
                   limit: int = 50, nprobes: int = 20, refine_factor: int = 10,
                   rrf_k: int | None = None, native_reranker=None) -> list[dict]:
     """一次检索查询（vector / fts / hybrid），返回命中行（含分数列）。
@@ -279,6 +263,7 @@ def search_chunks(store: "LanceStore", *, mode: str = "vector",
     """
     from lancedb.rerankers import RRFReranker
 
+    where = where_sql(where)
     tbl = store.chunks
     if mode == "hybrid":
         qb = tbl.search(query_type="hybrid").vector(vector).text(text)
