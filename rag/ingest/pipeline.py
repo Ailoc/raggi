@@ -28,10 +28,11 @@ from rag.parsing.loaders import load_text, load_url
 from rag.parsing.normalize import normalize
 from rag.parsing.router import ALLOWED_ENGINES, route
 from rag.parsing.segment import segment_batch
+from rag.storage.backends import chunk_backend
+from rag.storage.filters import ChunkFilter
 from rag.storage.plan import resolve_plan, stamp_snapshot
 from rag.storage.repos import (
-    escape_sql,
-    fetch_rows,
+    delete_chunks_of_doc,
     find_by_hash,
     get_document,
     jobs,
@@ -418,8 +419,7 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
         # 重解析/重切分：新向量已就绪，此时才清旧块。删除与写入在同一
         # 临界区内完成；向量化失败根本走不到这里，旧分块原样保留。
         if explicit_doc:
-            store.chunks.delete(
-                where=f"doc_id = '{escape_sql(doc_id)}'")
+            delete_chunks_of_doc(store, doc_id)
         upsert_chunks(store, chunk_rows)
         if explicit_doc and old_row and old_row.get("content_hash") == content_hash:
             # 正文没变（重切分 / 换解析引擎但结果一致）：只改小字段。
@@ -577,8 +577,13 @@ def resplit_doc(store: LanceStore, registry: ModelRegistry, doc_id: str,
     plan = resolve_plan(store, settings, kb_id=kb_id, doc_id=doc_id)
 
     # 保留手工块（重解析会整表重建分块，手工块不应被抹掉）
-    manual = fetch_rows(store.chunks.search().where(
-        f"doc_id = '{escape_sql(doc_id)}' AND origin = 'manual'"))
+    manual = chunk_backend(store).rows(
+        cols=["chunk_id", "doc_id", "kb_id", "ordinal", "text", "text_seg",
+              "vector", "embed_model", "origin", "enabled", "edited",
+              "heading_path", "page", "char_start", "char_end",
+              "offset_valid", "original_text", "fts_stale", "token_count",
+              "created_at", "updated_at"],
+        where=ChunkFilter(doc_ids=(doc_id,), origin="manual"))
     keep = [scalar_row(r) for r in manual]
 
     engine = row.get("parser_engine") or "native"

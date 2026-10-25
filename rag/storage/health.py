@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime
 import logging
 
-import pyarrow as pa
 import pyarrow.compute as pc
 
 from .repos.chunks import chunk_counts_by_doc
@@ -45,20 +44,15 @@ CHUNK_FACT_COLS = ["doc_id", "fts_stale", "embed_model"]
 
 
 def _chunk_facts(store: LanceStore) -> tuple[dict[str, int], int, set[str]]:
-    """一次窄列扫描拿到健康检查要的三件事。
+    """一次扫描/滚动拿到健康检查要的三件事（后端分派）。
 
-    改前这三项各扫一遍 chunks（doc_id / fts_stale / embed_model），
-    而且都经 `to_pylist()` 变成 Python 行。这里直接吃 Arrow 表，
-    计数/求和/去重全在 Arrow 里做：同一批行只扫一次，也不产生
-    每行一个 dict 的垃圾。
+    Lance：一次 Arrow 窄列扫描（2 万块实测 40ms → 8–17ms）。
+    Qdrant：scroll 聚合；sparse 向量随点更新，待重建恒为 0。
     """
-    tbl = store.chunks.to_lance().to_table(columns=CHUNK_FACT_COLS)
-    vc = pc.value_counts(tbl.column("doc_id"))
-    counts = {str(v): int(c) for v, c in zip(
-        vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
-    stale = int(pc.sum(pc.cast(tbl.column("fts_stale"), pa.int64())).as_py() or 0)
-    models = {str(m) for m in pc.unique(tbl.column("embed_model")).to_pylist() if m}
-    return counts, stale, models
+    from .backends import chunk_backend
+
+    facts = chunk_backend(store).facts()
+    return facts["counts"], int(facts["fts_stale"]), set(facts["models"])
 
 
 def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
@@ -67,8 +61,11 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
     # doc_count / stated 计数一律走仓储层的 documents 读入口。
     # 这里以前直接读 Lance 那张旧表：元数据真源搬到 SQLite 之后，
     # 新入库一篇就会「列表 8 篇、health 7 篇」，并因此永久 degraded。
+    from .backends import chunk_backend
+
+    backend = chunk_backend(store)
     doc_count = docs_count(store)
-    chunk_count = chunks.count_rows()
+    chunk_count = backend.count()
     # 一次扫描拿到计数 / 待重建 / 模型三项；扫描失败时退回逐项查询，
     # 每项仍能各自汇报"未知"（见下面的 checks_failed）。
     try:
@@ -131,20 +128,21 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
         logger.warning("embed_model 一致性检查失败，健康检查该项未知: %s", e)
 
     # 索引覆盖状态（向量/FTS 是否存在及未索引行数）
-    index_state = {}
-    for col_name in ("vector", "text_seg"):
-        try:
-            exists, unindexed = store._index_state(col_name)
-            index_state[col_name] = {"indexed": exists,
-                                     "unindexed_rows": unindexed}
-        except Exception as e:  # noqa: BLE001
-            # indexed=False 至少不是好消息；unindexed_rows=-1 标出「没查到」
-            index_state[col_name] = {"indexed": False, "unindexed_rows": -1}
-            checks_failed.append(f"index_state:{col_name}")
-            logger.warning("索引状态查询失败 (%s): %s", col_name, e)
+    try:
+        index_state = backend.index_state()
+    except Exception as e:  # noqa: BLE001
+        index_state = {"vector": {"indexed": False, "unindexed_rows": -1},
+                       "text_seg": {"indexed": False, "unindexed_rows": -1}}
+        checks_failed.append("index_state")
+        logger.warning("索引状态查询失败: %s", e)
 
     # 嵌入维度一致性：表中实际向量维度 vs 配置
-    stored_dim = store.vector_dim()
+    try:
+        stored_dim = backend.vector_dim()
+    except Exception as e:  # noqa: BLE001
+        stored_dim = None
+        checks_failed.append("vector_dim")
+        logger.warning("向量维度读取失败: %s", e)
     dim_mismatch = stored_dim is not None and stored_dim != embed_dim
 
     return {

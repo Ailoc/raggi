@@ -996,6 +996,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 - **并发编辑**：`PATCH /chunks/{id}` 可带 `updated_at`（客户端读到的那一版）；期间被别人改过则返回 **409** 而非静默覆盖。不带该字段沿用「最后写入者胜」。
 - **可运维性**：每个响应带 `X-Request-ID`（上游传入则沿用，未捕获异常会把它写进日志并回传引用）；`rate_limit_writes_per_min` 限**写**操作（默认 0=关闭，检索与幂等入库豁免），按调用方分桶，超限返回 429 + `Retry-After`。配了 `redis.url` 时令牌桶走 Redis（多副本共享额度），Redis 不可用退回进程内桶。
 - **共享缓存（多副本）**：`RAG_REDIS__URL` 一配，query embedding 缓存就从"每进程一份"变成 L1 进程内 + L2 Redis（`LayeredCache`）。L2 读失败按未命中、写失败只告警——Redis 挂掉只会变慢，不会 500。默认空值 = 纯进程内，不装 `redis` 依赖也能跑。详见 `docs/ARCH-SCALE-2026-10-25.md`。
+- **向量引擎可切换**：`storage.vector_engine=lance|qdrant` + `storage.qdrant_url`。默认仍是嵌入式 LanceDB；切换前用 `rag migrate --to-qdrant` 迁移分块（含向量），health/stats/检索/编辑/入库全部经 `chunk_backend()` 分派，不直连 Lance 表。已知差异（Qdrant 无 FTS 待重建、乐观并发窗口更宽、RRF K 固定）见 `docs/ARCH-SCALE-2026-10-25.md`。
 - **多副本部署骨架**：`deploy/Dockerfile` + `deploy/docker-compose.yml`（Valkey + Postgres + API ×2 + worker）。元数据可切 Postgres（`storage.meta_engine=postgres` + `storage.postgres_url`；`rag migrate --to-postgres` 复制存量 SQLite）。向量仍是嵌入式 LanceDB 的共享卷：它的写锁是同机 flock，**同一台 Docker 主机上的多进程安全，跨主机不安全**——跨机器部署要等向量库替换（`docs/ARCH-SCALE-2026-10-25.md` 阶段 3）。
 - **本地模型侧车**：Ollama（`ollama serve`）或 vLLM——不进入本进程，避免 torch 依赖污染应用环境；均由 `/api/models/test` 验证。
 - **Python 基线 3.11**（`unstructured` 约束）。

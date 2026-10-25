@@ -26,6 +26,7 @@ from .chunks import (
     chunks_page,
     contexts_for,
     delete_chunk,
+    delete_chunks_of_doc,
     delete_kb_chunks,
     doc_chunk_index,
     doc_ids_by_attr,
@@ -34,6 +35,7 @@ from .chunks import (
     search_chunks,
     texts_by_id,
     update_chunk_text,
+    update_chunks_of_doc,
     upsert_chunks,
 )
 from .documents import (
@@ -68,6 +70,7 @@ __all__ = [
     # chunks
     "chunk_filter", "chunk_filters", "chunk_prefilter", "list_filter",
     "chunks_page", "search_chunks", "contexts_for", "delete_chunk",
+    "delete_chunks_of_doc", "update_chunks_of_doc",
     "delete_kb_chunks", "doc_chunk_index", "doc_ids_by_attr", "get_chunk", "texts_by_id",
     "update_chunk_text", "upsert_chunks",
     # documents

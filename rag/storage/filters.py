@@ -42,12 +42,15 @@ class ChunkFilter:
     kb_id: str = ""
     kb_ids: tuple[str, ...] = ()
     doc_ids: tuple[str, ...] = ()
+    chunk_ids: tuple[str, ...] = ()
     # mime / parser_engine 在 documents 上，先解析成 doc_id 白名单再套到分块；
     # 其中一个集合为空 ⇒ 整体恒假（不能跳过该过滤）
     doc_id_sets: tuple[tuple[str, ...], ...] = ()
     # 列表侧
     only_standalone: bool = False
     text_contains: str = ""
+    # 上下文窗口：(doc_id, lo, hi) 的并集（跨文档一次取）
+    ranges: tuple[tuple[str, int, int], ...] = ()
 
     def is_never(self) -> bool:
         return any(len(ids) == 0 for ids in self.doc_id_sets)
@@ -69,11 +72,18 @@ class ChunkFilter:
             conds.append(in_clause("kb_id", self.kb_ids))
         if self.doc_ids:
             conds.append(in_clause("doc_id", self.doc_ids))
+        if self.chunk_ids:
+            conds.append(in_clause("chunk_id", self.chunk_ids))
         for ids in self.doc_id_sets:
             conds.append(in_clause("doc_id", ids) if ids else NEVER)
         if self.only_standalone:
             # doc_id='' 是「独立分块」的存储形态，必须下推而不是事后过滤
             conds.append("doc_id = ''")
+        if self.ranges:
+            per_doc = " OR ".join(
+                f"(doc_id = '{escape_sql(d)}' AND ordinal BETWEEN {int(lo)} AND {int(hi)})"
+                for d, lo, hi in self.ranges)
+            conds.append(f"({per_doc})")
         needle = (self.text_contains or "").strip()
         if needle:
             # 子串过滤下推成 ILIKE（对中文有效）；% / _ 必须当字面量

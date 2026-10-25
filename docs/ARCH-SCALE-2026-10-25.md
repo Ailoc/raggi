@@ -143,9 +143,38 @@ CDN / 静态
   待重建恒为 0）；`vector_dim()` 读 collection 配置
 - [x] 10 条真实 Qdrant 测试：加 page 稳定性、过滤、facts、vector_dim
 
-**下一步（3c，接线）**：把 `chunks_page` / health / 分块编辑 / 入库写路径
-改为经后端分派；`storage.vector_engine=qdrant` 切换；Lance→Qdrant 迁移工具；
-E2E 回归。
+#### 3c 接线（已完成）
+
+- [x] `rag/storage/backends.py`：`chunk_backend(store)` 分派；Lance 实现委托
+  原有代码路径（默认行为逐字节不变），Qdrant 实现覆盖读、写、检索、健康
+- [x] 仓储与业务代码不再直连 Lance 表：`chunks_page` / `get_chunk` /
+  `doc_chunk_index` / `contexts_for` / `texts_by_id` / `chunk_counts_by_doc` /
+  检索 / 分块编辑 / 启停 / 删除 / 入库写路径 / health / stats 全部走分派
+- [x] 配置：`storage.vector_engine = lance|qdrant`、`storage.qdrant_url`、
+  `storage.qdrant_collection`；装配在 `server.build_ctx()`
+- [x] 迁移：`rag migrate --to-qdrant`（把 Lance 分块连向量一起批量复制，幂等）
+- [x] 端到端测试：入库 → 检索 → 分块列表/详情 → 编辑（重向量化）→ 停用 →
+  删除 → 健康检查 → 删除文档，全程走 Qdrant（`tests/test_qdrant_wiring.py`）
+
+**切换步骤**
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d qdrant
+export RAG_STORAGE__QDrant_URL=http://127.0.0.1:6333   # 实际键名见下
+python -m rag migrate --to-qdrant --data ./data
+# 把 storage.vector_engine 设为 qdrant 并重启
+```
+
+**已知差异（如实记录）**
+
+- Qdrant 的 sparse 索引随写入维护，**没有** Lance 的 `fts_stale`/重建概念，
+  health 里该值恒为 0；
+- 乐观并发：Lance 用单语句条件更新，Qdrant 是「读-比对-写」，多副本同时
+  编辑同一块时有极小覆盖窗口；
+- `text_contains` 依赖 Qdrant 的 payload 全文索引，中文分词粒度与 tantivy
+  的 jieba 不完全一致（列表过滤场景）；
+- RRF 的 K 由 Qdrant 固定（Lance 可配 `rrf_k`），融合分数的绝对值不可比，
+  但「越大越相关」的排序口径一致。
 
 1. ~~元数据：SQLite → Postgres~~（阶段 2b 已完成）；
 2. 向量：LanceDB → Qdrant（或 Milvus）。必须对齐四件事：

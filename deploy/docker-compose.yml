@@ -62,6 +62,9 @@ services:
       # 元数据：多副本共享 Postgres（默认单机仍是 SQLite）
       RAG_STORAGE__META_ENGINE: postgres
       RAG_STORAGE__POSTGRES_URL: postgresql://postgres:raggi@postgres:5432/raggi
+      # 向量引擎：迁移完成后再切（默认 lance，嵌入式、零外部服务）
+      # RAG_STORAGE__VECTOR_ENGINE: qdrant
+      # RAG_STORAGE__QDRANT_URL: http://qdrant:6333
       # 检索侧 embedding 每进程并发上限：超出直接 503 + Retry-After，
       # 不和入库抢 provider。按 provider 的真实配额调整。
       RAG_EMBED__QUERY_CONCURRENCY: "32"

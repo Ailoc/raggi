@@ -20,6 +20,7 @@ import logging
 import os
 from pathlib import Path
 
+from rag.core.errors import Invalid
 from rag.core.maintenance import mark_maintenance_done
 
 log = logging.getLogger("raggi")
@@ -64,6 +65,19 @@ def build_ctx():
     store = LanceStore(backend, settings.embed.dim)
     log.info("存储后端：%s → %s，写锁：%s", backend.kind, backend.lance_uri(),
              store.lock_kind)
+    if settings.storage.vector_engine == "qdrant":
+        url = str(settings.storage.qdrant_url or "")
+        if not url:
+            raise Invalid("vector_engine=qdrant 需要同时配置 storage.qdrant_url")
+        from rag.storage.qdrant_store import QdrantChunkStore
+
+        store.qdrant = QdrantChunkStore(
+            url, collection=settings.storage.qdrant_collection,
+            dim=settings.embed.dim)
+        store.qdrant.ensure_collection()
+        store.vector_engine = "qdrant"
+        log.info("向量引擎：qdrant → %s（collection=%s）", url,
+                 settings.storage.qdrant_collection)
 
     # 分块方案两级化：把存量知识库里「继承全局」的占位 0 物化为具体值
     from rag.storage import plan as chunking
@@ -144,6 +158,8 @@ def main() -> None:
                     help="migrate：只校验行数一致性，不改变已有 SQLite 数据")
     ap.add_argument("--to-postgres", action="store_true",
                     help="migrate：把 SQLite 元数据复制到 storage.postgres_url")
+    ap.add_argument("--to-qdrant", action="store_true",
+                    help="migrate：把 Lance 的分块复制到 storage.qdrant_url")
     ap.add_argument("--processes", default=None,
                     help="只读 API 进程数：auto（默认，min(cpu,4)）或数字；"
                          "1 = 原来的单进程形态。覆盖 RAG_API_PROCESSES "
@@ -207,6 +223,24 @@ def main() -> None:
         from rag.storage.tables import LanceStore
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.to_qdrant:
+            url = str(settings.storage.qdrant_url or "")
+            if not url:
+                log.error("--to-qdrant 需要先配置 storage.qdrant_url")
+                raise SystemExit(2)
+            from rag.storage.qdrant_store import QdrantChunkStore, copy_from_lance
+
+            store = LanceStore(build_backend(settings.storage, settings.data_dir),
+                               settings.embed.dim)
+            target = QdrantChunkStore(
+                url, collection=settings.storage.qdrant_collection,
+                dim=settings.embed.dim)
+            target.ensure_collection()
+            n = copy_from_lance(store.chunks, target)
+            log.info("已复制 %d 个分块到 Qdrant；把 storage.vector_engine 设为 "
+                     "qdrant 并重启即可切换", n)
+            return
 
         if args.to_postgres:
             from rag.storage.meta import MetaStore

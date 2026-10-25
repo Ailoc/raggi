@@ -4,9 +4,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import pyarrow as pa
-import pyarrow.compute as pc
-
+from ..backends import chunk_backend
 from ..filters import ChunkFilter, where_sql
 from ..sql import (
     chunk_defaults,
@@ -14,8 +12,6 @@ from ..sql import (
     fetch_rows,
     fill_missing,
     now_iso,
-    quote_in,
-    scalar_rows,
     table_columns,
 )
 
@@ -42,14 +38,30 @@ def _fill_chunk_defaults(store: "LanceStore", rows: list[dict]) -> list[dict]:
                         chunk_defaults(store.dim), blob_col="vector")
 
 
-def upsert_chunks(store: "LanceStore", rows: list[dict]) -> None:
-    """按 chunk_id 幂等写入/更新分块。"""
+def _lance_upsert(store: "LanceStore", rows: list[dict]) -> None:
     if not rows:
         return
     (store.chunks.merge_insert("chunk_id")
      .when_matched_update_all()
      .when_not_matched_insert_all()
      .execute(_fill_chunk_defaults(store, rows)))
+
+
+def upsert_chunks(store: "LanceStore", rows: list[dict]) -> None:
+    """按 chunk_id 幂等写入/更新分块（后端分派）。"""
+    chunk_backend(store).upsert(rows)
+
+
+def _lance_update_text(store: "LanceStore", chunk_id: str, values: dict,
+                       *, expect_updated_at: str | None = None) -> bool:
+    where = f"chunk_id = '{escape_sql(chunk_id)}'"
+    if expect_updated_at:
+        where += f" AND updated_at = '{escape_sql(expect_updated_at)}'"
+        # LanceDB 返回 UpdateResult（rows_updated / version），不是整数
+        return store.chunks.update(where=where,
+                                   values=values).rows_updated > 0
+    store.chunks.update(where=where, values=values)
+    return True
 
 
 def update_chunk_text(
@@ -64,15 +76,11 @@ def update_chunk_text(
     offset_valid: bool = False,
     expect_updated_at: str | None = None,
 ) -> bool:
-    """编辑分块原文并重新向量化（一次 update 落地）。
+    """编辑分块原文并重新向量化（后端分派）。
 
-    original_text 仅在「首次编辑」时由调用方传入（非 None），
-    后续编辑传 None 以保留最初原文。
-
-    expect_updated_at 给定时做**乐观并发**校验：条件里带上调用方
-    读到的 updated_at，行已被别人改过就更新 0 行——返回 False 让调用方
-    报 409，而不是静默覆盖别人的修改。未提供该参数时恒为 True（沿用
-    「最后写入者胜」的旧行为，便于脚本与旧客户端不受影响）。
+    乐观并发：`expect_updated_at` 给定时，行已被别人改过返回 False。
+    Qdrant 后端只能「读-比对-写」，窗口比 Lance 的单语句条件更宽——
+    多副本并发编辑同一块时，极小的概率会覆盖；这是已知差异。
     """
     values: dict = {
         "text": text,
@@ -81,23 +89,42 @@ def update_chunk_text(
         "embed_model": embed_model,
         "edited": True,
         "offset_valid": offset_valid,
-        "fts_stale": True,          # 待重建 FTS（ensure_fts_index 负责清除）
+        "fts_stale": True,          # Lance 侧待重建 FTS；Qdrant 忽略
         "updated_at": now_iso(),
     }
     if original_text is not None:
         values["original_text"] = original_text
-    where = f"chunk_id = '{escape_sql(chunk_id)}'"
-    if expect_updated_at:
-        where += f" AND updated_at = '{escape_sql(expect_updated_at)}'"
-        # LanceDB 返回 UpdateResult（rows_updated / version），不是整数
-        return store.chunks.update(where=where,
-                                   values=values).rows_updated > 0
-    store.chunks.update(where=where, values=values)
-    return True
+    return chunk_backend(store).update_text(
+        chunk_id=chunk_id, values=values, expect_updated_at=expect_updated_at)
+
+
+def _lance_delete(store: "LanceStore", where: ChunkFilter) -> None:
+    sql = where.to_sql()
+    if not sql:
+        raise ValueError("删除分块必须带过滤条件")
+    store.chunks.delete(where=sql)
 
 
 def delete_chunk(store: "LanceStore", chunk_id: str) -> None:
-    store.chunks.delete(where=f"chunk_id = '{escape_sql(chunk_id)}'")
+    chunk_backend(store).delete(ChunkFilter(chunk_ids=(chunk_id,)))
+
+
+def _lance_update(store: "LanceStore", where: ChunkFilter, values: dict) -> int:
+    sql = where.to_sql()
+    if not sql:
+        raise ValueError("更新分块必须带过滤条件")
+    res = store.chunks.update(where=sql, values=values)
+    return int(getattr(res, "rows_updated", 0) or 0)
+
+
+def delete_chunks_of_doc(store: "LanceStore", doc_id: str) -> None:
+    """删掉某文档的全部分块（后端分派）。"""
+    chunk_backend(store).delete(ChunkFilter(doc_ids=(doc_id,)))
+
+
+def update_chunks_of_doc(store: "LanceStore", doc_id: str, values: dict) -> int:
+    """按文档批量改分块字段（移动知识库时改 kb_id）。"""
+    return chunk_backend(store).update(ChunkFilter(doc_ids=(doc_id,)), values)
 
 
 def delete_kb_chunks(store: "LanceStore", kb_id: str) -> None:
@@ -107,7 +134,7 @@ def delete_kb_chunks(store: "LanceStore", kb_id: str) -> None:
     但 `doc_id=""` 的独立分块不属于任何文档，漏删会留下挂在已删除
     kb_id 下、且仍能被检索命中的数据。
     """
-    store.chunks.delete(where=f"kb_id = '{escape_sql(kb_id)}'")
+    chunk_backend(store).delete(ChunkFilter(kb_id=kb_id))
 
 
 def chunk_counts_by_doc(store: "LanceStore") -> dict[str, int]:
@@ -122,10 +149,7 @@ def chunk_counts_by_doc(store: "LanceStore") -> dict[str, int]:
     - 「取回全部 chunk 行再数」——那会把 text（乃至 vector）带进 Python；
     - 「每个 doc 一次 `count_rows(filter=…)`」——20 篇文档就是 20 次 ~1.2ms 的扫描。
     """
-    values = [r["doc_id"] for r in scalar_rows(store.chunks, cols=["doc_id"])]
-    vc = pc.value_counts(pa.chunked_array([values]))
-    return {str(v): int(c) for v, c in zip(
-        vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
+    return chunk_backend(store).facts()["counts"]
 
 
 def list_filter(*, doc_id: str = "", kb_id: str = "",
@@ -164,15 +188,17 @@ def chunks_page(store: "LanceStore", *, doc_id: str = "", kb_id: str = "",
     次级排序键必须是 chunk_id：`ordinal` **只在单文档内唯一**，按库或
     不带条件列时它会大量重复，只按 ordinal 排序的分页在并列处会重复/漏项。
     """
-    from ..sql import count_rows, scalar_rows
+
+    from ..backends import chunk_backend
 
     n = max(1, int(limit))
     where = list_filter(doc_id=doc_id, kb_id=kb_id,
-                        only_standalone=only_standalone, q=q).to_sql()
-    rows = scalar_rows(store.chunks, cols=LIST_COLS, where=where,
-                       order_by=[("ordinal", True), ("chunk_id", True)],
-                       limit=n, offset=int(offset) or None)
-    return rows, count_rows(store.chunks, where)
+                        only_standalone=only_standalone, q=q)
+    backend = chunk_backend(store)
+    rows = backend.rows(cols=LIST_COLS, where=where,
+                        order_by=[("ordinal", True), ("chunk_id", True)],
+                        limit=n, offset=int(offset) or None)
+    return rows, backend.count(where)
 
 
 # 检索命中行真正需要返回的列。必须显式投影：不写时 LanceDB 返回**全部列**，
@@ -251,6 +277,28 @@ def search_chunks(store: "LanceStore", *, mode: str = "vector",
                   where: "ChunkFilter | str | None" = None,
                   limit: int = 50, nprobes: int = 20, refine_factor: int = 10,
                   rrf_k: int | None = None, native_reranker=None) -> list[dict]:
+    """检索（后端分派）：Lance 走原生 hybrid，Qdrant 走 dense+sparse+RRF。"""
+    from ..backends import chunk_backend
+    from ..filters import ChunkFilter as _CF
+
+    backend = chunk_backend(store)
+    if backend.engine == "qdrant":
+        if not isinstance(where, (_CF, type(None))):
+            raise TypeError("Qdrant 后端需要结构化 ChunkFilter")
+        return backend.search(
+            mode=mode, vector=vector, text=text, where=where,
+            limit=limit, candidate_k=max(int(limit), 50))
+    return _lance_search(
+        store, mode=mode, vector=vector, text=text, where=where,
+        limit=limit, nprobes=nprobes, refine_factor=refine_factor,
+        rrf_k=rrf_k, native_reranker=native_reranker)
+
+
+def _lance_search(store: "LanceStore", *, mode: str = "vector",
+                  vector=None, text: str = "",
+                  where: "ChunkFilter | str | None" = None,
+                  limit: int = 50, nprobes: int = 20, refine_factor: int = 10,
+                  rrf_k: int | None = None, native_reranker=None) -> list[dict]:
     """一次检索查询（vector / fts / hybrid），返回命中行（含分数列）。
 
     hybrid 走 LanceDB **原生一次查询**（`query_type="hybrid"`），
@@ -292,8 +340,10 @@ def _exec(qb) -> list[dict]:
 
 
 def get_chunk(store: "LanceStore", chunk_id: str) -> dict | None:
-    rows = scalar_rows(store.chunks, cols=LIST_COLS,
-                       where=f"chunk_id = '{escape_sql(chunk_id)}'", limit=1)
+    from ..backends import chunk_backend
+
+    rows = chunk_backend(store).rows(
+        cols=LIST_COLS, where=ChunkFilter(chunk_ids=(chunk_id,)), limit=1)
     if not rows:
         return None
     from ..sql import scalar_row
@@ -307,9 +357,11 @@ def doc_chunk_index(store: "LanceStore", doc_id: str) -> list[dict]:
     排序交给 Lance 下推（`order_by`）而不是取回后 `rows.sort(...)`：
     投影 + 排序 + 限量都确定在 Rust 侧完成。
     """
-    return scalar_rows(store.chunks, cols=DOC_INDEX_COLS,
-                       where=f"doc_id = '{escape_sql(doc_id)}'",
-                       order_by=[("ordinal", True)])
+    from ..backends import chunk_backend
+
+    return chunk_backend(store).rows(
+        cols=DOC_INDEX_COLS, where=ChunkFilter(doc_ids=(doc_id,)),
+        order_by=[("ordinal", True)])
 
 
 def contexts_for(store: "LanceStore", ranges: dict[str, tuple[int, int]]
@@ -326,12 +378,10 @@ def contexts_for(store: "LanceStore", ranges: dict[str, tuple[int, int]]
     items = [(d, lo, hi) for d, (lo, hi) in ranges.items() if d]
     if not items:
         return {}
-    ids = quote_in([d for d, _, _ in items])
-    per_doc = " OR ".join(
-        f"(doc_id = '{escape_sql(d)}' AND ordinal BETWEEN {int(lo)} AND {int(hi)})"
-        for d, lo, hi in items)
-    rows = scalar_rows(store.chunks, cols=CONTEXT_COLS,
-                       where=f"doc_id IN ({ids}) AND ({per_doc})")
+    from ..backends import chunk_backend
+
+    rows = chunk_backend(store).rows(
+        cols=CONTEXT_COLS, where=ChunkFilter(ranges=tuple(items)))
     out: dict[str, dict[int, str]] = {}
     for r in rows:
         out.setdefault(str(r.get("doc_id") or ""), {})[int(r["ordinal"])] = \
@@ -344,6 +394,8 @@ def texts_by_id(store: "LanceStore", chunk_ids) -> dict[str, str]:
     ids = [str(c) for c in dict.fromkeys(chunk_ids) if c]
     if not ids:
         return {}
-    rows = scalar_rows(store.chunks, cols=["chunk_id", "text"], ids=ids,
-                       id_column="chunk_id")
+    from ..backends import chunk_backend
+
+    rows = chunk_backend(store).rows(
+        cols=["chunk_id", "text"], ids=ids, id_column="chunk_id")
     return {str(r["chunk_id"]): (r.get("text") or "") for r in rows}

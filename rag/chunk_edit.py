@@ -13,16 +13,15 @@ import uuid
 from rag.core.errors import EditConflict
 from rag.models.embeddings import Embedder
 from rag.parsing.segment import segment, segment_batch
+from rag.storage.backends import chunk_backend
+from rag.storage.filters import ChunkFilter
 from rag.storage.repos import (
     delete_chunk,
-    escape_sql,
-    fetch_rows,
     get_document,
     set_doc_fields,
     update_chunk_text,
     upsert_chunks,
 )
-from rag.storage.sql import scalar
 from rag.storage.tables import LanceStore
 
 logger = logging.getLogger("raggi.chunk_edit")
@@ -34,16 +33,20 @@ logger = logging.getLogger("raggi.chunk_edit")
 MANUAL_DOC_ID = "manual-notes"
 
 
+def _fts_stale_count(store: LanceStore) -> int:
+    if chunk_backend(store).engine == "qdrant":
+        return 0  # sparse 向量随点位更新，没有待重建状态
+    return int(store.chunks.count_rows(filter="fts_stale = true"))
+
+
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def get_chunk(store: LanceStore, chunk_id: str) -> dict | None:
-    rows = fetch_rows(store.chunks.search().where(
-        f"chunk_id = '{escape_sql(chunk_id)}'"))
-    if not rows:
-        return None
-    return {k: scalar(v) for k, v in rows[0].items()}
+    from rag.storage.repos.chunks import get_chunk as _repo_get_chunk
+
+    return _repo_get_chunk(store, chunk_id)
 
 
 def touch_doc_count(store: LanceStore, doc_id: str) -> None:
@@ -51,8 +54,9 @@ def touch_doc_count(store: LanceStore, doc_id: str) -> None:
     if not doc_id:
         return
     try:
-        n = int(store.chunks.count_rows(
-            filter=f"doc_id = '{escape_sql(doc_id)}'"))
+        from rag.storage.filters import ChunkFilter
+
+        n = int(chunk_backend(store).count(ChunkFilter(doc_ids=(doc_id,))))
         set_doc_fields(store, doc_id, chunk_count=n,
                        updated_at=_now())
     except Exception as e:  # noqa: BLE001
@@ -67,15 +71,7 @@ def touch_doc_count(store: LanceStore, doc_id: str) -> None:
 def _next_ordinal(store: LanceStore, doc_id: str) -> int:
     """该文档当前最大 ordinal + 1（删除块后仍单调，避免冲突）。"""
     try:
-        from lancedb.query import ColumnOrdering
-
-        rows = fetch_rows(store.chunks.search().where(
-            f"doc_id = '{escape_sql(doc_id)}'").select(
-            ["ordinal"]).order_by(
-            [ColumnOrdering(column_name="ordinal",
-                              ascending=False)]).limit(1))
-        if rows:
-            return int(rows[0]["ordinal"]) + 1
+        return int(chunk_backend(store).max_ordinal(doc_id)) + 1
     except Exception as e:  # noqa: BLE001
         # 回落 0 意味着可能与既有分块撞号（ordinal 是分页与上下文窗口排序的依据）。
         # 这里刻意不抛：读不出 max 时「加一块」比「加不了」对用户更友好，
@@ -120,7 +116,7 @@ def edit_chunk(store: LanceStore, embedder: Embedder, chunk_id: str,
         touch_doc_count(store, row.get("doc_id", ""))
     # FTS 一致性治理：小库同步重建；大库累计 stale（由 health 展示）
     store.refresh_fts_after_edit()
-    stale = int(store.chunks.count_rows(filter="fts_stale = true"))
+    stale = _fts_stale_count(store)
     return {"chunk_id": chunk_id, "edited": True,
             "embed_model": embedder.model, "fts_stale": stale}
 
@@ -183,7 +179,7 @@ def batch_edit_chunks(store: LanceStore, embedder: Embedder,
             touch_doc_count(store, doc_id)
 
     store.refresh_fts_after_edit()
-    stale = int(store.chunks.count_rows(filter="fts_stale = true"))
+    stale = _fts_stale_count(store)
     return {"edited": len(rows), "embed_model": embedder.model,
             "fts_stale": stale}
 
@@ -249,9 +245,9 @@ def set_chunk_enabled(store: LanceStore, chunk_id: str,
         raise KeyError("chunk not found")
     # 与其余写路径一致地持锁，避免与并发入库/编辑争抢同一块
     with store.write_lock():
-        store.chunks.update(
-            where=f"chunk_id = '{escape_sql(chunk_id)}'",
-            values={"enabled": bool(enabled), "updated_at": _now()})
+        chunk_backend(store).update(
+            ChunkFilter(chunk_ids=(chunk_id,)),
+            {"enabled": bool(enabled), "updated_at": _now()})
     return {"chunk_id": chunk_id, "enabled": bool(enabled)}
 
 
@@ -275,10 +271,9 @@ def set_chunks_enabled(store: LanceStore, chunk_ids: list[str],
                        + (f" 等 {len(missing)} 个" if len(missing) > 5 else ""))
     ts = _now()
     with store.write_lock():
-        for cid in known:
-            store.chunks.update(
-                where=f"chunk_id = '{escape_sql(cid)}'",
-                values={"enabled": bool(enabled), "updated_at": ts})
+        chunk_backend(store).update(
+            ChunkFilter(chunk_ids=tuple(known)),
+            {"enabled": bool(enabled), "updated_at": ts})
     return {"updated": len(known), "enabled": bool(enabled)}
 
 

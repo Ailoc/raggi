@@ -49,6 +49,11 @@ class StorageConfig(BaseModel):
     # 旧表在 LanceDB 里保留不删，所以回退不需要恢复备份。
     meta_engine: Literal["auto", "sqlite", "lancedb", "postgres"] = "auto"
 
+    # 向量引擎：lance（默认，嵌入式）/ qdrant（服务化，多副本共享）
+    vector_engine: Literal["lance", "qdrant"] = "lance"
+    qdrant_url: str = ""
+    qdrant_collection: str = "chunks"
+
     # Postgres 元数据（meta_engine=postgres 时生效）。
     # 多副本/跨机器形态用它替掉 SQLite；空 = 不用。
     postgres_url: str = ""

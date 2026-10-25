@@ -83,6 +83,9 @@ def to_qdrant_filter(where: ChunkFilter | None):
     if where.doc_ids:
         must.append(qm.FieldCondition(
             key="doc_id", match=qm.MatchAny(any=list(where.doc_ids))))
+    if where.chunk_ids:
+        must.append(qm.FieldCondition(
+            key="chunk_id", match=qm.MatchAny(any=list(where.chunk_ids))))
     for ids in where.doc_id_sets:
         if not ids:
             # 恒假：绝不退化成"不加这个过滤"（那会返回全库）
@@ -94,6 +97,16 @@ def to_qdrant_filter(where: ChunkFilter | None):
     if where.only_standalone:
         must.append(qm.FieldCondition(
             key="doc_id", match=qm.MatchValue(value="")))
+    if where.ranges:
+        should: list = [
+            qm.Filter(must=[
+                qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=d)),
+                qm.FieldCondition(key="ordinal", range=qm.Range(
+                    gte=int(lo), lte=int(hi))),
+            ])
+            for d, lo, hi in where.ranges
+        ]
+        must.append(qm.Filter(should=should))
     if (where.text_contains or "").strip():
         # 依赖 payload text 上的全文索引；中文分词粒度由 Qdrant 决定，
         # 与 tantivy 的 jieba 分词不完全一致（列在这里作为已知差异）。
@@ -245,7 +258,15 @@ class QdrantChunkStore:
             vec = r.get("vector")
             if vec is None:
                 raise ValueError("upsert_chunks 需要 vector 列")
-            payload = {k: r.get(k) for k in PAYLOAD_COLS if k in r}
+            # 缺列按 schema 默认值补齐（与 Lance 的 fill_missing 同义）：
+            # 入库流水线并不会显式给 enabled/origin，直接取 None 会让
+            # 「只看启用块」的过滤把所有新块都排除掉。
+            from .sql import chunk_defaults
+
+            defaults = chunk_defaults(self.dim)
+            payload = {k: defaults.get(k) for k in PAYLOAD_COLS}
+            payload.update({k: r[k] for k in PAYLOAD_COLS
+                            if k in r and r[k] is not None})
             payload["chunk_id"] = str(r["chunk_id"])
             payload[ORD_SORT] = _ord_sort(r.get("ordinal"), r["chunk_id"])
             indices, values = sparse_vector(str(r.get("text") or ""))
@@ -368,3 +389,33 @@ def _row(point, *, distance: float | None = None,
     if relevance is not None:
         row["_relevance_score"] = float(relevance)
     return row
+
+
+def copy_from_lance(chunks_table, qdrant: "QdrantChunkStore",
+                    *, batch: int = 500) -> int:
+    """把 Lance 的分块（含向量）批量复制到 Qdrant（幂等，可重复执行）。
+
+    切换引擎前的一次性迁移：只搬 chunks；documents/jobs 等元数据仍在
+    SQLite/Lance 上。搬完把 storage.vector_engine 设为 qdrant 并重启即可。
+    """
+    from .sql import scalar_rows
+
+    total = 0
+    offset = 0
+    while True:
+        rows = scalar_rows(
+            chunks_table, cols=["chunk_id", "doc_id", "kb_id", "ordinal",
+                                "heading_path", "page", "text", "text_seg",
+                                "vector", "embed_model", "origin", "enabled",
+                                "edited", "char_start", "char_end",
+                                "offset_valid", "token_count", "created_at",
+                                "updated_at"],
+            limit=batch, offset=offset or None)
+        if not rows:
+            break
+        qdrant.upsert_chunks(rows)
+        total += len(rows)
+        offset += batch
+        if len(rows) < batch:
+            break
+    return total

@@ -11,6 +11,7 @@ import threading
 import time
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import lancedb
 import pyarrow as pa
@@ -74,6 +75,9 @@ class LanceStore:
         # FTS 重建与 compaction 的节流时间戳（monotonic 秒；None = 从未做过）
         self._last_fts_at: float | None = None
         self._last_compact_at: float | None = None
+        # 向量引擎：默认嵌入式 LanceDB；qdrant 时由装配层注入 qdrant 句柄
+        self.vector_engine = "lance"
+        self.qdrant = None
         self._ensure_tables()
         # 后台索引维护：单线程 + 去抖合并，入库响应不等待索引重建
         self._maint_lock = threading.Lock()
@@ -394,6 +398,8 @@ class LanceStore:
                      num_sub_vectors=n_sub), "IVF_PQ"
 
     def ensure_vector_index(self, force: bool = False) -> None:
+        if self.vector_engine == "qdrant":
+            return
         tbl = self.chunks
         try:
             with self._lock:
@@ -432,6 +438,8 @@ class LanceStore:
         raise last if last else RuntimeError("FTS 索引创建失败")
 
     def ensure_fts_index(self, force: bool = False) -> None:
+        if self.vector_engine == "qdrant":
+            return  # Qdrant 的 sparse 索引随写入维护
         """重建全文索引（tantivy），带**积压阈值 + 最小间隔**双重节流。
 
         改前的策略是「行数 < 50000 就每次入库都全量重建」——听起来无害，
@@ -490,6 +498,8 @@ class LanceStore:
             self.schedule_maintenance(debounce_seconds=1.0, force_fts=True)
 
     def ensure_scalar_indexes(self, force: bool = False) -> None:
+        if self.vector_engine == "qdrant":
+            return
         try:
             with self._lock:
                 # 注意：不要索引 chunks.status —— 该列不存在于 schema，
@@ -602,9 +612,11 @@ class LanceStore:
         # docs_count / list_jobs 已提到模块级导入 —— 这条边不是环：
         # repos 各模块只在注解里用 LanceStore（都在 `if TYPE_CHECKING` 下），
         # 由 tests/test_import_order.py 的双向探针盯着这一点。
-        out = {
+        from .backends import chunk_backend
+
+        out: dict[str, Any] = {
             "doc_count": docs_count(self),
-            "chunk_count": self.chunks.count_rows(),
+            "chunk_count": chunk_backend(self).count(),
         }
         try:
             _rows, out["job_count"] = _list_jobs(self, limit=1)

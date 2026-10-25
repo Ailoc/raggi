@@ -31,6 +31,7 @@ from ..sql import (
     scalar_rows,
     table_columns,
 )
+from . import chunks as _chunks_repo
 from ._engine import meta_of as _meta
 
 if TYPE_CHECKING:
@@ -185,7 +186,7 @@ def delete_document(store: "LanceStore", doc_id: str, backend=None) -> None:
     # 必须在默认日志级别下可见。
     with store.write_lock():
         name = stored_file(store, doc_id)
-        store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
+        _chunks_repo.delete_chunks_of_doc(store, doc_id)
         _delete_doc_rows(store, [doc_id])
     if name and backend is not None:
         try:
@@ -220,7 +221,7 @@ def delete_documents(store: "LanceStore", doc_ids: list[str],
         names = [str(found[i].get("stored_file") or "")
                  for i in found if found[i].get("stored_file")]
         for doc_id in known:
-            store.chunks.delete(where=f"doc_id = '{escape_sql(doc_id)}'")
+            _chunks_repo.delete_chunks_of_doc(store, doc_id)
         _delete_doc_rows(store, known)
     # 归档在元数据删除之后清理：同样的「先删行、后删文件」顺序。
     if backend is not None:
@@ -458,8 +459,7 @@ def update_metadata(store: "LanceStore", doc_id: str, *,
         # 与入库/删除同一条并发纪律：读—改—写必须在写锁内
         with store.write_lock():
             _update_doc_row(store, doc_id, values)
-            store.chunks.update(where=f"doc_id = '{escape_sql(doc_id)}'",
-                                values={"kb_id": target})
+            _chunks_repo.update_chunks_of_doc(store, doc_id, {"kb_id": target})
         return get_document(store, doc_id)
 
     _update_doc_row(store, doc_id, values)
