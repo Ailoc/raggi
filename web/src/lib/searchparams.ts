@@ -103,7 +103,11 @@ export function paramsToBody(
     mode: values.mode || DEFAULTS.mode,
   };
   const topK = Number(values.top_k || DEFAULTS.top_k);
-  body.top_k = Number.isFinite(topK) && topK > 0 ? topK : 8;
+  // 上限与问答接口对齐：返回条数直接决定证据卡数量（每张都是玻璃面 +
+  // 若干图标），曾经可以填到 200，一次检索就把页面撑成上百块卡片。
+  body.top_k = Number.isFinite(topK)
+    ? Math.min(50, Math.max(1, Math.round(topK)))
+    : 8;
   for (const p of PARAMS) {
     if (p.key === "mode" || p.key === "top_k" || p.key === "kb_id"
       || FILTER_KEYS.has(p.key)) continue;

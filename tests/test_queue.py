@@ -105,23 +105,26 @@ def test_async_submit_returns_immediately(tmp_path):
 
     回归防护：这正是「上传大文件时请求一直挂着」的根因——
     同步模式下 HTTP 连接要等到整条流水线结束。
-
-    判据用「延迟 800ms 的流水线是否被等完」而不是绝对毫秒阈值：
-    绝对阈值会被与流水线无关的一次性成本（校验器构建、LanceDB 首次
-    写入）击穿，测的是环境噪声而不是回归。
     """
-    c = _client_with(_VerySlowEmbedder(), tmp_path)
-    t0 = time.perf_counter()
-    r = c.post("/api/documents/text",
-                json={"text": "异步入库内容 " * 20, "title": "async"},
-                params={"wait": "false"})
-    elapsed = (time.perf_counter() - t0) * 1000
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["status"] == "queued"
-    assert body["job_id"]
-    # 同步跑完至少要过 embedder 的 800ms；留出充足余量仍能区分
-    assert elapsed < 800 * 0.5, f"疑似等完了整条流水线（{elapsed:.0f}ms）"
+    emb = _GatedEmbedder()
+    c = _client_with(emb, tmp_path)
+    try:
+        t0 = time.perf_counter()
+        r = c.post("/api/documents/text",
+                   json={"text": "异步入库内容 " * 20, "title": "async"},
+                   params={"wait": "false"})
+        elapsed = (time.perf_counter() - t0) * 1000
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "queued"
+        assert body["job_id"]
+        # 流水线确实已经跑到 embed（并且卡在那里），响应却已经返回：
+        # 这证明 submit 没有等流水线，与机器快慢无关。
+        assert emb.entered.wait(10), "流水线没有跑到 embed 阶段"
+        assert not emb.release.is_set()
+        assert elapsed < 500, f"疑似等完了流水线（{elapsed:.0f}ms）"
+    finally:
+        emb.release.set()
 
 
 def test_job_reaches_terminal_state(client):

@@ -333,18 +333,26 @@ async def api_list(request: Request, q: str = "", status: str = "",
 
 @router.get("/documents/{doc_id}")
 async def api_doc(request: Request, doc_id: str,
-                  include_chunks: bool = True) -> DocumentOut:
+                  include_chunks: bool = True,
+                  include_text: bool = True) -> DocumentOut:
     """文档详情。
 
     `include_chunks=false` 时省略分块索引：文档工作台与检索原文检视
     都会另取分块页，详情里再带一份「全部块 + 每块正文」会让打开一篇
     大文档的请求体成倍膨胀。默认 true 保持既有契约。
+
+    `include_text=false` 时既不投影正文列也不返回正文（20MB 级的列），
+    只回 `has_text`。工作台的原文按需从留档文件取；只有老数据没有留档
+    时才再请求一次带正文的版本。默认 true 保持既有契约。
     """
     ctx = get_ctx(request)
-    row = await asyncio.to_thread(get_document, ctx.store, doc_id)
+    row = await asyncio.to_thread(
+        get_document, ctx.store, doc_id, include_text=include_text)
     if row is None:
         raise HTTPException(404, "document not found")
     row = scalar_dict(row)
+    if not include_text:
+        row["has_text"] = bool(row.get("char_count"))
     # 分块索引（不含向量）
     row["chunks"] = (await asyncio.to_thread(_doc_chunks, ctx.store, doc_id)
                      if include_chunks else None)

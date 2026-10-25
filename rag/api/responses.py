@@ -121,6 +121,8 @@ class DocumentOut(BaseModel):
     chunks: list[DocChunkRefOut] | None = None
     has_file: bool | None = None
     file_url: str | None = None
+    # include_text=false 时给出「有没有解析正文」，正文本身按需再取
+    has_text: bool | None = None
 
 
 class DocumentListOut(BaseModel):

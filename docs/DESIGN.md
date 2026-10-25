@@ -824,6 +824,12 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
   几乎看不见的暗环。
 - **无障碍是库负责的**：`prefers-reduced-transparency`、`forced-colors`、
   `prefers-reduced-motion` 都是设计好的状态，不用再手写一份。
+- **模糊要有预算**（2026-10-24）：`backdrop-filter` 的成本 ∝ 面积 × 数量，
+  而且背后每动一次就要重算。所以只有**固定少量**的面保留实时模糊
+  （顶栏、输入台、对话框、阅读区）；证据卡、对话轮次、知识库卡这类随数据
+  线性增长的列表项走 `GlassPanel blur={false}`（保留填充、高光边与圆角，
+  只是不采样背景）。极光在滚动期间暂停（`useAuroraPause`），停下来 220ms
+  后恢复——滚动时背景静下来，玻璃才能复用模糊结果。
 
 ## 12. 性能设计
 
@@ -833,7 +839,7 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
 | 写入 | 批量 `pyarrow.Table` + `merge_insert` 幂等；embedding 按 `embed.batch` 合批 + 分片并发 + **进程级**闸门（`embed.concurrency`，`models/http.ScaledSemaphore`，按 permits 缓存的单例）；解析在入库队列 worker 线程内联。<br>> 这道闸曾每次调用新建一把，等于每文档一张独立门票、乘积没被封顶（审计 §5.7a，2026-10-06 修复）。<br>> 它**只覆盖入库路径**，`/api/models/test` 的探针直连 provider；且仍是每进程一把，多进程总并发 = 进程数 × 配置值 |
 | 元数据 | OLTP（jobs/apikeys/kbs/documents）走 SQLite(WAL) 的复合索引；分块与向量留 LanceDB。点查实测 5.68ms → 0.008ms |
 | 版本治理 | 全部表的 `optimize(cleanup_older_than=…)` 由后台维护按阈值触发（改前只有手工 `rag reindex` 且只作用 chunks，于是版本无界增长） |
-| 观测端点 | `/health`、`/stats` 结果缓存 3s + `X-Snapshot-Age-Ms` 头；任何成功的写作废快照（否则用户改完看到的还是旧账） |
+| 观测端点 | `/health`、`/stats` 结果缓存 3s + `X-Snapshot-Age-Ms` 头；**只有真正改数据的写**才作废快照（检索/问答/向量化这类读语义的 POST 见 §12.3），否则用户改完看到的还是旧账 |
 | 队列 | 有界（32），满则 503 —— 用背压代替无界堆积 |
 | 索引 | 按规模选 `HNSW`/`IVF_HNSW_SQ`/`IVF_PQ`；后台阈值触发 `optimize()` 与版本回收；FTS 重建受「积压阈值 + 最小间隔」双重节流（改前是「n<50000 每次入库全量重建」） |
 | 存储 | 列存；版本快照按需保留（默认 10） |
@@ -872,6 +878,25 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
 
 **仍未测**：真实模型服务下的端到端并发。本轮全程用假 embedding（不花额度），
 所以 `/api/search` 的 57.5ms 是**不含模型网络往返**的下界。
+
+### 12.3 2026-10-24 流畅度专项
+
+这一轮的判据是「同样的操作，帧时间/请求数是否真的下降」，每条都留了可重跑的守卫。
+
+| 项 | 改法 | 证据 |
+|---|---|---|
+| 读语义的 POST | `/search`、`/search/report`、`/answer`、`/answer/stream`、`/embed` 不再递增 `write_epoch`、不清 health/stats 快照（`_READ_ONLY_POST_PATHS`） | 检索前 health 热 3.3ms，检索后 20.1ms（快照被打掉）；`tests/test_read_only_paths.py` |
+| 响应压缩 | `GZipMiddleware`（≥1024B，level 6，>128KB 走线程池）；SSE 在默认排除列表里 | 首屏 JS 634KB + CSS 87KB 原先**无 content-encoding**；`tests/test_compression.py` |
+| 玻璃预算 | 证据卡/对话轮次/知识库卡 `blur={false}`（保留填充与高光边）；极光滚动时暂停、后台标签页暂停；`prefers-reduced-transparency` 全量降级 | 检索页滚动 2s：p50 帧间隔 150→67ms、帧数 13→27（本机无 GPU，绝对值不代表有 GPU 的机器） |
+| 流式正文 | `LiveAnswerStore` + `useSyncExternalStore`：delta 只重渲染正在生成的那一行；贴底跟随挂在增长回调上 | E2E「正文按增量逐段出现」 |
+| 分块编辑后的 FTS | ≤500 行同步重建（改完立刻搜得到），更大交给后台去抖（1s），health 如实显示待重建 | `tests/test_fts_refresh.py` |
+| 入库写锁 | 原文留档（本地 rename / s3 上传）移到锁外；任务终态行也在锁外写 | `tests/test_ingest_lock_scope.py` 用探针锁断言 |
+| 文档详情 | `include_text=false` 时**不投影 text 列**，只回 `has_text`；原文从留档文件取，没有留档时再按需取一次 | 20MB 正文不再随每次打开文档走一遍 JSON 与主线程解析；`tests/test_doc_payload.py` |
+| 轮询 | 队列摘要/任务列表逐项比对，未变不落 state；文档页按「任务+阶段」指纹决定是否重拉整表；后台标签页停轮询；`waitForJob` 间隔 0.7s→3s 退让 | `test_frontend_wiring.py` 的轮询守卫 |
+| 分包 | `@mui/icons-material` 不再钉进 vendor，交给 rollup 按引用分；`top_k` 上限 50；证据列表项 `content-visibility: auto` | vendor 110.4→106.6KB gz，首屏总量 ~194KB gz（压缩后） |
+| health 汇总 | 三项 chunks 检查（按文档计数 / 待重建 / 模型集合）合成**一次 Arrow 窄列扫描**，不再 `to_pylist()` 成 Python 行；扫描失败退回逐项查询，每项仍各自汇报「未知」 | 2 万块 cold health p50 **40→8–17ms**；`tests/test_health_scan.py` |
+| 容量统计 | `data_dir_bytes` 与 `lancedb_dir_bytes` 由两次 `rglob` 合成一次遍历（lancedb 是 data_dir 的子树，等于最贵的树走了两遍） | 分母口径不变；`tests/test_disk_stats.py` |
+| 重切分写入 | 正文 `content_hash` 未变时只 `set_doc_fields` 更新小字段，不整行 upsert（不重写 20MB 正文） | `tests/test_resplit_write.py` |
 
 ---
 
@@ -974,7 +999,7 @@ rag serve --host 0.0.0.0 --port 8000 --data ./data
 
 - **默认套件的边界**：`addopts = ["-m", "not perf"]` 把绝对延迟门槛关在默认套件外。此前只声明了 `markers = [...]`——那只是允许这个标记名，**不会**排除它，于是 `test_latency_budgets`（断言 `p50 < 150ms`）一直每天在默认套件里跑，而它自己的 docstring 第一行写着「只在 `pytest -m perf` 下跑」。注释与行为现在由 addopts 对齐；两条命令都验过（默认 547 passed / 1 deselected；`-m perf` 单跑通过）。
 - **隔离**：`tests/conftest.py` 把 `RAG_DATA_DIR` 指向临时目录。必须如此——`Settings()` 会读 `{data_dir}/config.toml`，测试若不隔离就会读到开发机上的生产配置（实测：本地开启 `features.answer` 后，断言"默认关闭"的测试立刻失败）。
-- **静态守卫**（`test_frontend_wiring.py`，84 条，全部针对 React `.tsx/.ts`）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、加载三态、分页后端 total、多选单实现、异步任务有人等、设置分节判脏、模型设置卡内两列且卡片竖排、API 文档 URL 同源、无原始 HTML 注入。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
+- **静态守卫**（`test_frontend_wiring.py`，90 条，全部针对 React `.tsx/.ts`）：产物齐全且不旧于源码、无原生 `confirm()/alert()`、键盘与 `tabindex` 合规、控件有可访问名、无手动 DOM 查询/`innerHTML` 替换、卡片操作按钮不被链接覆盖层吞掉、加载三态、分页后端 total、多选单实现、异步任务有人等、设置分节判脏、模型设置卡内两列且卡片竖排、列表卡不做实时模糊、流式正文独立订阅、轮询空更新、返回条数上限、图标不进首包、文档详情默认不带正文、API 文档 URL 同源、无原始 HTML 注入。每条文本型守卫都先剥注释，且都做过变异验证（把要防的问题改回去确认它会红）——已经有两条守卫因为只钉"字符串出现过"而被证明是假绿。
   > import 可解析与 DOM id 存在由 TypeScript / Vite 构建接管，不重复测；Svelte 时代的守卫已全部翻译到 React（2026-10-10），未保留 skip。
 - **浏览器 E2E**（`e2e/app.spec.ts`，`npm run test:e2e`）：临时数据目录 + 桩 embedding 起独立实例，
   覆盖首页→库→文档、原文按需展开与 `?chunk=` 深链、检索空态居中输入/发送后下沉/条件草稿与应用、

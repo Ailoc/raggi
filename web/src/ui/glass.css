@@ -366,6 +366,62 @@
   }
 }
 
+/*
+ * 滚动时暂停极光（由 useAuroraPause 挂上这个类）。
+ *
+ * 底下的光在动，压在上面的玻璃每帧都要重新模糊一次；光静止后合成器
+ * 才能复用模糊结果。停止滚动 220ms 后恢复，视觉上是"滚动时背景静下来"。
+ */
+.lg-aurora--paused .lg-aurora-blob {
+  animation-play-state: paused;
+}
+
+/*
+ * 列表卡不做实时模糊。
+ *
+ * 模糊成本 ∝ 面积 × 数量，列表又会随数据线性增长（证据、对话轮次、
+ * 知识库）。改成不透明一些的底色：读数清楚，滚动不再每帧重采样。
+ * 顶栏、输入台、对话框这类固定少量的面仍保留模糊。
+ */
+.lg-glass-flat-blur,
+.lg-glass-flat-blur::before,
+.lg-glass-flat-blur::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.lg-glass-flat-blur {
+  background-color: rgb(252 253 252 / 0.82) !important;
+}
+
+[data-theme="dark"] .lg-glass-flat-blur {
+  background-color: rgb(14 21 22 / 0.84) !important;
+}
+
+/* 系统要求降低透明度时，所有玻璃面都不再模糊 */
+@media (prefers-reduced-transparency: reduce) {
+  .lg-glass-panel,
+  .lg-glass-panel::before,
+  .lg-glass-panel::after,
+  .lg-topbar,
+  .lg-topbar::before,
+  .lg-topbar::after {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+/*
+ * 长列表项：屏幕外的项跳过布局与绘制。
+ *
+ * `contain-intrinsic-size: auto` 会记住已量过的真实高度，滚动条不会在
+ * 首次渲染后跳动；条目高度差别大（展开/折叠）时也不会塌成一条。
+ */
+.lg-cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+
 /* 知识库卡片 */
 .lg-kb-card {
   display: flex;

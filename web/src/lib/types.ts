@@ -106,6 +106,8 @@ export interface Document {
   has_file?: boolean;
   /** 原文预览地址（启用鉴权时为短期签名 URL） */
   file_url?: string | null;
+  /** include_text=false 时：是否还有解析正文可取 */
+  has_text?: boolean;
   /** GET /api/documents/{id} 附带的解析后全文 */
   text?: string;
   /** GET /api/documents/{id} 附带的分块索引（不含向量） */

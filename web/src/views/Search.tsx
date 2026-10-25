@@ -17,6 +17,7 @@ import { GlassPanel, useGlassLook } from "../ui/glass";
 import { setCrumbs, useStoreSelect } from "../lib/store";
 import { streamPost } from "../lib/sse";
 import type { StreamHandle } from "../lib/sse";
+import { LiveAnswerStore } from "../lib/liveanswer";
 import {
   DEFAULTS, MODE_OPTIONS, PARAMS, defaultParams, paramsToBody,
 } from "../lib/searchparams";
@@ -133,8 +134,9 @@ export default function Search(): React.ReactElement {
 
   const chatStream = useRef<StreamHandle | null>(null);
   const chatSearchCtrl = useRef<AbortController | null>(null);
-  const chatBuffer = useRef("");
-  const chatRaf = useRef<number | null>(null);
+  // 正在生成的正文放在独立订阅源里：delta 只让这一行重渲染，
+  // 不再每帧替换整轮数组（会把整页拖进 reconcile）。
+  const [liveAnswer] = useState(() => new LiveAnswerStore());
   const chatTurnRef = useRef<string | null>(null);
   // 表单动作在每次渲染时更新，但传给 memo 化输入台的引用保持稳定：
   // 否则流式回答每帧都会把整个输入台（含两个浮层选择器）重渲染一遍。
@@ -270,11 +272,21 @@ export default function Search(): React.ReactElement {
   useEffect(() => () => {
     chatStream.current?.stop();
     chatSearchCtrl.current?.abort();
-    if (chatRaf.current != null) cancelAnimationFrame(chatRaf.current);
-  }, []);
+    liveAnswer.finish();
+  }, [liveAnswer]);
 
-  // 对话列贴底跟随：流式增量每帧都会更新轮次，只有用户本来就贴着底部
-  // 时才滚到底，向上翻看旧回答时不抢滚动位置。
+  // 流式正文变长时，只有用户本来就贴着底部才跟着滚。
+  useEffect(() => {
+    liveAnswer.setOnGrow(() => {
+      const el = chatScrollRef.current;
+      if (el && chatStick.current) el.scrollTop = el.scrollHeight;
+    });
+    return () => liveAnswer.setOnGrow(null);
+  }, [liveAnswer]);
+
+  // 对话列贴底跟随：轮次结构变化（新问题、证据到达、生成结束）时，
+  // 只有用户本来就贴着底部才滚到底；流式正文的增长走 liveAnswer 的
+  // onGrow（同一帧内合并），不会每帧重建整棵对话。
   useEffect(() => {
     if (!chatActive) return;
     const el = chatScrollRef.current;
@@ -388,16 +400,6 @@ export default function Search(): React.ReactElement {
     setChatTurns((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }, []);
 
-  function flushChatAnswer(): void {
-    if (chatRaf.current != null) return;
-    chatRaf.current = requestAnimationFrame(() => {
-      chatRaf.current = null;
-      const id = chatTurnRef.current;
-      if (!id) return;
-      patchTurn(id, { answer: chatBuffer.current });
-    });
-  }
-
   function runTurn(
     turnId: string,
     question: string,
@@ -407,7 +409,7 @@ export default function Search(): React.ReactElement {
     const searchCtrl = new AbortController();
     chatSearchCtrl.current = searchCtrl;
 
-    chatBuffer.current = "";
+    liveAnswer.reset();
     chatTurnRef.current = turnId;
     setChatRunningId(turnId);
 
@@ -456,10 +458,9 @@ export default function Search(): React.ReactElement {
         patchTurn(turnId, { citations: items as Citation[] });
       },
       onDelta: (text) => {
-        chatBuffer.current += text;
-        // 状态只在第一段增量时翻转一次。改前每个 delta 都 map 整个
-        // 轮次数组（返回新数组 → 整页重渲染），而正文的实际刷新已经
-        // 由下面的 rAF 合并到每帧一次。
+        liveAnswer.push(text);
+        // 状态只在第一段增量时翻转一次；已经是 streaming 时返回原数组，
+        // React 会跳过重渲染（正文由 LiveAnswer 单独订阅）。
         setChatTurns((prev) => {
           const current = prev.find((t) => t.id === turnId);
           if (!current || current.status !== "searching") return prev;
@@ -467,15 +468,13 @@ export default function Search(): React.ReactElement {
             t.id === turnId ? { ...t, status: "streaming" } : t
           ));
         });
-        flushChatAnswer();
       },
       onDone: (done) => {
-        if (chatRaf.current != null) {
-          cancelAnimationFrame(chatRaf.current);
-          chatRaf.current = null;
-        }
+        // 正文同步累积，这里拿到的就是完整全文
+        const answer = liveAnswer.getSnapshot();
+        liveAnswer.finish();
         patchTurn(turnId, {
-          answer: chatBuffer.current,
+          answer,
           status: "done",
           tookMs: done.took_ms,
           mode: done.mode || undefined,
@@ -486,12 +485,10 @@ export default function Search(): React.ReactElement {
         setChatRunningId(null);
       },
       onError: (message, hint) => {
-        if (chatRaf.current != null) {
-          cancelAnimationFrame(chatRaf.current);
-          chatRaf.current = null;
-        }
+        const answer = liveAnswer.getSnapshot();
+        liveAnswer.finish();
         patchTurn(turnId, {
-          answer: chatBuffer.current,
+          answer,
           status: "error",
           error: hint ? `${message}（${hint}）` : message,
         });
@@ -556,14 +553,11 @@ export default function Search(): React.ReactElement {
     chatStream.current = null;
     chatSearchCtrl.current?.abort();
     chatSearchCtrl.current = null;
-    if (chatRaf.current != null) {
-      cancelAnimationFrame(chatRaf.current);
-      chatRaf.current = null;
-    }
+    liveAnswer.finish();
     const id = chatTurnRef.current ?? chatRunningId;
     if (id) {
       patchTurn(id, {
-        answer: chatBuffer.current,
+        answer: liveAnswer.getSnapshot(),
         status: "stopped",
         evidenceLoading: false,
       });
@@ -855,6 +849,7 @@ export default function Search(): React.ReactElement {
           turns={chatTurns}
           activeTurnId={activeTurn?.id ?? null}
           runningTurnId={chatRunningId}
+          live={liveAnswer}
           onSelectTurn={openEvidence}
           onStop={stopChat}
           onRetry={retryTurn}

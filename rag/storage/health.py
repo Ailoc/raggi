@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import logging
 
+import pyarrow as pa
 import pyarrow.compute as pc
 
 from .repos.chunks import chunk_counts_by_doc
@@ -39,6 +40,27 @@ def _unique_models(store: LanceStore) -> set[str]:
     return {str(m) for m in pc.unique(col).to_pylist() if m}
 
 
+# 健康检查需要从 chunks 里读的三列：按文档计数、待重建标记、模型名
+CHUNK_FACT_COLS = ["doc_id", "fts_stale", "embed_model"]
+
+
+def _chunk_facts(store: LanceStore) -> tuple[dict[str, int], int, set[str]]:
+    """一次窄列扫描拿到健康检查要的三件事。
+
+    改前这三项各扫一遍 chunks（doc_id / fts_stale / embed_model），
+    而且都经 `to_pylist()` 变成 Python 行。这里直接吃 Arrow 表，
+    计数/求和/去重全在 Arrow 里做：同一批行只扫一次，也不产生
+    每行一个 dict 的垃圾。
+    """
+    tbl = store.chunks.to_lance().to_table(columns=CHUNK_FACT_COLS)
+    vc = pc.value_counts(tbl.column("doc_id"))
+    counts = {str(v): int(c) for v, c in zip(
+        vc.field("values").to_pylist(), vc.field("counts").to_pylist())}
+    stale = int(pc.sum(pc.cast(tbl.column("fts_stale"), pa.int64())).as_py() or 0)
+    models = {str(m) for m in pc.unique(tbl.column("embed_model")).to_pylist() if m}
+    return counts, stale, models
+
+
 def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
     chunks = store.chunks
 
@@ -47,7 +69,17 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
     # 新入库一篇就会「列表 8 篇、health 7 篇」，并因此永久 degraded。
     doc_count = docs_count(store)
     chunk_count = chunks.count_rows()
-    actual_by_doc = chunk_counts_by_doc(store)
+    # 一次扫描拿到计数 / 待重建 / 模型三项；扫描失败时退回逐项查询，
+    # 每项仍能各自汇报"未知"（见下面的 checks_failed）。
+    try:
+        actual_by_doc, fts_stale_scanned, models_seen = _chunk_facts(store)
+        facts_ok = True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chunks 汇总扫描失败，退回逐项查询: %s", e)
+        actual_by_doc, fts_stale_scanned, models_seen = {}, 0, set()
+        facts_ok = False
+    if not facts_ok:
+        actual_by_doc = chunk_counts_by_doc(store)
     stated_rows = docs_query(store, ["doc_id", "chunk_count"])
 
     mismatch = []
@@ -78,7 +110,8 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
 
     # fts stale：编辑后尚未重建 FTS 的行数（由 ensure_fts_index 清除）
     try:
-        fts_stale = int(chunks.count_rows(filter="fts_stale = true"))
+        fts_stale = (fts_stale_scanned if facts_ok
+                     else int(chunks.count_rows(filter="fts_stale = true")))
     except Exception as e:  # noqa: BLE001
         # -1 = 不知道（0 会被 UI 当成「没有待重建」显示成绿色）
         fts_stale = -1
@@ -89,7 +122,8 @@ def health(store: LanceStore, embed_dim: int, embed_model: str) -> dict:
     # 用 unique() 而不是整列 to_pylist 后逐行比（10 万行时那是一趟全量 Python 循环）。
     embed_model_checked = True
     try:
-        embed_model_mismatch = any(m != embed_model for m in _unique_models(store))
+        models = models_seen if facts_ok else _unique_models(store)
+        embed_model_mismatch = any(m != embed_model for m in models)
     except Exception as e:  # noqa: BLE001
         embed_model_mismatch = False
         embed_model_checked = False

@@ -114,6 +114,8 @@ def test_stream_emits_sources_then_deltas_then_done(env):
                     json={"q": "额定电压", "top_k": 3})
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("text/event-stream")
+    # SSE 不能被压缩：gzip 要攒够 minimum_size 才吐字节，首字会被吞掉几秒
+    assert "content-encoding" not in r.headers
 
     events = _parse_sse(r.text)
     names = [e for e, _ in events]

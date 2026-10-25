@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -13,6 +13,7 @@ import SmartToyIcon from "@mui/icons-material/SmartToy";
 import StopCircleIcon from "@mui/icons-material/StopCircle";
 
 import { MODE_OPTIONS } from "../lib/searchparams";
+import type { LiveAnswerStore } from "../lib/liveanswer";
 import type { ChatTurn, Citation } from "../lib/types";
 import { SnippetText } from "./EvidenceList";
 import { GlassPanel, useGlassLook } from "./glass";
@@ -21,6 +22,8 @@ interface ChatThreadProps {
   turns: ChatTurn[];
   activeTurnId: string | null;
   runningTurnId: string | null;
+  /** 正在生成的那一轮的正文订阅源：只有它随 delta 重渲染。 */
+  live?: LiveAnswerStore;
   onSelectTurn: (turnId: string) => void;
   onStop: () => void;
   onRetry: (turnId: string) => void;
@@ -38,6 +41,7 @@ export default function ChatThread({
   turns,
   activeTurnId,
   runningTurnId,
+  live,
   onSelectTurn,
   onStop,
   onRetry,
@@ -68,6 +72,7 @@ export default function ChatThread({
           turn={turn}
           active={turn.id === activeTurnId}
           running={turn.id === runningTurnId}
+          live={live}
           look={look}
           onSelectTurn={selectTurn}
           onStop={stopTurn}
@@ -85,11 +90,34 @@ interface ChatTurnRowProps {
   turn: ChatTurn;
   active: boolean;
   running: boolean;
+  live?: LiveAnswerStore;
   look: GlassLook;
   onSelectTurn: (turnId: string) => void;
   onStop: () => void;
   onRetry: (turnId: string) => void;
   onCitation: (turnId: string, citation: Citation) => void;
+}
+
+/**
+ * 正在生成的正文：订阅独立的流式源。
+ *
+ * 只有这一个组件随 delta 重渲染；外层页面与其它轮次的引用都不变，
+ * 所以长回答不会再把整页拖进每帧 reconcile。
+ */
+function LiveAnswer({ store }: { store: LiveAnswerStore }): React.ReactElement {
+  const text = useSyncExternalStore(
+    store.subscribe, store.getSnapshot, store.getSnapshot);
+  return (
+    <Typography
+      variant="body1"
+      sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.9 }}
+    >
+      {text}
+      <Box component="span" aria-hidden="true" sx={{ color: "primary.main", ml: 0.5 }}>
+        ▍
+      </Box>
+    </Typography>
+  );
 }
 
 /**
@@ -100,6 +128,7 @@ const ChatTurnRow = memo(function ChatTurnRow({
   turn,
   active,
   running,
+  live,
   look,
   onSelectTurn,
   onStop,
@@ -196,6 +225,8 @@ const ChatTurnRow = memo(function ChatTurnRow({
           <GlassPanel
             radius={16}
             look={look}
+            // 对话轮次会一直往上叠：模糊只留给固定的顶栏/输入台
+            blur={false}
             style={{
               border: `1px solid ${active
                 ? theme.palette.primary.main
@@ -208,27 +239,27 @@ const ChatTurnRow = memo(function ChatTurnRow({
             }}
             sx={{ px: 2, py: 1.75 }}
           >
-            {turn.answer ? (
+            {turn.status === "streaming" && live ? (
+              <LiveAnswer store={live} />
+            ) : turn.answer ? (
               <Typography
                 variant="body1"
                 sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.9 }}
               >
                 {turn.answer}
-                {turn.status === "streaming" && (
-                  <Box
-                    component="span"
-                    aria-hidden="true"
-                    sx={{ color: "primary.main", ml: 0.5 }}
-                  >
-                    ▍
-                  </Box>
-                )}
               </Typography>
-            ) : turn.status === "searching" || turn.status === "streaming" ? (
+            ) : turn.status === "streaming" ? (
               <Stack direction="row" spacing={1} alignItems="center">
                 <CircularProgress size={14} />
                 <Typography variant="body2" color="text.secondary">
-                  {turn.status === "searching" ? "正在检索证据…" : "正在生成回答…"}
+                  正在生成回答…
+                </Typography>
+              </Stack>
+            ) : turn.status === "searching" ? (
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={14} />
+                <Typography variant="body2" color="text.secondary">
+                  正在检索证据…
                 </Typography>
               </Stack>
             ) : turn.status === "stopped" ? (

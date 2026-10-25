@@ -362,6 +362,19 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
 
     # 阶段 3：写库（短临界区，双重去重检查防并发重复）
     _set_stage(store, job_id, "write", total=total)
+
+    # 原文留档是纯 I/O（本地 rename / s3 上传），不碰共享元数据，
+    # 放到写锁外面：锁是跨进程单写者，一次上传可能几十毫秒到几秒，
+    # 占着它会让所有入库与编辑排队。失败语义不变——入库继续，只告警。
+    archived_file: str | None = None
+    if retain_path is not None and backend is not None:
+        stored = f"{doc_id}{Path(retain_path).suffix}"
+        try:
+            _archive(backend, Path(retain_path), stored)
+            archived_file = stored
+        except Exception as e:  # noqa: BLE001
+            logger.warning("原文留档失败: %s", e)
+
     with store.write_lock():
         if not explicit_doc:
             existing = find_by_hash(store, content_hash)
@@ -387,18 +400,14 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
 
         # 重解析保留旧文档的归属与留档；新入库由 kb_id 与原文留档构成。
         # kb_id / stored_file 是真实列，meta 只承载嵌套的 chunking 结构。
-        old_row = get_document(store, doc_id) if explicit_doc else None
+        # 只取非正文列：正文可能有 20MB，而这里只用到归属与留档字段。
+        old_row = (get_document(store, doc_id, include_text=False)
+                   if explicit_doc else None)
         if not kb_id and old_row:
             kb_id = str(old_row.get("kb_id") or "")
         stored_file = old_row.get("stored_file") if old_row else None
-        if retain_path is not None and backend is not None:
-            # 原文留档：交给存储后端（local 是同盘 move，s3 是上传对象）
-            stored = f"{doc_id}{Path(retain_path).suffix}"
-            try:
-                _archive(backend, Path(retain_path), stored)
-                stored_file = stored
-            except Exception as e:  # noqa: BLE001
-                logger.warning("原文留档失败: %s", e)
+        if archived_file is not None:
+            stored_file = archived_file
         meta = json.dumps(
             _meta_of(old_row.get("meta")) if old_row else {})
         created_at = _now()
@@ -412,25 +421,48 @@ def _run(store: LanceStore, registry: ModelRegistry, engine: str, documents,
             store.chunks.delete(
                 where=f"doc_id = '{escape_sql(doc_id)}'")
         upsert_chunks(store, chunk_rows)
-        upsert_documents(store, [{
-            "doc_id": doc_id,
-            "title": title,
-            "source_uri": source_uri,
-            "mime": mime,
-            "parser_engine": engine,
-            "content_hash": content_hash,
-            "char_count": len(full_text),
-            "chunk_count": total,
-            "text": full_text,
-            "status": "ready",
-            "error": None,
-            "kb_id": kb_id or "",
-            "stored_file": stored_file,
-            "meta": meta,
-            "created_at": created_at,
-            "updated_at": _now(),
-        }])
-        _finish_job(store, job_id, "done", engine)
+        if explicit_doc and old_row and old_row.get("content_hash") == content_hash:
+            # 正文没变（重切分 / 换解析引擎但结果一致）：只改小字段。
+            # 走整行 upsert 会把 20MB 正文连同溢出页重写一遍，而这里的
+            # 正文逐字节相同——`set_doc_fields` 只更新指定列。
+            set_doc_fields(
+                store, doc_id,
+                title=title,
+                source_uri=source_uri,
+                mime=mime,
+                parser_engine=engine,
+                char_count=len(full_text),
+                chunk_count=total,
+                status="ready",
+                error=None,
+                kb_id=kb_id or "",
+                stored_file=stored_file,
+                meta=meta,
+                updated_at=_now(),
+            )
+        else:
+            upsert_documents(store, [{
+                "doc_id": doc_id,
+                "title": title,
+                "source_uri": source_uri,
+                "mime": mime,
+                "parser_engine": engine,
+                "content_hash": content_hash,
+                "char_count": len(full_text),
+                "chunk_count": total,
+                "text": full_text,
+                "status": "ready",
+                "error": None,
+                "kb_id": kb_id or "",
+                "stored_file": stored_file,
+                "meta": meta,
+                "created_at": created_at,
+                "updated_at": _now(),
+            }])
+
+    # 任务行只是观测数据，不参与文档/分块的原子性：放到锁外写，
+    # 让临界区只包含真正需要互斥的那几次表写入。
+    _finish_job(store, job_id, "done", engine)
 
     # 阶段 3.5：快照生效方案（改设置后仍能解释历史分块的实际参数；
     # 重切分同样刷新，否则改方案后重切会留下过期快照）

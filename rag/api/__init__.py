@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, ORJSONResponse
 from fastapi.security import APIKeyHeader, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from rag.api.answer import router as answer_router
 from rag.api.apikeys import router as apikeys_router
@@ -71,6 +72,27 @@ TAGS_METADATA = [
 # 会改变数据状态的方法。判定「该不该作废健康快照」用（与 ratelimit.is_limited_method
 # 用的是同一组语义，但不 import 它——那个函数还包含限流豁免的判断，语义并不等价）。
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# 读语义的 POST：只是查询/生成/向量化，不改任何数据。
+#
+# 不排除它们的话，一次检索就要写一次 SQLite `write_epoch`、并清空
+# health/stats 快照：读请求占了跨进程写锁，观测端点每次检索后都要冷算
+# 一遍 O(N) 对账（实测 health 热 3.3ms → 检索后 20.1ms，数据越大越贵）。
+# 路径按「去掉 /api 或 /api/v1 前缀」比对。
+_READ_ONLY_POST_PATHS = frozenset({
+    "/search",
+    "/search/report",
+    "/answer",
+    "/answer/stream",
+    "/embed",
+})
+
+
+def _is_read_only_post(path: str) -> bool:
+    for prefix in ("/api/v1", "/api"):
+        if path.startswith(prefix + "/"):
+            return path[len(prefix):] in _READ_ONLY_POST_PATHS
+    return False
+
 # 非文件请求的正文上限：正文入库允许 MAX_DOC_CHARS（20MB），JSON 包装
 # 与转义会再膨胀一点；multipart 另按 max_upload_mb 计算。
 _JSON_BODY_MAX_BYTES = 20 * 1024 * 1024
@@ -310,6 +332,17 @@ def create_app(ctx: Ctx) -> FastAPI:
         openapi_tags=TAGS_METADATA,
     )
     app.state.ctx = ctx
+    # 压缩：首屏 JS 634KB + CSS 87KB 原先原样上线（实测响应无
+    # content-encoding）。level 6 是体积/CPU 的折中；大于 128KB 的正文
+    # 由 Starlette 丢进线程池压，不堵事件循环。
+    # `text/event-stream` 在 Starlette 的默认排除列表里——SSE 一旦被
+    # 攒够 minimum_size 再压，首字就会被吞掉几秒。
+    app.add_middleware(
+        GZipMiddleware,
+        minimum_size=1024,
+        compresslevel=6,
+        thread_minimum_size=128 * 1024,
+    )
     app.add_middleware(BodyLimitMiddleware,
                        limit_bytes=_body_limit_bytes(ctx.settings))
     # 幂等键存储挂到 app.state：默认跨进程（SQLite）；lancedb 回退时进程内。
@@ -513,6 +546,7 @@ async def _http_guards(app: FastAPI, ctx: Ctx, request, call_next):
     # 放在中间件里而不是每个端点里：漏一个端点就会让用户看到过期账本，
     # 而这种「改完了但界面还是旧的」正是最难自查的一类问题。
     if (request.method in _WRITE_METHODS
+            and not _is_read_only_post(path)
             and path.startswith("/api") and response.status_code < 300):
         from rag.api.system import invalidate_snapshots
 

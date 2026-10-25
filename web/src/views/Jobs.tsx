@@ -45,6 +45,18 @@ const STAGE_COLOR: Record<string, "default" | "info" | "success" | "error" | "wa
   cancelling: "warning",
 };
 
+/** 自动刷新拿到的列表与上一份逐项相同：保留原数组，别整表重建。 */
+function sameJobs(a: Job[], b: Job[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i];
+    return x.job_id === y.job_id && x.stage === y.stage
+      && x.progress === y.progress && x.terminal === y.terminal
+      && x.error === y.error && x.doc_id === y.doc_id
+      && x.ended_at === y.ended_at;
+  });
+}
+
 /**
  * 任务列表：状态 / 阶段与进度 / 耗时 / 停止 + 筛选 + 自动刷新。
  *
@@ -70,9 +82,10 @@ export default function Jobs(): React.ReactElement {
   const load = useCallback(async (
     targetPage = pageRef.current,
     status = filterRef.current,
+    silent = false,
   ): Promise<void> => {
     const seq = ++reqSeq.current;
-    setRefreshing(true);
+    if (!silent) setRefreshing(true);
     try {
       // 过滤与分页都由服务端完成：客户端先取一页再筛，会让 total 与列表
       // 各说各话，而且筛不到其它页上的任务。
@@ -80,7 +93,8 @@ export default function Jobs(): React.ReactElement {
         `/api/jobs?limit=${PAGE_SIZE}&offset=${targetPage * PAGE_SIZE}`
         + `&status=${status}`));
       if (seq !== reqSeq.current) return;
-      setItems(r.items);
+      // 自动刷新每 2s 一次：内容没变就保留原数组，别让整张表重建
+      setItems((prev) => (sameJobs(prev, r.items) ? prev : r.items));
       setTotal(r.total ?? 0);
       setPhase("ready");
       setError("");
@@ -89,7 +103,7 @@ export default function Jobs(): React.ReactElement {
       setPhase((p) => (p === "ready" ? "ready" : "failed"));
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (seq === reqSeq.current) setRefreshing(false);
+      if (seq === reqSeq.current && !silent) setRefreshing(false);
     }
   }, []);
 
@@ -114,7 +128,7 @@ export default function Jobs(): React.ReactElement {
   useEffect(() => {
     if (!auto || activeCount === 0) return;
     const t = setInterval(() => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load(undefined, undefined, true);
     }, 2000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps

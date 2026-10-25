@@ -74,8 +74,17 @@ def upsert_documents(store: "LanceStore", rows: list[dict]) -> None:
      .when_not_matched_insert_all()
      .execute(_fill_doc_defaults(store, rows)))
 
-def get_document(store: "LanceStore", doc_id: str) -> dict | None:
-    rows = docs_query(store, DETAIL_COLS, eq={"doc_id": doc_id}, limit=1)
+def get_document(store: "LanceStore", doc_id: str,
+                 *, include_text: bool = True) -> dict | None:
+    """按 doc_id 取详情。
+
+    `include_text=False` 时**不投影 text 列**：正文可能有 20MB，SQLite
+    要读溢出页、Lance 要读整列；工作台打开文档时并不需要它（原文按需
+    从留档文件取），只在没有留档时才再请求一次带正文的版本。
+    """
+    cols = (DETAIL_COLS if include_text
+            else [c for c in DETAIL_COLS if c != "text"])
+    rows = docs_query(store, cols, eq={"doc_id": doc_id}, limit=1)
     return scalar_row(rows[0]) if rows else None
 
 def get_documents(store: "LanceStore", doc_ids, cols=None) -> dict[str, dict]:

@@ -28,6 +28,10 @@ MIN_VECTOR_INDEX_ROWS = 256
 REBUILD_UNINDEXED_RATIO = 0.2
 # 小于该行数的库，FTS 直接重建（便宜且保证新增/编辑立即生效）
 FTS_REBUILD_ALWAYS_BELOW = 50000
+# 编辑/新增分块后的同步重建上限：小库一次重建只要几十毫秒，能保证
+# 「改完立刻搜得到」；超过它就把重建交给后台去抖（一次全量重建在大库上
+# 是秒级的，占着请求线程还会和入库抢同一把写锁）。
+FTS_SYNC_MAX_ROWS = 500
 # 但 FTS 重建不能「每次入库都来一遍」：它是全表扫，且每次重建都会在
 # chunks 表上多留下版本（实测 0.1s/次、+2 版本）。这两条给出节流边界。
 FTS_MIN_INTERVAL_SECONDS = 60.0
@@ -466,6 +470,24 @@ class LanceStore:
         if self._last_fts_at is None:
             return True
         return (time.monotonic() - self._last_fts_at) >= FTS_MIN_INTERVAL_SECONDS
+
+    def refresh_fts_after_edit(self) -> None:
+        """编辑/新增/停用分块后的 FTS 刷新：小库同步，大库后台。
+
+        编辑是用户可感知的：小库同步重建，保证「改完立刻搜得到」。
+        大库一次全量重建是秒级的，放在请求里会占住线程、并和入库抢
+        跨进程写锁；这时只标 stale 并交给后台去抖，health 会如实显示
+        「有 N 条待重建」，后台维护完成后自动清零。
+        """
+        try:
+            n = self.chunks.count_rows()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("统计分块数失败，FTS 刷新退回后台: %s", e)
+            n = FTS_SYNC_MAX_ROWS + 1
+        if n <= FTS_SYNC_MAX_ROWS:
+            self.ensure_fts_index(force=True)
+        else:
+            self.schedule_maintenance(debounce_seconds=1.0, force_fts=True)
 
     def ensure_scalar_indexes(self, force: bool = False) -> None:
         try:

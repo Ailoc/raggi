@@ -119,9 +119,7 @@ def edit_chunk(store: LanceStore, embedder: Embedder, chunk_id: str,
                 "请重新打开确认最新内容后再提交")
         touch_doc_count(store, row.get("doc_id", ""))
     # FTS 一致性治理：小库同步重建；大库累计 stale（由 health 展示）
-    n = store.chunks.count_rows()
-    if n < 50000:
-        store.ensure_fts_index(force=True)
+    store.refresh_fts_after_edit()
     stale = int(store.chunks.count_rows(filter="fts_stale = true"))
     return {"chunk_id": chunk_id, "edited": True,
             "embed_model": embedder.model, "fts_stale": stale}
@@ -184,9 +182,7 @@ def batch_edit_chunks(store: LanceStore, embedder: Embedder,
         for doc_id in {r["doc_id"] for r in rows}:
             touch_doc_count(store, doc_id)
 
-    n = store.chunks.count_rows()
-    if n < 50000:
-        store.ensure_fts_index(force=True)
+    store.refresh_fts_after_edit()
     stale = int(store.chunks.count_rows(filter="fts_stale = true"))
     return {"edited": len(rows), "embed_model": embedder.model,
             "fts_stale": stale}
@@ -238,9 +234,7 @@ def add_manual_chunk(store: LanceStore, embedder: Embedder, text: str,
         row["ordinal"] = _next_ordinal(store, doc_id)
         upsert_chunks(store, [row])
         touch_doc_count(store, doc_id)
-    n = store.chunks.count_rows()
-    if n < 50000:
-        store.ensure_fts_index(force=True)
+    store.refresh_fts_after_edit()
     return chunk_id
 
 

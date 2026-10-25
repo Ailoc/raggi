@@ -119,7 +119,10 @@ export default function DocView({
         // 文档与方案每页都取：深链块可能落在第 N 页，不能只在第 0 页
         // 拉文档，否则 doc 永远为 null，页面会误判成"加载失败"。
         const [d, p, r] = await Promise.all([
-          api<Document>(`/api/documents/${encodeURIComponent(docId)}?include_chunks=false`),
+          // 正文不进详情：一篇 20MB 的文档光是传输与 JSON 解析就会卡住
+          // 主线程；原文面板按需从留档文件取，没有留档时再单独要正文。
+          api<Document>(
+            `/api/documents/${encodeURIComponent(docId)}?include_chunks=false&include_text=false`),
           api<DocPlan>(`/api/documents/${encodeURIComponent(docId)}/plan`).catch(() => null),
           api<ChunkList>(`/api/chunks?${sp.toString()}`),
         ]);
@@ -195,7 +198,18 @@ export default function DocView({
 
   // 文本原文按需抓取：折叠时不发请求；签名过期时重新领一次 file_url
   useEffect(() => {
-    if (!showSrc || kind !== "text" || !fileUrl || textBody) return;
+    if (!showSrc || kind !== "text" || textBody) return;
+    // 没有留档原文（老数据 / 粘贴入库）：正文单独要一次——详情默认不带了
+    if (!fileUrl) {
+      let alive = true;
+      void api<Document>(
+        `/api/documents/${encodeURIComponent(docId)}?include_chunks=false&include_text=true`)
+        .then((d) => { if (alive) setTextBody(d.text ?? ""); })
+        .catch((e) => {
+          if (alive) setTextError(e instanceof Error ? e.message : String(e));
+        });
+      return () => { alive = false; };
+    }
     let alive = true;
     async function run(): Promise<void> {
       try {
@@ -208,7 +222,7 @@ export default function DocView({
         if (/^HTTP (401|403)$/.test(e instanceof Error ? e.message : "")) {
           try {
             const fresh = await api<Document>(
-              `/api/documents/${encodeURIComponent(docId)}?include_chunks=false`);
+              `/api/documents/${encodeURIComponent(docId)}?include_chunks=false&include_text=false`);
             if (fresh.file_url) {
               setDoc(fresh);
               const r2 = await fetch(fresh.file_url);

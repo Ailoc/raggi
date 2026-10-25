@@ -62,6 +62,18 @@ interface ActiveJob {
   job_id: string;
 }
 
+/** 任务映射没变就不落 state：轮询每 2.5s 都会拿到一批新对象。 */
+function sameActive(a: Record<string, ActiveJob>, b: Record<string, ActiveJob>): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  return ka.every((k) => a[k]?.stage === b[k]?.stage && a[k]?.job_id === b[k]?.job_id);
+}
+
+function sameActiveList(a: ActiveJob[], b: ActiveJob[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => x.job_id === b[i]?.job_id && x.stage === b[i]?.stage);
+}
+
 interface PlanState {
   stale: boolean;
   custom: boolean;
@@ -103,6 +115,8 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
   const qRef = useRef("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const hadActiveJobs = useRef(false);
+  // 上一次轮询看到的「任务 + 阶段」指纹：没变就不重拉整张文档表
+  const jobKey = useRef("");
 
   const load = useCallback(
     async (targetPage = pageRef.current, query = qRef.current): Promise<void> => {
@@ -165,6 +179,11 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
    */
   const refreshJobs = useCallback(async (): Promise<void> => {
     clearTimeout(pollTimer.current);
+    if (document.visibilityState === "hidden") {
+      // 后台标签页不轮询：任务不会因为不看而停下，回到前台再取一次
+      pollTimer.current = setTimeout(() => { void refreshJobs(); }, 5000);
+      return;
+    }
     try {
       const r = await api<{ items: Array<{ doc_id: string; stage: string; job_id: string }> }>(
         "/api/jobs?active_only=true&limit=50");
@@ -175,12 +194,19 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
         if (j.doc_id) m[j.doc_id] = item;
         else loose.push(item);
       }
-      setJobs(m);
-      setOrphanJobs(loose);
+      // 空更新不落 state：每 2.5s 换一批新对象会让整张表重渲染
+      setJobs((prev) => (sameActive(prev, m) ? prev : m));
+      setOrphanJobs((prev) => (sameActiveList(prev, loose) ? prev : loose));
+      const key = r.items
+        .map((j) => `${j.job_id}:${j.stage}:${j.doc_id}`)
+        .sort()
+        .join("|");
       if (r.items.length > 0) {
         hadActiveJobs.current = true;
         pollTimer.current = setTimeout(() => {
-          void load();
+          // 任务阶段没变就不重拉整张表：进度是由上面这份 jobs 驱动的，
+          // 列表数据没有变化，重拉只会把表格整段重建。
+          if (jobKey.current !== key) void load();
           void refreshJobs();
         }, 2500);
       } else if (hadActiveJobs.current) {
@@ -190,9 +216,10 @@ export default function KbDocs({ kbId }: { kbId: string }): React.ReactElement {
         void load();
         void loadPlans();
       }
+      jobKey.current = key;
     } catch {
-      setJobs({});
-      setOrphanJobs([]);
+      setJobs((prev) => (Object.keys(prev).length ? {} : prev));
+      setOrphanJobs((prev) => (prev.length ? [] : prev));
     }
   }, [load]);
 

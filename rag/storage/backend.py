@@ -36,6 +36,30 @@ logger = logging.getLogger("raggi.storage")
 _BAD_NAME = ("/", "\\")
 
 
+def _dir_bytes_split(root: Path, sub: Path) -> tuple[int, int]:
+    """一次遍历同时得到 `root` 总占用与其中 `sub` 子树的占用。
+
+    改前是两次 `rglob`：`data_dir_bytes` 把 lancedb 也走一遍，
+    `lancedb_dir_bytes` 再走一遍——数据都堆在 lancedb 下，等于把最贵的
+    那棵树遍历两次。一次遍历按路径前缀分流即可。
+    """
+    total = sub_bytes = 0
+    try:
+        for p in root.rglob("*"):
+            try:
+                if not p.is_file():
+                    continue
+                size = p.stat().st_size
+            except OSError:
+                continue
+            total += size
+            if p.is_relative_to(sub):
+                sub_bytes += size
+    except OSError:
+        return -1, -1
+    return total, sub_bytes
+
+
 def _check_name(name: str) -> str:
     if not name or name.startswith(".") or any(c in name for c in _BAD_NAME):
         raise Invalid(f"非法的归档文件名: {name!r}")
@@ -131,16 +155,13 @@ class LocalBackend:
         return None
 
     def stats(self) -> dict:
-        def _dir_bytes(p: Path) -> int:
-            try:
-                return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-            except OSError:
-                return -1
+        data_bytes, lance_bytes = _dir_bytes_split(
+            self.data_dir, self.data_dir / "lancedb")
 
         out = {
             "backend": self.kind,
-            "data_dir_bytes": _dir_bytes(self.data_dir),
-            "lancedb_dir_bytes": _dir_bytes(self.data_dir / "lancedb"),
+            "data_dir_bytes": data_bytes,
+            "lancedb_dir_bytes": lance_bytes,
         }
         try:
             out["disk_free_bytes"] = shutil.disk_usage(

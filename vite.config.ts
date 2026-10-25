@@ -24,10 +24,14 @@ export default defineConfig({
         // 依赖合并成**一个** vendor 块：MUI 内部 import React，拆成两块会
         // 形成 react ↔ mui 循环（rollup 会警告并可能把模块塞进任意一侧）。
         // 应用码与依赖分开仍然成立——日常改动的只有 index 那块。
+        //
+        // 图标库**不放进 vendor**：@mui/icons-material 是按图标逐条导入的，
+        // 钉进 vendor 会把只有懒加载页才用的图标（上传、描述、任务……）
+        // 全部拉进首包，路由分包等于白拆。交给 rollup 按引用关系分。
         manualChunks: {
           vendor: [
             "react", "react-dom",
-            "@mui/material", "@mui/icons-material",
+            "@mui/material",
             "@emotion/react", "@emotion/styled",
           ],
         },

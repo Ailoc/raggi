@@ -147,7 +147,28 @@ let queue: QueueSummary = { jobs: [], active: 0, loaded: false };
 const queueListeners = new Set<() => void>();
 const queueSnapshot = (): QueueSummary => queue;
 
+/**
+ * 队列摘要是否没变。
+ *
+ * 轮询每 4 秒拿到的新数组和上一份逐项相同（没有任务在推进）时，
+ * 换一个新对象只会让顶栏与总览页白重渲染一次——列表、图标、Tooltip
+ * 全都要重新 reconcile。只比真正影响显示的字段。
+ */
+function sameQueue(a: QueueSummary, b: QueueSummary): boolean {
+  if (a.loaded !== b.loaded || a.active !== b.active
+      || a.jobs.length !== b.jobs.length) return false;
+  for (let i = 0; i < a.jobs.length; i += 1) {
+    const x = a.jobs[i];
+    const y = b.jobs[i];
+    if (x.job_id !== y.job_id || x.stage !== y.stage
+        || x.progress !== y.progress || x.terminal !== y.terminal
+        || x.doc_id !== y.doc_id || x.error !== y.error) return false;
+  }
+  return true;
+}
+
 function setQueue(next: QueueSummary): void {
+  if (sameQueue(queue, next)) return;
   queue = next;
   for (const l of queueListeners) l();
 }

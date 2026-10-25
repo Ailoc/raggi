@@ -43,8 +43,18 @@ export function stageLabel(stage: string): string {
 export const PENDING_STATUS = new Set(["indexing", "pending", "running", "queued", "parse", "split", "embed"]);
 
 const POLL_MS = 700;
+/**
+ * 轮询间隔逐步退让：前几秒按 0.7s 盯，之后放慢到 3s。
+ *
+ * 入库通常几十秒：固定 0.7s 会在一次入库里打几十上百次请求，而用户
+ * 只关心终点。前 5 次保持灵敏（短任务几乎立刻出结果），之后退让。
+ */
+function pollDelay(attempt: number): number {
+  if (attempt < 5) return POLL_MS;
+  return Math.min(3000, POLL_MS * Math.pow(1.6, attempt - 4));
+}
 /** 轮询上限：约 10 分钟。超时后不再等待，但任务仍在后台继续。 */
-const MAX_POLLS = Math.ceil(600_000 / POLL_MS);
+const MAX_POLLS = 240;
 
 /**
  * 等待任务结束。
@@ -62,7 +72,7 @@ export async function waitForJob(
 ): Promise<Job | null> {
   for (let i = 0; i < MAX_POLLS; i++) {
     if (signal?.aborted) return null;
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    await new Promise((r) => setTimeout(r, pollDelay(i)));
     if (signal?.aborted) return null;
     let job: Job;
     try {

@@ -91,10 +91,12 @@ function EvidenceList({
       {hits.map((hit, index) => {
         const isOpen = expanded === hit.chunk_id;
         return (
-          <Box component="li" key={hit.chunk_id}>
+          <Box component="li" key={hit.chunk_id} className="lg-cv-auto">
             <GlassPanel
               radius={12}
               look={look}
+              // 证据卡数量随命中数增长：不做实时模糊，否则滚动每帧重采样
+              blur={false}
               style={{
                 border: `1px solid ${isOpen
                   ? theme.palette.primary.main

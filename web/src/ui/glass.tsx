@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentPropsWithoutRef, CSSProperties, ReactNode } from "react";
 import Box from "@mui/material/Box";
 import type { Theme } from "@mui/material/styles";
@@ -83,6 +83,15 @@ export interface GlassPanelProps extends Omit<ComponentPropsWithoutRef<"div">, "
   sx?: SxProps<Theme>;
   /** 渲染成哪个元素（默认 div）。取值受 open-glass-ui 限制。 */
   as?: "aside" | "div" | "nav" | "section" | "span";
+  /**
+   * 关掉这块面的实时模糊（保留填充与高光边缘）。
+   *
+   * 模糊的成本 ∝ 面积 × 数量，而且底下内容一动就要重算一次。列表卡会
+   * 随数据线性增长（证据、对话轮次、知识库），实测检索页 10 张卡时，
+   * 去掉卡片模糊后帧间隔 p50 从 ~117ms 降到 ~50ms（本机无 GPU）。
+   * 顶栏、输入台、对话框这类"少量且固定"的面继续保留模糊。
+   */
+  blur?: boolean;
   /**
    * 去掉材质的投影，只保留玻璃本身。
    *
@@ -214,6 +223,7 @@ export const GlassPanel = forwardRef<HTMLElement, GlassPanelProps>(
     style,
     sx,
     as = "div",
+    blur = true,
     flat = false,
     ...rest
   }, ref): React.ReactElement {
@@ -223,7 +233,12 @@ export const GlassPanel = forwardRef<HTMLElement, GlassPanelProps>(
         as={as}
         material={material}
         look={look}
-        className={`lg-glass-panel${flat ? " lg-glass-flat" : ""}${className ? ` ${className}` : ""}`}
+        className={[
+          "lg-glass-panel",
+          flat ? "lg-glass-flat" : "",
+          blur ? "" : "lg-glass-flat-blur",
+          className ?? "",
+        ].filter(Boolean).join(" ")}
         style={{ borderRadius: radius, ...style }}
         {...rest}
       >
@@ -319,10 +334,57 @@ export interface GlassBackdropProps {
   radius?: number;
 }
 
+/**
+ * 滚动期间暂停极光。
+ *
+ * 底下的光一直在动时，压在上面的每一块玻璃每帧都要重新模糊一次；
+ * 光静止下来，合成器才能把模糊结果缓存住。停止滚动约 220ms 后恢复，
+ * 用户看到的是"滚动时背景静下来"，而不是动画被打断。
+ */
+function useAuroraPause(enabled: boolean): boolean {
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  useEffect(() => {
+    if (!enabled) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const resume = (): void => {
+      if (!pausedRef.current) return;
+      pausedRef.current = false;
+      setPaused(false);
+    };
+    // 滚动发生在各自的滚动容器里（main / 面板），必须用捕获阶段才收得到
+    const onScroll = (): void => {
+      if (!pausedRef.current) {
+        pausedRef.current = true;
+        setPaused(true);
+      }
+      clearTimeout(timer);
+      timer = setTimeout(resume, 220);
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === "hidden") {
+        pausedRef.current = true;
+        setPaused(true);
+      } else {
+        onScroll();
+      }
+    };
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("visibilitychange", onVisibility);
+      clearTimeout(timer);
+    };
+  }, [enabled]);
+  return paused;
+}
+
 export function GlassBackdrop({
   variant = "shell",
   radius = 0,
 }: GlassBackdropProps = {}): React.ReactElement {
+  const paused = useAuroraPause(variant === "shell");
   /**
    * 动态光斑的配色：清新路线。
    *
@@ -353,7 +415,7 @@ export function GlassBackdrop({
   return (
     <Box
       aria-hidden
-      className={`lg-aurora lg-aurora--${variant}`}
+      className={`lg-aurora lg-aurora--${variant}${paused ? " lg-aurora--paused" : ""}`}
       sx={(t: Theme) => {
         const dark = t.palette.mode === "dark";
         const p = t.palette.primary.main;

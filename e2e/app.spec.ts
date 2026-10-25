@@ -410,6 +410,65 @@ test("窄屏：模型设置不横向溢出，设置项收成一列", async ({ pa
   expect(new Set(xs).size).toBe(1);
 });
 
+test("对话：正文按增量逐段出现，结束才落成完整回答", async ({ page }) => {
+  // 用分块 SSE 模拟真流：mock 的 fulfill 会一次性给完，测不到"逐段出现"，
+  // 也测不到正文独立订阅（LiveAnswer）是否接管了正在生成的那一行。
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window);
+    const pieces = ["苹果", "属于", "水果", "，", "常见于", "水果列表。"];
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof Request ? input.url : String(input);
+      if (!url.includes("/api/answer/stream")) return original(input, init);
+      const enc = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (name: string, data: unknown): void => {
+            controller.enqueue(
+              enc.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`));
+          };
+          send("sources", { citations: [] });
+          for (const text of pieces) {
+            await new Promise((r) => setTimeout(r, 150));
+            send("delta", { text });
+          }
+          send("done", { took_ms: 900, mode: "hybrid", degraded_reason: null });
+          controller.close();
+        },
+      });
+      return Promise.resolve(new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+      }));
+    };
+  });
+  await page.route("**/api/models", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ features: { answer: true }, retrieve: {} }),
+    }),
+  );
+
+  await page.goto("/#/search");
+  await page.getByRole("textbox", { name: "检索或对话输入" }).fill("苹果");
+  await page.getByRole("textbox", { name: "检索或对话输入" }).press("Enter");
+  await page.getByText(/条 · 候选/).first().waitFor();
+  await page.getByRole("button", { name: "对话模式" }).click();
+  await page.getByRole("textbox", { name: "检索或对话输入" }).fill("苹果是什么？");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const thread = page.locator('[aria-label="对话记录"]');
+  await expect(thread).toContainText("苹果");
+  const partial = await thread.innerText();
+  expect(partial).not.toContain("水果列表。");
+
+  await expect(thread).toContainText("水果列表。", { timeout: 5000 });
+  const full = await thread.innerText();
+  expect(full.length).toBeGreaterThan(partial.length);
+});
+
 test("主题切换跨刷新保留", async ({ page }) => {
   await page.goto("/");
   const before = await page.evaluate(

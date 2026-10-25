@@ -1241,3 +1241,80 @@ def test_reading_region_shows_the_chosen_chunk_source_text():
         "点引用没有把阅读区切到被引用的分块"
     assert "onSelectChunk={handleSelectChunk}" in search, \
         "阅读区没有接上分块切换"
+
+
+# ---- 性能预算（2026-10-24） -----------------------------------------------
+
+
+def test_list_cards_do_not_pay_for_live_backdrop_blur():
+    """列表卡不做实时模糊，滚动时暂停极光。
+
+    模糊成本 ∝ 面积 × 数量，列表又会随数据线性增长（证据、对话轮次、
+    知识库）。实测检索页 10 张卡时，去掉卡片模糊后帧间隔 p50 从
+    ~117ms 降到 ~50ms；极光在滚动的每一帧都要被重新模糊一次。
+    顶栏、输入台、对话框这类固定少量的面仍保留模糊。
+    """
+    for name in ("ui/EvidenceList.tsx", "ui/ChatThread.tsx", "views/KbList.tsx"):
+        src = read(SRC / name)
+        assert "blur={false}" in src, f"{name} 里的列表卡还在实时模糊"
+
+    glass = read(UI / "glass.tsx")
+    assert "lg-glass-flat-blur" in glass, "GlassPanel 没有提供关模糊的开关"
+    assert "useAuroraPause" in glass, "极光没有随滚动暂停"
+
+    css = read(UI / "glass.css")
+    for rule in (".lg-aurora--paused", ".lg-glass-flat-blur",
+                 "prefers-reduced-transparency"):
+        assert rule in css, f"glass.css 缺少 {rule}"
+
+
+def test_streaming_answer_is_isolated_from_page_state():
+    """流式正文走独立订阅源：每个 delta 只重渲染正在生成的那一行。
+
+    改前每帧都替换整轮对话数组，878 行的 Search 整棵 reconcile，
+    并且顺带触发「贴底跟随」里的布局读取。
+    """
+    search = read(VIEWS / "Search.tsx")
+    assert "new LiveAnswerStore()" in search, "检索页没有使用流式正文订阅源"
+    assert "live={liveAnswer}" in search, "对话线程没有接上正文订阅源"
+    assert "flushChatAnswer" not in search, \
+        "逐帧 patch 整轮正文的旧实现又回来了"
+
+    chat = read(UI / "ChatThread.tsx")
+    assert "useSyncExternalStore" in chat and "<LiveAnswer" in chat, \
+        "正在生成的那一行没有单独订阅正文"
+
+    store = read(LIB / "liveanswer.ts")
+    assert "requestAnimationFrame" in store, "正文更新没有按帧合并"
+
+
+def test_polling_keeps_state_when_nothing_changed():
+    """轮询拿到相同数据时不换新对象——否则每 2~4 秒整表重建一次。"""
+    store = read(LIB / "store.ts")
+    assert "function sameQueue" in store, "队列摘要仍在无条件 set"
+    jobs = read(VIEWS / "Jobs.tsx")
+    assert "function sameJobs" in jobs, "任务列表仍在无条件 setItems"
+    kbdocs = read(VIEWS / "KbDocs.tsx")
+    assert "jobKey" in kbdocs, "文档页轮询没有按任务指纹跳过整表重拉"
+
+
+def test_search_result_count_is_bounded():
+    """返回条数有上限：每条证据都是一块卡片，曾经能填到 200。"""
+    params = read(LIB / "searchparams.ts")
+    assert re.search(r"Math\.min\(50,", params), "top_k 没有上限"
+
+
+def test_icons_are_not_pinned_into_the_first_chunk():
+    """图标库不钉进 vendor：只有懒加载页才用的图标会被拉回首屏。"""
+    vite = read(ROOT / "vite.config.ts")
+    assert "@mui/icons-material" not in vite, \
+        "图标库又被钉进 vendor，路由分包等于白拆"
+    assert "manualChunks" in vite, "vendor 分包配置丢了"
+
+
+def test_doc_view_does_not_fetch_the_whole_text_by_default():
+    """文档详情默认不带正文（20MB 级），原文按需取。"""
+    docview = read(VIEWS / "DocView.tsx")
+    assert "include_text=false" in docview, "工作台仍在拉整篇正文"
+    assert "include_text=true" in docview, \
+        "没有留档原文时缺少「按需再取正文」的回退"
