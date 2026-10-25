@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse
 from rag.api._common import get_ctx, raise_operation_error
 from rag.api.responses import SearchOut, error_responses
 from rag.api.schemas import SearchReq
+from rag.core.errors import GateBusy
 from rag.retrieval.search import search
 
 router = APIRouter(
@@ -80,6 +81,9 @@ async def _run(ctx, body: SearchReq) -> dict:
             search, ctx.store, ctx.registry.embedder, reranker,
             body.q, cfg, filters, top_k, **opts)
     except HTTPException:
+        raise
+    except GateBusy:
+        # 容量背压：503 + Retry-After，交给全局 RaggiError handler 序列化
         raise
     except Exception as e:  # noqa: BLE001
         raise_operation_error(e, "检索失败")

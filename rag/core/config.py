@@ -123,7 +123,14 @@ class EmbedConfig(BaseModel):
     # 向量维度必须与模型实际输出一致；不一致会导致写入全部失败
     dim: int = 1024
     batch: int = 64
+    # 入库分片并发（每进程）
     concurrency: int = 4
+    # 检索侧 embedding 并发上限（每进程）。0 = 不限（单机默认，行为不变）。
+    # 多副本/高并发部署建议显式设置：超过这个数的检索会快速 503，
+    # 而不是和入库抢 provider、把所有人的 p95 一起拖垮。
+    query_concurrency: int = 0
+    # 拿不到槽位时最多等多久（毫秒）；超时 → 503 + Retry-After: 1
+    query_wait_ms: int = 50
     normalize: bool = True
     device: str = "cpu"
     timeout: int = 60

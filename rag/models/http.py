@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import contextmanager
 
 import httpx
 
@@ -135,3 +136,20 @@ class ScaledSemaphore:
     def __exit__(self, *exc):
         self._sem.release()
         return False
+
+    @contextmanager
+    def slot(self, wait_seconds: float = 0.0):
+        """带超时的槽位：拿不到就抛 `GateBusy`（快速失败，不无限排队）。
+
+        读路径专用：请求已经在线上了，让它排队等 10 秒再失败，比立刻
+        告诉它"忙，1 秒后重试"更糟——排队会把 p95 一起拖垮。
+        """
+        from rag.core.errors import GateBusy
+
+        if not self._sem.acquire(timeout=max(0.0, float(wait_seconds))):
+            raise GateBusy(
+                f"检索并发已满（{self.permits} 路），请稍后重试")
+        try:
+            yield
+        finally:
+            self._sem.release()

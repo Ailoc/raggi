@@ -733,7 +733,13 @@ export default function Search(): React.ReactElement {
                   “{query}”
                 </Typography>
                 {searchResp && (
-                  <Typography variant="body2" color="text.secondary" aria-live="polite">
+                  <Typography
+                    variant="body2" color="text.secondary" aria-live="polite"
+                    // 分段耗时放 tooltip：慢在模型还是慢在检索，一眼能看出来
+                    title={searchResp.embed_ms !== undefined
+                      ? `模型 ${searchResp.embed_ms}ms · 检索 ${searchResp.search_ms}ms`
+                      : undefined}
+                  >
                     显示 {searchResp.results.length} 条 · 候选 {searchResp.total_candidates} 条
                     {" · "}{searchResp.took_ms}ms · {modeLabel(searchResp.mode)} · {searchResp.score_kind}
                   </Typography>

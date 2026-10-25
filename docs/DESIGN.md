@@ -904,6 +904,8 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
 | health 汇总 | 三项 chunks 检查（按文档计数 / 待重建 / 模型集合）合成**一次 Arrow 窄列扫描**，不再 `to_pylist()` 成 Python 行；扫描失败退回逐项查询，每项仍各自汇报「未知」 | 2 万块 cold health p50 **40→8–17ms**；`tests/test_health_scan.py` |
 | 容量统计 | `data_dir_bytes` 与 `lancedb_dir_bytes` 由两次 `rglob` 合成一次遍历（lancedb 是 data_dir 的子树，等于最贵的树走了两遍） | 分母口径不变；`tests/test_disk_stats.py` |
 | 重切分写入 | 正文 `content_hash` 未变时只 `set_doc_fields` 更新小字段，不整行 upsert（不重写 20MB 正文） | `tests/test_resplit_write.py` |
+| 查询侧背压 | `embed.query_concurrency`（每进程，默认 0=不限）：不同查询抢槽位，拿不到 50ms 内直接 503 + Retry-After；相同查询在单飞锁上合流、不额外占槽 | `tests/test_query_gate.py` |
+| 分段计时 | `took_ms` 改为端到端（含 embedding），新增 `embed_ms` / `search_ms`：改前模型往返被排除在计时外 | 检索页耗时 tooltip；`tests/test_query_gate.py` |
 
 ---
 

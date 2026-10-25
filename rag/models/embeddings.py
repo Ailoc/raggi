@@ -10,10 +10,12 @@ embed_one 结果缓存（同文本不重复调用模型）。
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 from rag.core.cache import TTLCache
 from rag.core.config import EmbedConfig
+from rag.models.http import ScaledSemaphore
 
 MAX_RETRIES = 3
 BACKOFF_SECONDS = (0.5, 1.0, 2.0)
@@ -84,11 +86,15 @@ class EmbedUnavailable(RuntimeError):
 
 class Embedder:
     def __init__(self, lc_embeddings, dim: int, model: str, normalize: bool,
-                 cache=None):
+                 cache=None, query_gate=None, gate_wait_ms: int = 50):
         self.lc = lc_embeddings
         self.dim = dim
         self.model = model
         self.normalize = normalize
+        # 查询侧并发闸（与入库闸分开）：检索突发时保护 provider，拿不到
+        # 槽位直接 503，而不是让请求一起排队到超时。
+        self._query_gate = query_gate
+        self._gate_wait = max(0, int(gate_wait_ms)) / 1000.0
         # 向量随模型变化，所以键里带模型名：换了 embedding 模型后
         # 旧缓存必须失效，否则会拿到旧模型的向量。
         #
@@ -126,10 +132,39 @@ class Embedder:
         """
         key = f"{self.model}\x00{text}"
         vec, _age, _loaded = self._one_cache.get_or_load(
-            key, lambda: self.embed([text])[0])
+            key, lambda: self._embed_one_guarded(text))
         return vec
+
+    def _embed_one_guarded(self, text: str) -> list[float]:
+        """真正的 provider 调用：不同查询抢槽位，相同查询在单飞锁上合流。"""
+        if self._query_gate is None:
+            return self.embed([text])[0]
+        with self._query_gate.slot(self._gate_wait):
+            return self.embed([text])[0]
+
+
+_QUERY_GATES: dict[int, ScaledSemaphore] = {}
+_QUERY_GATES_LOCK = threading.Lock()
+
+
+def query_gate(permits: int) -> ScaledSemaphore:
+    """进程级查询闸（按 permits 复用，模型热切换不会换闸）。"""
+    n = max(1, int(permits))
+    gate = _QUERY_GATES.get(n)
+    if gate is not None:
+        return gate
+    with _QUERY_GATES_LOCK:
+        gate = _QUERY_GATES.get(n)
+        if gate is None:
+            gate = ScaledSemaphore(n)
+            _QUERY_GATES[n] = gate
+        return gate
 
 
 def build_embedder(cfg: EmbedConfig, cache=None) -> Embedder:
-    return Embedder(build_lc_embeddings(cfg), cfg.dim, cfg.model, cfg.normalize,
-                    cache=cache)
+    limits = int(getattr(cfg, "query_concurrency", 0) or 0)
+    return Embedder(
+        build_lc_embeddings(cfg), cfg.dim, cfg.model, cfg.normalize,
+        cache=cache,
+        query_gate=query_gate(limits) if limits > 0 else None,
+        gate_wait_ms=int(getattr(cfg, "query_wait_ms", 50) or 0))

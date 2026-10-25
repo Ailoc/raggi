@@ -119,6 +119,20 @@ CDN / 静态
 
 ### 阶段 4：容量与治理
 
+#### 4a 读路径背压与分段计时（已完成）
+
+- [x] **查询侧 embedding 闸门**：`embed.query_concurrency`（每进程，默认 0=不限）
+  + `embed.query_wait_ms`（默认 50ms）。不同查询抢槽位，拿不到直接
+  `503 + Retry-After: 1`；**相同查询在单飞锁上合流，不占额外槽位**。
+  检索路径此前完全没有并发上限，几百个不同查询会同时打爆 provider。
+- [x] **分段计时**：`took_ms` 改为端到端（含 embedding），新增
+  `embed_ms` / `search_ms`。改前 80–150ms 的模型往返被排除在计时外，
+  看起来检索很快，实际瓶颈看不见。
+- [x] compose 里给多副本形态显式配置 `RAG_EMBED__QUERY_CONCURRENCY=32`
+- [x] 测试：闸门拒绝 / 单飞豁免 / 503 映射 / 计时对账（`tests/test_query_gate.py`）
+
+#### 4b 仍待做
+
 - 准入控制：按队列深度与 p95 返回 429/503，不无限排队；
 - 自动扩缩：按 CPU / 在飞请求 / p95 扩 API 副本；
 - LLM/embedding 连接池与超时预算；SSE 网关长连接参数；

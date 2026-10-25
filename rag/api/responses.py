@@ -326,6 +326,9 @@ class SearchHitOut(BaseModel):
 class SearchOut(BaseModel):
     query: str
     took_ms: float
+    # 分段耗时（毫秒）：模型往返 vs 检索+组装
+    embed_ms: float = 0.0
+    search_ms: float = 0.0
     mode: str
     score_kind: str
     degraded_reason: str | None = None

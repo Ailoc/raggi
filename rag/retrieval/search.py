@@ -194,11 +194,12 @@ def search(
     # `filters["_store"] = store`——把 store 塞进「用户可传的过滤条件」字典里
     # 一路带到 SQL 拼装处，那是一条隐式通道：filters 同时扮演两种角色，
     # 任何人把它原样回显或转发就会带出内部状态。
+    t_start = time.perf_counter()
     where = chunk_prefilter(store, filters)
     q_seg = segment(q) if cfg.use_jieba else q
     q_vec = embedder.embed_one(q)
+    t_embed_ms = (time.perf_counter() - t_start) * 1000.0
 
-    t0 = time.perf_counter()
     degraded = None
     # 应用层精排器（HTTP / 本地 CrossEncoder）在所有通道下统一在召回之后应用；
     # LanceDB 原生 reranker 则交给它内部的融合流程。
@@ -298,9 +299,15 @@ def search(
             "context": context,
         })
 
+    # 分段计时：took_ms 现在**包含** embedding（改前从 embed 之后才开始计，
+    # 把 80–150ms 的模型往返藏了起来，让人以为检索很快）。拆开之后
+    # 「慢在模型还是慢在检索」一眼能看出来。
+    total_ms = (time.perf_counter() - t_start) * 1000.0
     return {
         "query": q,
-        "took_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "took_ms": round(total_ms, 1),
+        "embed_ms": round(t_embed_ms, 1),
+        "search_ms": round(max(0.0, total_ms - t_embed_ms), 1),
         "mode": cfg.mode,
         "score_kind": score_kind,
         "degraded_reason": degraded,

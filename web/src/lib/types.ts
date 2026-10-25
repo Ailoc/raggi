@@ -200,6 +200,9 @@ export interface SearchResponse {
   /** 查询词回显 */
   query: string;
   took_ms: number;
+  /** 分段耗时（毫秒）：模型往返 vs 检索+组装 */
+  embed_ms?: number;
+  search_ms?: number;
   mode: string;
   /** score 的量纲说明 */
   score_kind: string;

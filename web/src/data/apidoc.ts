@@ -136,7 +136,9 @@ export const GROUPS: Group[] = [
         },
         fields: [
           { name: "query", type: "string", desc: "查询词回显" },
-          { name: "took_ms", type: "number", desc: "检索耗时（毫秒）" },
+          { name: "took_ms", type: "number", desc: "端到端耗时（毫秒，含 embedding）" },
+          { name: "embed_ms", type: "number", desc: "模型往返耗时（缓存命中接近 0）" },
+          { name: "search_ms", type: "number", desc: "检索、精排与组装耗时" },
           { name: "mode", type: "string", desc: "实际使用的检索通道" },
           { name: "score_kind", type: "string", desc: "score 的量纲：rrf / bm25 / cosine_similarity" },
           { name: "degraded_reason", type: "string|null", desc: "降级说明；正常为 null" },

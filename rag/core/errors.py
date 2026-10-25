@@ -64,6 +64,17 @@ class QueueFull(RaggiError):
     headers = {"Retry-After": "30"}
 
 
+class GateBusy(Unavailable):
+    """查询侧资源闸门已满：快速失败，避免把 provider 打爆。
+
+    与 `QueueFull` 同类（503 = 我在忙，稍后再试），但发生在读路径：
+    并发检索超过 embedding 服务容量时，排队比拒绝更糟——排队的请求
+    会一起超时，p95 直接崩。`Retry-After` 给 1 秒，让客户端错峰重试。
+    """
+
+    headers = {"Retry-After": "1"}
+
+
 class AuthFailed(RaggiError):
     """鉴权失败（401）或权限不足（403）。"""
     status_code = 401
