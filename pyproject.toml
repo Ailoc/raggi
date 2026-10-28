@@ -32,7 +32,7 @@ local-models = ["langchain-huggingface>=0.1", "sentence-transformers>=3.0"]
 #   RAG_REDIS__URL 配了才 import redis；见 docs/ARCH-SCALE-2026-10-25.md
 scale = ["redis>=5", "psycopg[binary]>=3.1"]
 # 向量后端替换（阶段 3b）：客户端与服务端 minor 版本相差不要超过 1
-vector-qdrant = ["qdrant-client>=1.12"]
+vector-qdrant = ["qdrant-client>=1.20,<1.22"]
 dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6", "mypy>=1.8"]
 
 [tool.pytest.ini_options]

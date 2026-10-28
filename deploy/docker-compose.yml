@@ -30,10 +30,10 @@ services:
       timeout: 2s
       retries: 10
 
-  # 向量库（阶段 3b 接线后由 storage.vector_engine=qdrant 启用；
-  # 客户端与服务端 minor 版本相差不要超过 1）
+  # 向量库（storage.vector_engine=qdrant 时启用）。
+  # 服务端版本与 pyproject 的 qdrant-client 对齐（minor 相差不超过 1）。
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    image: qdrant/qdrant:v1.20.0
     ports:
       - "6333:6333"
     volumes:

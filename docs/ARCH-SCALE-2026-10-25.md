@@ -133,7 +133,9 @@ CDN / 静态
   `_relevance_score`
 - [x] 真实 Qdrant 6 条集成测试（过滤/恒假/全文/融合/删除/改写）
   `tests/test_qdrant_store.py`（`RAG_TEST_QDRANT_URL` 才跑）
-- [x] `deploy/docker-compose.yml` 增加 qdrant 服务；可选依赖 `raggi[vector-qdrant]`
+- [x] `deploy/docker-compose.yml` 增加 qdrant 服务（镜像 v1.20.0，与
+  `qdrant-client>=1.20,<1.22` 对齐；客户端/服务端 minor 相差不超过 1）
+- [x] 本地实例验证：Qdrant 1.20.0 上 11 条集成测试全绿，无版本兼容警告
 
 #### 3b-2 读路径补齐（已完成，未接线）
 
