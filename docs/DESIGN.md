@@ -831,12 +831,15 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
   几乎看不见的暗环。
 - **无障碍是库负责的**：`prefers-reduced-transparency`、`forced-colors`、
   `prefers-reduced-motion` 都是设计好的状态，不用再手写一份。
-- **模糊要有预算**（2026-10-24）：`backdrop-filter` 的成本 ∝ 面积 × 数量，
-  而且背后每动一次就要重算。所以只有**固定少量**的面保留实时模糊
-  （顶栏、输入台、对话框、阅读区）；证据卡、对话轮次、知识库卡这类随数据
-  线性增长的列表项走 `GlassPanel blur={false}`（保留填充、高光边与圆角，
-  只是不采样背景）。极光在滚动期间暂停（`useAuroraPause`），停下来 220ms
-  后恢复——滚动时背景静下来，玻璃才能复用模糊结果。
+- **模糊要有预算，但不能拿材质换**：`backdrop-filter` 的成本 ∝ 面积 × 数量，
+  而且背后每动一次就要重算。2026-10-24 曾把证据卡/对话轮次/知识库卡的
+  实时模糊关掉、改用近白底——帧数确实翻倍，但观感直接塌成白卡片，
+  用户的原话是"液态玻璃完全丢失"，**已整体回退**。现在的手段：
+  极光在滚动期间暂停（`useAuroraPause`，停 220ms 后恢复）、屏幕外的
+  列表项 `content-visibility: auto` 不参与布局与绘制、
+  `prefers-reduced-transparency` 时全站降级为无模糊。
+  **列表卡、顶栏、输入台、对话框都保留真实模糊**；
+  卡片的 `backdrop-filter` 有 E2E 断言（`test("液态玻璃：卡片必须真的在模糊")`）。
 
 ## 12. 性能设计
 
@@ -894,7 +897,7 @@ CSS 优先的液态玻璃系统，**零运行时依赖**，40 个无障碍组件
 |---|---|---|
 | 读语义的 POST | `/search`、`/search/report`、`/answer`、`/answer/stream`、`/embed` 不再递增 `write_epoch`、不清 health/stats 快照（`_READ_ONLY_POST_PATHS`） | 检索前 health 热 3.3ms，检索后 20.1ms（快照被打掉）；`tests/test_read_only_paths.py` |
 | 响应压缩 | `GZipMiddleware`（≥1024B，level 6，>128KB 走线程池）；SSE 在默认排除列表里 | 首屏 JS 634KB + CSS 87KB 原先**无 content-encoding**；`tests/test_compression.py` |
-| 玻璃预算 | 证据卡/对话轮次/知识库卡 `blur={false}`（保留填充与高光边）；极光滚动时暂停、后台标签页暂停；`prefers-reduced-transparency` 全量降级 | 检索页滚动 2s：p50 帧间隔 150→67ms、帧数 13→27（本机无 GPU，绝对值不代表有 GPU 的机器） |
+| 玻璃 | 列表卡保留**真实模糊**（曾用 `blur={false}` 换性能，观感塌成白卡片后已回退）；极光滚动暂停、后台标签页暂停、屏幕外 `content-visibility`；`prefers-reduced-transparency` 全量降级 | 卡片 computed `backdrop-filter: blur(11.9px) …`；E2E 断言卡片必须真的在模糊；本机无 GPU 的绝对帧数不作结论 |
 | 流式正文 | `LiveAnswerStore` + `useSyncExternalStore`：delta 只重渲染正在生成的那一行；贴底跟随挂在增长回调上 | E2E「正文按增量逐段出现」 |
 | 分块编辑后的 FTS | ≤500 行同步重建（改完立刻搜得到），更大交给后台去抖（1s），health 如实显示待重建 | `tests/test_fts_refresh.py` |
 | 入库写锁 | 原文留档（本地 rename / s3 上传）移到锁外；任务终态行也在锁外写 | `tests/test_ingest_lock_scope.py` 用探针锁断言 |

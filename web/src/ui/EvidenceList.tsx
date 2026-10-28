@@ -95,8 +95,6 @@ function EvidenceList({
             <GlassPanel
               radius={12}
               look={look}
-              // 证据卡数量随命中数增长：不做实时模糊，否则滚动每帧重采样
-              blur={false}
               style={{
                 border: `1px solid ${isOpen
                   ? theme.palette.primary.main

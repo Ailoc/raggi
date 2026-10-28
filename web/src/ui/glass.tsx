@@ -84,15 +84,6 @@ export interface GlassPanelProps extends Omit<ComponentPropsWithoutRef<"div">, "
   /** 渲染成哪个元素（默认 div）。取值受 open-glass-ui 限制。 */
   as?: "aside" | "div" | "nav" | "section" | "span";
   /**
-   * 关掉这块面的实时模糊（保留填充与高光边缘）。
-   *
-   * 模糊的成本 ∝ 面积 × 数量，而且底下内容一动就要重算一次。列表卡会
-   * 随数据线性增长（证据、对话轮次、知识库），实测检索页 10 张卡时，
-   * 去掉卡片模糊后帧间隔 p50 从 ~117ms 降到 ~50ms（本机无 GPU）。
-   * 顶栏、输入台、对话框这类"少量且固定"的面继续保留模糊。
-   */
-  blur?: boolean;
-  /**
    * 去掉材质的投影，只保留玻璃本身。
    *
    * 库的默认投影是 `0 16px 48px -8px` 的大范围暗影，堆叠的代码卡片
@@ -223,7 +214,6 @@ export const GlassPanel = forwardRef<HTMLElement, GlassPanelProps>(
     style,
     sx,
     as = "div",
-    blur = true,
     flat = false,
     ...rest
   }, ref): React.ReactElement {
@@ -236,7 +226,6 @@ export const GlassPanel = forwardRef<HTMLElement, GlassPanelProps>(
         className={[
           "lg-glass-panel",
           flat ? "lg-glass-flat" : "",
-          blur ? "" : "lg-glass-flat-blur",
           className ?? "",
         ].filter(Boolean).join(" ")}
         style={{ borderRadius: radius, ...style }}

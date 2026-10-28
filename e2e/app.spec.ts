@@ -469,6 +469,25 @@ test("对话：正文按增量逐段出现，结束才落成完整回答", async
   expect(full.length).toBeGreaterThan(partial.length);
 });
 
+test("液态玻璃：卡片必须真的在模糊", async ({ page }) => {
+  // 回归防护：曾为了滚动性能把列表卡的 backdrop-filter 关掉，观感直接
+  // 塌成白卡片。材质是产品的一部分，不能当成可牺牲的性能项。
+  await page.goto("/#/");
+  const card = page.locator(".lg-kb-card").first();
+  await expect(card).toBeVisible();
+  const blur = await card.evaluate((el) => getComputedStyle(el).backdropFilter);
+  expect(blur).toMatch(/blur\(/);
+
+  await page.goto("/#/search");
+  await page.getByRole("textbox", { name: "检索或对话输入" }).fill("苹果");
+  await page.getByRole("textbox", { name: "检索或对话输入" }).press("Enter");
+  await expect(page.getByText("检索结果")).toBeVisible();
+  const evidence = page.locator('[aria-label="检索证据"] [data-ogui-glass]').first();
+  await expect(evidence).toBeVisible();
+  const eblur = await evidence.evaluate((el) => getComputedStyle(el).backdropFilter);
+  expect(eblur).toMatch(/blur\(/);
+});
+
 test("主题切换跨刷新保留", async ({ page }) => {
   await page.goto("/");
   const before = await page.evaluate(

@@ -175,7 +175,7 @@ export default function KbList(): React.ReactElement {
 function KbCard({ kb }: { kb: Kb }): React.ReactElement {
   const look = useGlassLook("card");
   return (
-    <GlassPanel radius={20} className="lg-kb-card" look={look} blur={false}>
+    <GlassPanel radius={20} className="lg-kb-card" look={look}>
       <CardActionArea
         onClick={() => go(href("kb", kb.kb_id, "docs"))}
         sx={{

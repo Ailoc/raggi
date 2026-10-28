@@ -225,8 +225,6 @@ const ChatTurnRow = memo(function ChatTurnRow({
           <GlassPanel
             radius={16}
             look={look}
-            // 对话轮次会一直往上叠：模糊只留给固定的顶栏/输入台
-            blur={false}
             style={{
               border: `1px solid ${active
                 ? theme.palette.primary.main

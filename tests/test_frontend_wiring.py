@@ -1246,26 +1246,29 @@ def test_reading_region_shows_the_chosen_chunk_source_text():
 # ---- 性能预算（2026-10-24） -----------------------------------------------
 
 
-def test_list_cards_do_not_pay_for_live_backdrop_blur():
-    """列表卡不做实时模糊，滚动时暂停极光。
+def test_liquid_glass_stays_real_but_aurora_pauses_on_scroll():
+    """列表卡必须是**真玻璃**：性能手段不能拿材质换。
 
-    模糊成本 ∝ 面积 × 数量，列表又会随数据线性增长（证据、对话轮次、
-    知识库）。实测检索页 10 张卡时，去掉卡片模糊后帧间隔 p50 从
-    ~117ms 降到 ~50ms；极光在滚动的每一帧都要被重新模糊一次。
-    顶栏、输入台、对话框这类固定少量的面仍保留模糊。
+    2026-10-24 曾把证据卡/对话轮次/知识库卡的实时模糊关掉、改用近白底，
+    帧数确实翻倍，但观感直接塌成一张白卡片——用户的原话是"液态玻璃
+    完全丢失"。已回退。现在的手段是：极光滚动时暂停（背景静下来）、
+    屏幕外列表项 `content-visibility: auto` 不参与布局绘制、
+    系统要求降低透明度时全站降级。
     """
     for name in ("ui/EvidenceList.tsx", "ui/ChatThread.tsx", "views/KbList.tsx"):
         src = read(SRC / name)
-        assert "blur={false}" in src, f"{name} 里的列表卡还在实时模糊"
+        assert "<GlassPanel" in src, f"{name} 的列表卡不是玻璃面板"
+        assert "blur={false}" not in src,             f"{name} 又把列表卡的实时模糊关掉了（会塌成白卡片）"
 
     glass = read(UI / "glass.tsx")
-    assert "lg-glass-flat-blur" in glass, "GlassPanel 没有提供关模糊的开关"
     assert "useAuroraPause" in glass, "极光没有随滚动暂停"
+    assert "lg-glass-flat-blur" not in glass, "关模糊的开关已被证明会毁掉玻璃观感"
 
     css = read(UI / "glass.css")
-    for rule in (".lg-aurora--paused", ".lg-glass-flat-blur",
-                 "prefers-reduced-transparency"):
-        assert rule in css, f"glass.css 缺少 {rule}"
+    assert ".lg-aurora--paused" in css, "glass.css 缺少极光暂停规则"
+    assert "prefers-reduced-transparency" in css, "缺少降低透明度的降级"
+    assert "lg-glass-flat-blur" not in css, "flat-blur 样式已被回退，别再出现"
+    assert ".lg-cv-auto" in css, "屏幕外列表项没有 content-visibility"
 
 
 def test_streaming_answer_is_isolated_from_page_state():
